@@ -1,11 +1,27 @@
 # Build artifacts
 /build/
+/bin/
+/dist/
+
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
 
 # Go
-*.exe
 *.test
 *.out
 *.prof
+coverage.*
+
+# Go workspace
+go.work
+go.work.sum
+
+# Dependencies
+vendor/
 
 # Env / secrets
 .env
@@ -15,4 +31,7 @@
 
 # OS / editor
 .DS_Store
+Thumbs.db
 *.swp
+.idea/
+.vscode/

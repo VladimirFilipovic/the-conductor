@@ -9,12 +9,12 @@ environment, and service.
 Flags:
   --yes   skip the confirmation prompt`
 
-func cmdDown(args []string) int {
+func cmdDown(args []string) error {
 	rest, ctx := extractTarget(args)
 	fs := newFlagSet("down", downUsage)
 	yes := fs.Bool("yes", false, "skip confirmation")
-	if code := parse(fs, rest); code != contParse {
-		return code
+	if err := fs.Parse(rest); err != nil {
+		return err
 	}
 	if err := ctx.require(true, true, true); err != nil {
 		return usageErr(downUsage, err.Error())

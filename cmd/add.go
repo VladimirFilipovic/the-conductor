@@ -12,15 +12,15 @@ Flags:
   --image IMG      base image for a --service (skip the build step)
   --repo URL       source repo for a --service (default: current directory)`
 
-func cmdAdd(args []string) int {
+func cmdAdd(args []string) error {
 	rest, ctx := extractTarget(args)
 	fs := newFlagSet("add", addUsage)
 	service := fs.String("service", "", "name of a code service to add")
 	database := fs.String("database", "", "type of a managed database to add")
 	image := fs.String("image", "", "base image for a code service")
 	repo := fs.String("repo", "", "source repo for a code service")
-	if code := parse(fs, rest); code != contParse {
-		return code
+	if err := fs.Parse(rest); err != nil {
+		return err
 	}
 	if err := ctx.require(true, true, false); err != nil {
 		return usageErr(addUsage, err.Error())

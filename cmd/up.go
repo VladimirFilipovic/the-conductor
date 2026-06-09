@@ -11,13 +11,13 @@ Flags:
   --ci       non-interactive: never prompt, fail fast on ambiguity
   --detach   return immediately instead of streaming the deploy`
 
-func cmdUp(args []string) int {
+func cmdUp(args []string) error {
 	rest, ctx := extractTarget(args)
 	fs := newFlagSet("up", upUsage)
 	ci := fs.Bool("ci", false, "non-interactive mode")
 	detach := fs.Bool("detach", false, "do not stream the deploy")
-	if code := parse(fs, rest); code != contParse {
-		return code
+	if err := fs.Parse(rest); err != nil {
+		return err
 	}
 	if err := ctx.require(true, true, true); err != nil {
 		return usageErr(upUsage, err.Error())
