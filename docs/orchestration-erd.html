@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ERD — Orchestration Engine for Stateless &amp; Stateful Workloads</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1d212a; --ink:#e7ebf0; --muted:#9aa4b2;
+    --line:#2a2f3a; --accent:#7c8cff; --accent2:#5ad1b0; --warn:#f0b35b; --bad:#f07a7a;
+    --mono:"SF Mono",ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+    line-height:1.55;font-size:15px}
+  .wrap{max-width:980px;margin:0 auto;padding:48px 28px 96px}
+  header.doc{border-bottom:1px solid var(--line);padding-bottom:24px;margin-bottom:8px}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--accent);margin:0 0 10px}
+  h1{font-size:30px;line-height:1.2;margin:0 0 12px;font-weight:700}
+  .meta{display:flex;flex-wrap:wrap;gap:8px 18px;color:var(--muted);font-size:13px;font-family:var(--mono)}
+  .meta b{color:var(--ink);font-weight:600}
+  h2{font-size:20px;margin:42px 0 14px;padding-top:8px;border-top:1px solid var(--line)}
+  h2 .n{font-family:var(--mono);color:var(--accent);margin-right:10px;font-size:16px}
+  h3{font-size:15px;margin:22px 0 8px;color:var(--accent2);font-family:var(--mono);letter-spacing:.02em}
+  p{margin:8px 0;color:#cfd6df}
+  ul,ol{margin:8px 0;padding-left:22px;color:#cfd6df}
+  li{margin:5px 0}
+  code{font-family:var(--mono);background:#0b0d11;border:1px solid var(--line);
+    padding:1px 6px;border-radius:5px;font-size:.86em;color:#d8def5}
+  pre{background:#0b0d11;border:1px solid var(--line);border-radius:10px;padding:16px 18px;
+    overflow:auto;font-family:var(--mono);font-size:12.5px;line-height:1.5;color:#cdd6e6}
+  .lead{font-size:16px;color:var(--muted);margin:18px 0 4px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:14px 0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:14px;font-family:var(--mono);color:var(--ink)}
+  .card.good{border-left:3px solid var(--accent2)}
+  .card.no{border-left:3px solid var(--bad)}
+  .pill{display:inline-block;font-family:var(--mono);font-size:11px;padding:2px 9px;border-radius:999px;
+    border:1px solid var(--line);color:var(--muted);margin:0 6px 6px 0;background:var(--panel2)}
+  .pill.s{border-color:#3a4a8a;color:#aeb8ff}
+  .pill.t{border-color:#2f6b5c;color:#8fe4cd}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13.5px}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--ink);font-weight:600;font-family:var(--mono);font-size:12px;
+    text-transform:uppercase;letter-spacing:.06em}
+  td{color:#cfd6df}
+  .req{font-family:var(--mono);color:var(--accent);white-space:nowrap}
+  .ascii{background:#0b0d11;border:1px solid var(--line);border-radius:10px;padding:18px;
+    overflow:auto;font-family:var(--mono);font-size:12px;line-height:1.35;color:#aeb8ff;white-space:pre}
+  .note{background:var(--panel2);border-left:3px solid var(--accent);border-radius:0 8px 8px 0;
+    padding:12px 16px;margin:16px 0;color:#cfd6df;font-size:14px}
+  .note b{color:var(--ink)}
+  footer{margin-top:48px;padding-top:18px;border-top:1px solid var(--line);color:var(--muted);font-size:12.5px}
+  a{color:var(--accent)}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:0 28px}
+  @media(max-width:720px){.grid,.two{grid-template-columns:1fr}}
+  .kbd{font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .tag-row{margin:6px 0 2px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="doc">
+  <p class="eyebrow">Engineering Requirements Document</p>
+  <h1>Orchestration Engine for Stateless &amp; Stateful Compute Workloads</h1>
+  <div class="meta">
+    <span><b>Author:</b> Vladimir Filipović</span>
+    <span><b>Status:</b> Draft / Interview pre-work</span>
+    <span><b>Date:</b> 2026-06-07</span>
+    <span><b>Scope:</b> Control-plane design + minimal runnable core</span>
+  </div>
+</header>
+
+<p class="lead">The engine that takes a user's <b>desired state</b> for a service and continuously
+reconciles it onto a fleet of machines — handling placement, deploy lifecycle, health, rollouts,
+self-healing, and the hard split between fungible <b>stateless</b> replicas and volume-pinned
+<b>stateful</b> workloads.</p>
+
+<div class="note">
+  <b>Grounding.</b> Modeled on how Railway actually runs: own bare-metal fleet (“Railway Metal”,
+  4 regions), workloads in micro-VMs/containers, <b>Temporal</b>-driven provisioning + a metal control
+  plane, BGP-unnumbered networking, zero-downtime deploys via healthcheck + overlap/drain, and volumes
+  for state. This ERD designs the <i>workload</i> orchestrator that sits above that fabric.
+</div>
+
+<h2><span class="n">1</span>Problem &amp; Context</h2>
+<p>A PaaS lets a developer push code and get a running, networked, observable service with zero infra
+work. Between "image built" and "service serving traffic" sits the orchestration engine. It must:</p>
+<ul>
+  <li>Decide <b>where</b> each workload runs across a heterogeneous multi-region bare-metal fleet (bin-packing under CPU/RAM/volume/region constraints).</li>
+  <li>Drive each deploy through a <b>lifecycle</b>: schedule → start → health-gate → shift traffic → drain old → reclaim.</li>
+  <li><b>Self-heal</b>: detect dead replicas/hosts and reconcile back to desired state.</li>
+  <li>Treat <b>stateless</b> and <b>stateful</b> workloads with fundamentally different placement &amp; rollout rules.</li>
+  <li>Be <b>declarative</b> and <b>level-triggered</b> — survive control-plane restarts, never lose track of reality.</li>
+</ul>
+
+<h2><span class="n">2</span>Goals &amp; Non-Goals</h2>
+<div class="grid">
+  <div class="card good">
+    <h4>Goals</h4>
+    <ul>
+      <li>Declarative desired-state API; continuous reconciliation.</li>
+      <li>Constraint-aware scheduler (resources, region, volume affinity, anti-affinity, spread).</li>
+      <li>Zero-downtime rollouts (overlap + drain) with automatic rollback on failed health gate.</li>
+      <li>Correct stateful handling: single-writer volume guarantee, controlled migration.</li>
+      <li>Self-healing on replica + host failure; safe host drain.</li>
+      <li>Crash-safe control plane (durable state, idempotent workflows).</li>
+    </ul>
+  </div>
+  <div class="card no">
+    <h4>Non-Goals (v1)</h4>
+    <ul>
+      <li>The build pipeline (assume an image/OCI artifact already exists).</li>
+      <li>L7 ingress / TLS / DNS internals (assume a routing mesh + service discovery hook).</li>
+      <li>Autoscaling policy engine (expose hooks; ship fixed replica counts first).</li>
+      <li>Multi-cloud / cross-region replication of <i>data</i> (volume = single region in v1).</li>
+      <li>Billing, quotas, auth (assume an upstream API gateway).</li>
+    </ul>
+  </div>
+</div>
+
+<h2><span class="n">3</span>Domain Model</h2>
+<table>
+  <tr><th>Entity</th><th>Meaning</th></tr>
+  <tr><td class="req">Service</td><td>User-facing unit. Has a spec: image, env, replicas, resources, volume?, region, networking.</td></tr>
+  <tr><td class="req">Deployment</td><td>An immutable instance of a Service spec at a point in time. Rollouts create a new Deployment; old one drains.</td></tr>
+  <tr><td class="req">Replica (Task)</td><td>One running instance of a Deployment on one Host. The atom the scheduler places.</td></tr>
+  <tr><td class="req">Host (Node)</td><td>A machine in the fleet. Reports capacity, region, labels, health; runs a local <b>Agent</b>.</td></tr>
+  <tr><td class="req">Volume</td><td>Durable block storage. Bound to a region+host; gives a workload its "stateful" identity.</td></tr>
+  <tr><td class="req">Allocation</td><td>Scheduler's decision: Replica → Host binding, with a reason + resource reservation.</td></tr>
+</table>
+<p>Each entity stores <b>desired</b> vs <b>observed</b> state. The reconciler's whole job is closing that gap.</p>
+
+<h2><span class="n">4</span>Stateless vs Stateful — the core distinction</h2>
+<div class="grid">
+  <div class="card">
+    <h4><span class="pill s">stateless</span></h4>
+    <ul>
+      <li>Replicas are <b>fungible</b> — any host with capacity works.</li>
+      <li>Scale = add/remove replicas freely; spread across hosts/regions.</li>
+      <li>Rollout: <b>create new, then destroy old</b> (surge). Cheap, parallel.</li>
+      <li>Host failure → just reschedule elsewhere.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4><span class="pill t">stateful</span></h4>
+    <ul>
+      <li>Replica is <b>pinned</b> to its Volume's host (data has gravity).</li>
+      <li><b>Single-writer</b> invariant: never two writers on one volume.</li>
+      <li>Rollout: <b>stop old, then start new</b> on same host (recreate), or orchestrated volume hand-off. Brief downtime unless replicated.</li>
+      <li>Host failure → can't "just reschedule"; needs volume reattach/restore + fencing.</li>
+    </ul>
+  </div>
+</div>
+<div class="note"><b>Design consequence:</b> placement and rollout strategy are <i>policy objects keyed on
+<code>stateful: bool</code></i>. Same reconciler, two strategies. This is the single most important
+modeling decision and the thing I'd demo live.</div>
+
+<h2><span class="n">4b</span>Provisioning &amp; scaling stateful workloads</h2>
+<p>Adding a stateful workload is <b>volume-first</b>: the data exists before the replica, and the
+disk's location — not the scheduler's free choice — decides where the replica runs.</p>
+
+<div class="ascii">
+ USER: add service "pg"  stateful  volume=10GB  region=us-west
+        │
+        ▼
+ 1. PROVISION VOLUME     scheduler picks a host with disk capacity in us-west
+    vol-abc → { host:A, region:us-west, size:10GB, lease:none }
+        │                the volume now has an IDENTITY and a LOCATION
+        ▼
+ 2. PLACE REPLICA        NOT free — replica is PINNED to host A (where vol-abc lives)
+        │                filter rule §6: "host must hold the bound volume"
+        ▼
+ 3. ACQUIRE LEASE        replica takes a single-writer lease on vol-abc
+    vol-abc.lease = pg-0  ← no one else may mount it read-write  (anti split-brain)
+        │
+        ▼
+ 4. ATTACH + MOUNT + START   container mounts vol-abc at /data, then boots
+        │
+        ▼
+ 5. HEALTH-GATE → ACTIVE  + STABLE identity (pg-0.internal) so peers/clients find THIS one
+</div>
+
+<p>Three things differ from stateless, each one line:</p>
+<ul>
+  <li><b>Placement is determined, not chosen</b> — once the volume exists, the replica must go where the volume is.</li>
+  <li><b>Single-writer lease</b> (step 3) — the safety invariant; stops two replicas ever writing the same disk (corruption).</li>
+  <li><b>Stable identity</b> — a fixed name (<code>pg-0</code>), not a slot behind a load balancer, so clients/peers address a <i>specific</i> instance.</li>
+</ul>
+
+<h3>Scaling — the part people get wrong</h3>
+<p>You <b>cannot</b> add interchangeable copies like stateless — each instance needs its <i>own</i> data.
+Scaling stateful = <b>N distinct instances, each with its own volume and stable name</b>
+(<code>pg-0</code>, <code>pg-1</code>, …) — what Kubernetes calls a <i>StatefulSet</i>.</p>
+<div class="note"><b>Key boundary:</b> the orchestrator does <b>not</b> replicate data — it only guarantees
+<i>stable identity</i> + <i>stable volume binding</i> per instance. <b>Replication is the app's job</b>
+(Postgres streaming, Raft, etc.). Most stateful workloads run as <b>singletons</b>
+(<code>replicas=1</code>); HA lives inside the app via leader election. So "add a stateful workload"
+usually = provision 1 volume + run 1 pinned, named replica.</div>
+
+<h3>The fork that decides the failure story: where does the disk live?</h3>
+<table>
+  <tr><th>Backing</th><th>Add / fail-over behavior</th></tr>
+  <tr><td>Local NVMe (disk physically in host A)</td><td>Fast, but <b>truly pinned</b>. Host A dies → <b>can't reschedule</b>; wait for A to return or restore from snapshot/backup. Maximum data gravity.</td></tr>
+  <tr><td>Networked / replicated block storage</td><td>Volume can <b>detach from A, reattach to B</b>. Host death → <b>fence the dead host's lease, wait for it to expire, then reattach</b> elsewhere. Survives host death; slower &amp; more complex.</td></tr>
+</table>
+<p>This choice dictates §8's failure handling: local disk → "wait/restore"; networked → "reattach after
+fence." Either way, <b>never reattach while the old writer might still hold the lease.</b></p>
+<p style="color:var(--muted);font-size:13px">Railway: volumes are bound to a region; <code>railwayapp/vol-unpacker</code>
+literally unpacks a tarball <i>into</i> a Railway volume — how they seed volume data.</p>
+
+<h3>Volume resize — coordinate, don't implement</h3>
+<p>The orchestrator <b>owns <code>volume.size</code> as a desired-state field</b> and reconciles drift,
+but <b>delegates the actual grow to a storage driver</b> behind an interface — the same seam as the
+runtime (don't implement Firecracker) and network (don't implement Envoy).</p>
+<pre>type VolumeStore interface {
+    Provision(spec) (Volume, error)
+    Attach(v, host) error
+    Detach(v) error
+    Resize(v, newSizeGB) error   // ← grow block device + extend filesystem; provider-specific
+}</pre>
+<ul>
+  <li><b>Grow-only, in-place</b> — unlike most fields (create/destroy to converge), resize mutates an
+  existing resource. So the reconciler special-cases it: <code>desired.size &gt; actual.size → Resize</code>;
+  <code>desired.size &lt; actual.size → reject</code> (shrinking risks data loss).</li>
+  <li><b>Online &amp; coupled to the running replica</b> — it happens while the workload holds the
+  single-writer lease; "grow device" then "extend FS" is a two-step with its own failure modes → a good
+  fit for a small durable workflow (retry/rollback).</li>
+  <li><b>v1 scope:</b> model the field + the <code>Resize</code> hook (<code>FakeVolumeStore</code> just
+  bumps a number); real device/FS growth is delegated and out-of-scope — exactly like networking.</li>
+</ul>
+<div class="note"><b>Mechanism vs policy.</b> <i>Resizing</i> is mechanism (engine coordinates, driver
+executes). <i>Auto-growing at 80% disk</i> is policy — a separate controller that patches
+<code>volume.size</code>, same as an autoscaler patches <code>replicas</code> (§2 Non-Goals). The engine
+stays policy-agnostic; any client (human, GitOps, autoscaler) drives it by patching desired state.</div>
+
+<h2><span class="n">5</span>Architecture</h2>
+<div class="ascii">
+                         ┌───────────────────────────────────────────┐
+   user / CLI / API ───► │  API + Desired-State Store  (Postgres)      │
+                         │  Service / Deployment / Volume specs        │
+                         └───────────────┬─────────────────────────────┘
+                                         │ watch / notify
+                         ┌───────────────▼─────────────────────────────┐
+                         │            CONTROL PLANE                     │
+                         │                                              │
+                         │  ┌─────────────┐   ┌──────────────────────┐ │
+                         │  │ Reconciler  │──►│ Scheduler            │ │
+                         │  │ (level-     │   │ filter → score →     │ │
+                         │  │  triggered) │   │ bind (bin-pack)      │ │
+                         │  └─────┬───────┘   └──────────────────────┘ │
+                         │        │ emits desired Allocations           │
+                         │  ┌─────▼───────────────────────────────────┐ │
+                         │  │ Rollout Orchestrator (Temporal workflow)│ │
+                         │  │ start→healthgate→shift→drain→reclaim    │ │
+                         │  └─────┬───────────────────────────────────┘ │
+                         └────────┼─────────────────────────────────────┘
+                                  │ gRPC desired-task stream  ▲ status/heartbeat
+                         ┌────────▼──────────┐      ┌─────────┴─────────┐
+                         │ Host Agent (node) │ ...  │ Host Agent (node) │
+                         │ runs micro-VM/    │      │ pulls image,      │
+                         │ container, mounts │      │ reports health    │
+                         │ volume, healthck  │      │                   │
+                         └───────────────────┘      └───────────────────┘
+                              DATA PLANE  (bare-metal fleet, N regions)
+</div>
+
+<h3>Components</h3>
+<table>
+  <tr><th>Component</th><th>Responsibility</th><th>Notes</th></tr>
+  <tr><td class="req">API + State Store</td><td>Accept desired specs; durable source of truth.</td><td>Postgres. Every change = a row; observed state written back.</td></tr>
+  <tr><td class="req">Reconciler</td><td>Compare desired vs observed; compute needed Replicas; drive convergence.</td><td><b>Level-triggered</b> control loop — recomputes from full state, not from events. Idempotent.</td></tr>
+  <tr><td class="req">Scheduler</td><td>Bind unplaced Replicas to Hosts.</td><td>Three-phase: <b>filter</b> (hard constraints) → <b>score</b> (bin-pack/spread) → <b>bind</b> (atomic reserve).</td></tr>
+  <tr><td class="req">Rollout Orchestrator</td><td>Sequence a deploy's state machine durably.</td><td>Temporal workflow — survives restarts, retries activities, guarantees forward progress / rollback.</td></tr>
+  <tr><td class="req">Host Agent</td><td>Execute desired tasks locally; report truth.</td><td>Pulls image, runs micro-VM/container, mounts volume, runs healthcheck, heartbeats. The only thing that touches reality.</td></tr>
+</table>
+
+<h2><span class="n">★</span>Reference: how Railway actually does this</h2>
+<p>Railway has publicly described its orchestrator. It is a <b>custom, Temporal-based engine — explicitly
+not Kubernetes</b>. This ERD is modeled on it; the mapping is near 1:1. Below is their real flow from
+<code>railway up</code> to a running, scaled, self-healing service.</p>
+
+<div class="note">
+  <b>What is Temporal?</b> A <b>durable workflow engine</b>. You write a long multi-step process as
+  ordinary code (a <i>workflow</i>) that calls side-effecting steps (<i>activities</i>). Temporal
+  persists every completed step, so if the server crashes mid-deploy it <b>replays history and resumes
+  exactly where it left off</b> — variables intact. Failed steps auto-retry; timers/timeouts/cancel are
+  built in. A deploy <i>is</i> a durable workflow — that's why Railway (and this ERD) build on it
+  instead of hand-rolling a crash-safe state machine.
+</div>
+
+<div class="ascii">
+  railway up / git push
+        │
+        ▼
+  ┌─────────────────────────┐   Temporal workflow #1
+  │ BUILD workflow          │   build Docker image → push to internal registry
+  └───────────┬─────────────┘
+              ▼
+  ┌─────────────────────────┐   Temporal workflow #2  (the orchestration brain)
+  │ DEPLOY workflow         │   decides: which region? which "stacker" (host)?
+  │                         │   how many replicas?  → fans out sub-workflows
+  └───────────┬─────────────┘
+              ▼
+  ┌─────────────────────────┐   one SUB-workflow per replica
+  │ place replica on stacker│   (a "deployment instance" = repeatable copy of the spec)
+  │ assign unique IPv6      │
+  └───────────┬─────────────┘
+              ▼
+  ┌─────────────────────────┐   event-based, over gRPC, propagates in milliseconds
+  │ NETWORK CONTROL PLANE   │──► Envoy proxies (public: CDS round-robin LB)
+  │ (custom Go)             │──► DNS servers   (private: AAAA records, random IPv6 pick)
+  └───────────┬─────────────┘
+              ▼
+   healthcheck endpoints gate "ready"  ──►  replica crashes? network FAILS OVER automatically
+</div>
+
+<div class="note"><b>Fan-out / fan-in.</b> The deploy workflow doesn't start replicas one-by-one — it
+<b>fans out one sub-workflow per replica</b> (parallel), then <b>fans in</b> (waits for all healthy)
+before completing. Railway, under <i>"🎻 Orchestrating replicas"</i>: <i>"To start the deployment of
+the replica containers on the selected stackers, we then trigger sub-workflows. These are basically
+multiple copies of the same one we had in place before introducing replicas."</i> — i.e. they scaled
+the original single-deploy workflow to N replicas by running N copies in parallel, no rewrite.</div>
+
+<h3>Railway's terms ↔ this ERD</h3>
+<table>
+  <tr><th>Railway (real)</th><th>This ERD</th><th>Same idea?</th></tr>
+  <tr><td>Temporal deploy workflow</td><td>Rollout Orchestrator (§5)</td><td>✅ identical choice</td></tr>
+  <tr><td>"Deployment instance"</td><td>Deployment (§3)</td><td>✅ repeatable spec snapshot</td></tr>
+  <tr><td>"Stacker"</td><td>Host / Node (§3)</td><td>✅ the machine a replica lands on</td></tr>
+  <tr><td>Sub-workflow per replica</td><td>Replica / Task (§3)</td><td>✅ one running copy</td></tr>
+  <tr><td>Network control plane (Go, gRPC)</td><td>Routing mesh hook (Non-Goals §2)</td><td>◐ they built it; I stub it</td></tr>
+  <tr><td>Healthcheck-gated readiness</td><td>HEALTH_CHECK state (§7)</td><td>✅ same gate</td></tr>
+  <tr><td>Auto network failover</td><td>Self-healing (§8)</td><td>✅ desired&gt;observed → replace</td></tr>
+</table>
+<p><b>Open-source primitives</b> (the engine itself is closed): <code>railwayapp/cgroups</code> (resource
+limits), <code>railwayapp/vol-unpacker</code> (volumes), <code>railpack</code>/<code>nixpacks</code>/<code>buildkit</code>
+(the build step). Source: Railway, <i>"So You Think You Can Scale?"</i> &amp; the Railway Metal posts.</p>
+
+<h2><span class="n">6</span>Scheduler Design</h2>
+<p>Per unplaced Replica:</p>
+<ol>
+  <li><b>Filter</b> (hard): host region == required region; free CPU/RAM ≥ request; if stateful → host must hold the bound Volume (or be able to attach it); anti-affinity not violated; host <code>Ready</code>.</li>
+  <li><b>Score</b> (soft): bin-pack (prefer fuller hosts to reduce fragmentation) <i>vs</i> spread (prefer emptier hosts for HA) — weighted; penalize hosts already running a replica of the same Deployment (spread).</li>
+  <li><b>Bind</b>: atomically reserve resources in the store (optimistic concurrency / version check) so two scheduling passes can't double-book a host.</li>
+</ol>
+<div class="note"><b>Stateful shortcut:</b> a stateful replica with an existing bound volume skips scoring —
+its placement is <i>determined</i> by where the volume lives. The scheduler only chooses freely on
+<i>first</i> placement or during an explicit migration.</div>
+
+<h2><span class="n">7</span>Deployment Lifecycle (state machine)</h2>
+<div class="ascii">
+ PENDING ─► SCHEDULING ─► STARTING ─► HEALTH_CHECK ─┬─► HEALTHY ─► SHIFTING ─► ACTIVE
+    │                                               │                            │
+    │                                          (fail/timeout)                  (superseded)
+    ▼                                               ▼                            ▼
+ FAILED ◄──────────────── ROLLBACK ◄────────────────┘                        DRAINING ─► REAPED
+</div>
+<h3>Stateless rollout (surge)</h3>
+<ol>
+  <li>Schedule + start <code>N</code> new replicas <b>alongside</b> old.</li>
+  <li>Gate on healthcheck (configurable path/timeout). Fail ⇒ tear down new, keep old, mark <code>FAILED</code>.</li>
+  <li>Shift traffic to new (update routing mesh / service discovery).</li>
+  <li><code>SIGTERM</code> old replicas, allow <code>drain_seconds</code> for in-flight requests, then reap.</li>
+</ol>
+<h3>Stateful rollout (recreate / hand-off)</h3>
+<ol>
+  <li>Stop old writer, <b>fence</b> it (revoke volume lease) — enforce single-writer.</li>
+  <li>Detach volume; attach to new replica's host (same host in the common case).</li>
+  <li>Start new replica, health-gate, then admit traffic. Rollback = re-attach to old image.</li>
+</ol>
+
+<h2><span class="n">8</span>Self-Healing &amp; Failure Handling</h2>
+<table>
+  <tr><th>Failure</th><th>Detection</th><th>Response</th></tr>
+  <tr><td>Replica crash</td><td>Agent reports exit / failed healthcheck</td><td>Reconciler sees desired&gt;observed → reschedule (stateless) or restart-in-place (stateful).</td></tr>
+  <tr><td>Host down</td><td>Missed heartbeats &gt; threshold → host <code>NotReady</code></td><td>Stateless replicas rescheduled elsewhere. Stateful: <b>wait</b> for fence/lease expiry before reattaching volume elsewhere — never split-brain.</td></tr>
+  <tr><td>Control-plane restart</td><td>—</td><td>State in Postgres + Temporal histories; reconciler rebuilds from observed truth, in-flight rollouts resume. No work lost.</td></tr>
+  <tr><td>Planned host drain</td><td>Operator marks host <code>Draining</code></td><td>Cordoned (no new placements); replicas evicted respecting a per-Deployment <b>max-unavailable</b> budget.</td></tr>
+</table>
+
+<h3>Partial starts — "what if only 2 of 3 come up?"</h3>
+<p>This is why the engine is <b>level-triggered</b>, not "fire 3 and await all" (which loses track if
+the control plane dies after firing 2). The loop doesn't care <i>why</i> there are 2 — next tick it
+sees <code>desired=3, actual=2</code> and starts the missing one. The only real decisions are
+<i>why</i> the third failed and <i>whether the deploy completes</i>:</p>
+<table>
+  <tr><th>Cause / phase</th><th>Response</th></tr>
+  <tr><td>Unschedulable (no host capacity)</td><td>Replica stays <code>PENDING</code>, retried each tick; surface <code>insufficient capacity</code>. Comes up when room appears.</td></tr>
+  <tr><td>Started but crash-loops / fails health</td><td>Restart with <b>backoff + max-retries cap</b> (<code>restartPolicyType</code> / <code>maxRetries</code>). After cap → mark replica <code>FAILED</code>, stop hammering.</td></tr>
+  <tr><td><b>Initial deploy / rollout</b>, fan-in waiting</td><td>Wait for all healthy up to <code>healthcheckTimeout</code>. Timeout → deploy <code>FAILED</code>; for a rollout, <b>auto-rollback</b> to old version (never half-cut-over).</td></tr>
+  <tr><td><b>Steady state</b>, 1 of 3 dies</td><td>Serve on the healthy 2 (<b>degraded, not down</b>) while the loop restarts the 3rd. Router only sees healthy replicas → failover is automatic.</td></tr>
+</table>
+<div class="note"><b>Two correctness rules:</b> (1) <b>Idempotency</b> — key on replica <i>identity</i>
+("start r3 of d-v2") and record what's started, or a post-crash retry spawns a 4th. (2) <b>Don't fail
+the whole deploy on one slow replica</b> — gate on <code>minReady</code> + timeout, not strict
+all-or-nothing forever.</div>
+
+<h2><span class="n">9</span>Key Interfaces</h2>
+<pre>// Desired-state spec (user-facing)
+Service {
+  id, image, env{}, region, replicas:int,
+  resources { cpu_millis, mem_mb },
+  stateful:bool, volume?: { id, size_gb },
+  healthcheck { path, timeout_s }, drain_seconds:int
+}
+
+// Control plane → Agent (gRPC, desired-task stream)
+rpc Reconcile(stream DesiredTaskSet) returns (stream TaskStatus)
+DesiredTask { replica_id, image, env, resources, volume_mount? }
+TaskStatus  { replica_id, phase: STARTING|HEALTHY|EXITED|FAILED, host_id, ts }
+
+// Scheduler core
+schedule(replica, []Host) -> Allocation{ host_id, reason } | Unschedulable{reason}</pre>
+
+<h3>Networking — stubbed behind an interface</h3>
+<p>Railway built a real custom Go control plane (assign IPv6 → push to network control plane →
+propagate to Envoy + DNS over gRPC, ms-fast). For v1 we model the <b>behavior</b>, not the wires —
+same trick as the runtime. <code>FakeNetwork</code> is an in-memory table; a <code>DockerRuntime</code>
+variant could return real container IPs.</p>
+<pre>type Network interface {
+    Register(svc, replica, addr)   // replica now reachable (assign fake IPv6/addr)
+    Deregister(svc, replica)        // remove from rotation
+    Resolve(svc) []addr             // healthy endpoints — service discovery
+    Route(svc) (addr, error)        // pick one — round-robin / random
+}</pre>
+<p>Only two behaviors matter — and each buys a whole feature for free:</p>
+<ul>
+  <li><b>Health-gated registration</b> — call <code>Register</code> only when a replica turns
+  <code>HEALTHY</code>, <code>Deregister</code> the instant it fails/drains. ⇒ <code>Resolve</code> only
+  ever returns healthy endpoints, so killing a replica <b>fails traffic over automatically</b>, no extra code.</li>
+  <li><b>Atomic swap on rollout</b> — register all v2, then deregister all v1 in one move. ⇒ traffic
+  <b>shifts</b> from v1's endpoint set to v2's (step 4 of §7). Rollback = swap back.</li>
+</ul>
+<p>Maps to Railway 1:1: <code>Register</code>/<code>Deregister</code> ↔ orchestrator pushing/removing
+an IPv6 in the network control plane; <code>Resolve</code>/<code>Route</code> ↔ Envoy CDS round-robin +
+DNS AAAA records.</p>
+
+<h2><span class="n">10</span>Tech Choices</h2>
+<div class="tag-row">
+  <span class="pill">Go — control plane &amp; agent</span>
+  <span class="pill">Postgres — desired/observed state</span>
+  <span class="pill">Temporal — durable rollout workflows</span>
+  <span class="pill">gRPC streaming — CP ⇄ agent</span>
+  <span class="pill">micro-VM / OCI — isolation</span>
+  <span class="pill">level-triggered reconcile</span>
+</div>
+<p><b>Why durable workflows (Temporal):</b> a rollout is a long, multi-step, failure-prone process that
+must survive control-plane crashes and never get stuck half-done. Encoding it as a workflow gives
+retries, timeouts, and exactly-once-ish semantics for free — Railway uses Temporal for exactly this
+class of problem in their metal provisioning.</p>
+
+<h2><span class="n">11</span>Milestones — what I'll actually build</h2>
+<table>
+  <tr><th>M</th><th>Deliverable</th><th>Demo</th></tr>
+  <tr><td class="req">M0</td><td>Domain model + in-memory state store + fake hosts.</td><td>Create a Service, see Replicas appear.</td></tr>
+  <tr><td class="req">M1</td><td>Scheduler: filter→score→bind with resource accounting.</td><td>Place 5 replicas across 3 hosts; show bin-pack vs spread.</td></tr>
+  <tr><td class="req">M2</td><td>Reconciler loop + simulated agent (start/health/crash).</td><td>Kill a replica → watch it reschedule (self-heal).</td></tr>
+  <tr><td class="req">M3</td><td>Stateless surge rollout with health gate + rollback.</td><td>Deploy v2; bad healthcheck auto-rolls-back to v1.</td></tr>
+  <tr><td class="req">M4</td><td>Stateful: volume pinning + single-writer fence + recreate rollout.</td><td>Show replica follows its volume; host death waits for lease.</td></tr>
+</table>
+<div class="note"><b>For the 60-min interview:</b> bring M0–M3 working (the take-home). Use the 5–50m
+"building" block to live-extend into <b>M4 (stateful)</b> — that's the richest discussion surface and
+shows how the design absorbs a hard new requirement without rewrites.</div>
+
+<h2><span class="n">12</span>Open Questions (bring to the team)</h2>
+<ul>
+  <li>How does Railway enforce the single-writer invariant on volumes today — lease/fence at storage layer or orchestrator?</li>
+  <li>Is the scheduler centralized, or per-region with a global view? How do you avoid scheduling contention at 60k+ deploys/hr?</li>
+  <li>Where's the line between the orchestrator and the routing mesh for traffic-shifting during rollout?</li>
+  <li>Live-migration of stateful workloads across hosts — supported, or always recreate?</li>
+  <li>How much of this is Temporal-driven vs a bespoke reconcile loop?</li>
+</ul>
+
+<h2><span class="n">13</span>Public Interface — how a user drives the engine</h2>
+<p>The user never talks to the orchestrator directly. They use a <b>CLI that is a thin client over a
+GraphQL API</b> (this mirrors Railway exactly — their CLI does no orchestration; it only expresses
+intent, and the backend's workflows do the work). The interface is <b>declarative</b>: you don't
+command actions, you <b>commit a new desired state</b> and the reconciler closes the gap.</p>
+
+<table>
+  <tr><th>Command</th><th>What it does</th><th>Which field of desired-state it patches</th></tr>
+  <tr><td class="req">up [path]</td><td>tarball code → build → new deployment</td><td><code>image</code> (+ creates service if new)</td></tr>
+  <tr><td class="req">scale r=N --region X</td><td>set replica count per region</td><td><code>replicas</code>, <code>region</code></td></tr>
+  <tr><td class="req">redeploy</td><td>re-run latest spec as a new deployment</td><td>none (same spec, new instance)</td></tr>
+  <tr><td class="req">restart</td><td>recreate replicas</td><td>none (bounce)</td></tr>
+  <tr><td class="req">down</td><td>remove latest deployment</td><td><code>replicas</code> → 0</td></tr>
+  <tr><td class="req">variable set</td><td>change env vars</td><td><code>env</code></td></tr>
+  <tr><td class="req">volume add</td><td>attach durable disk (stateful)</td><td><code>volume</code></td></tr>
+  <tr><td class="req">logs / status / metrics</td><td>read observed state</td><td>— (read-only)</td></tr>
+</table>
+
+<h3>The key principle: a deploy is a "commit" to desired state</h3>
+<p>Railway's <code>scale</code> sends a mutation literally named <code>EnvironmentPatchCommit</code> —
+a <b>patch + a commit message</b>:</p>
+<pre>EnvironmentPatchCommit {
+  environment_id,
+  patch,                            // multiRegionConfig: { region → numReplicas }
+  commit_message: "Scale my-api",   // ← desired-state changes are versioned, like git
+}</pre>
+<p>You don't say "start 2 containers." You <b>commit</b> a new desired state, and the orchestrator
+reconciles reality to it. This is the same model as §14 below — just made auditable.</p>
+
+<h3>How <code>up</code> knows which state to achieve</h3>
+<p><code>up</code> uploads <i>code</i>, not a replica count — so the target state is <b>merged from three
+layers</b>:</p>
+<ol>
+  <li><b>Context</b> — which service/environment (from the local link file or <code>--service</code>/<code>--environment</code>). Picks <i>whose</i> state to patch.</li>
+  <li><b>Config-as-code</b> — <code>railway.json</code> / <code>railway.toml</code> in the repo: the declarative deploy spec.</li>
+  <li><b>Stored settings</b> — env vars, volumes, and anything not overridden above (or set by a prior <code>scale</code>).</li>
+</ol>
+<pre>// railway.json — the declarative desired state committed alongside code
+{
+  "build":  { "builder": "RAILPACK" },
+  "deploy": {
+    "startCommand": "node server.js",
+    "numReplicas": 2,
+    "region": "us-west1",
+    "healthcheckPath": "/health",
+    "healthcheckTimeout": 300,
+    "restartPolicyType": "ON_FAILURE"
+  }
+}</pre>
+<p><code>up</code> changes only the <b>image</b> axis (builds a new image, makes a new <i>deployment
+instance</i>); <code>replicas</code>/<code>region</code> come from this file or a prior <code>scale</code>;
+<code>env</code> from stored settings. The orchestrator reconciles to the merged whole.</p>
+
+<div class="note"><b>Design enhancement (worth pitching live):</b> because every change is a
+<i>commit</i> to desired state, <b>rollback is just re-applying the previous commit</b>. Make the
+desired-state store append-only &amp; versioned — you get auditability, instant rollback, and a clean
+answer to "what changed and when" for free.</div>
+
+<div class="note"><b>Mental model:</b> desired state is one object —
+<code>{ image, replicas, region, env, volume, healthcheck }</code>. Different commands patch different
+fields; <b>one</b> reconcile loop drives them all. That's why "deploy", "scale", "rollback", and
+"self-heal" aren't separate subsystems — they're the same loop reacting to a patched field.</div>
+
+<h2><span class="n">14</span>Worked Example — the engine driving the runtime</h2>
+<p>This shows <b>how the pieces actually interact at runtime</b>: the engine never touches a machine
+directly — it only ever calls the <code>Runtime</code> interface, and only ever <i>reacts</i> to what
+the runtime reports back. Everything below is one continuous control loop.</p>
+
+<h3>The contract (what the engine is allowed to do)</h3>
+<pre>type Runtime interface {
+    Start(r ReplicaSpec) (Handle, error)  // launch one copy of a replica
+    Stop(h Handle, drainSecs int) error    // SIGTERM, wait drainSecs, then kill
+    Health(h Handle) Phase                  // STARTING | HEALTHY | EXITED | FAILED
+    List() []Running                        // ground truth: what's actually alive
+}
+// FakeRuntime (demo) = goroutines.   DockerRuntime (flex) = containers.
+// The engine code is IDENTICAL for both — that's the whole point of the interface.</pre>
+
+<h3>The loop that uses it (the reconciler)</h3>
+<pre>for {                                          // runs forever, every ~1s
+    desired := store.DesiredReplicas(service)  // e.g. "I want 3 of v2"
+    actual  := runtime.List()                  // what's really running
+
+    // 1. MISSING — desired but not running → schedule + Start
+    for _, r := range missing(desired, actual) {
+        host := scheduler.Place(r, fleet)       // filter → score → bind
+        if host == nil { log("unschedulable"); continue }
+        h, _ := runtime.Start(r.On(host))       // ← engine touches reality HERE
+        store.Record(r, host, h)
+    }
+
+    // 2. SURPLUS — running but no longer wanted (old version) → drain + Stop
+    for _, h := range surplus(desired, actual) {
+        runtime.Stop(h, service.DrainSeconds)   // graceful
+    }
+
+    // 3. UNHEALTHY — running but failed its check → forget it; next loop re-Starts
+    for _, h := range actual {
+        if runtime.Health(h) == FAILED { store.Forget(h) }
+    }
+
+    sleep(1 * time.Second)
+}</pre>
+<div class="note"><b>Why this is the whole design:</b> there's no "deploy()" command that imperatively
+marches through steps. You just <b>change <code>desired</code></b> (3→5 replicas, v1→v2) and the same
+loop closes the gap. Scale, deploy, rollback, self-heal are all <i>the same code path</i> reacting to a
+changed goal or a changed reality.</div>
+
+<h3>Trace: deploy → scale → crash → self-heal</h3>
+<p>What you'd literally see in the chaos CLI, tick by tick:</p>
+<div class="ascii">
+ t0  USER:  deploy my-api  replicas=2  region=us-west
+     engine: desired=2 actual=0  → schedule r1→hostA, r2→hostB
+             runtime.Start(r1@hostA)   runtime.Start(r2@hostB)
+     runtime: r1 STARTING   r2 STARTING
+
+ t1  engine: runtime.Health(r1)=STARTING  Health(r2)=STARTING   (wait)
+ t2  runtime: r1 HEALTHY   r2 HEALTHY      → service ACTIVE, traffic flows
+
+ t3  USER:  scale my-api  replicas=3
+     engine: desired=3 actual=2  → schedule r3→hostA (has room)
+             runtime.Start(r3@hostA)
+ t4  runtime: r3 HEALTHY                   → now 3/3
+
+ t5  USER:  kill replica r2                💥  (chaos injection)
+     runtime: r2 EXITED
+ t6  engine: List() returns [r1,r3]  desired=3 actual=2
+             → MISSING r-new  → schedule r4→hostB
+             runtime.Start(r4@hostB)        ← self-heal, nobody asked
+ t7  runtime: r4 HEALTHY                   → back to 3/3 automatically
+
+ t8  USER:  deploy my-api:v2               (rollout)
+     engine: start v2 replicas ALONGSIDE v1   (surge)
+             runtime.Start(v2-a) Start(v2-b) Start(v2-c)
+ t9  runtime: v2 all HEALTHY               → shift traffic to v2
+     engine: v1 replicas now SURPLUS
+             runtime.Stop(r1,30) Stop(r3,30) Stop(r4,30)   ← drain 30s
+ t10 runtime: v1 drained & gone            → rollout complete, 3/3 on v2
+</div>
+
+<h3>How a human interacts with it</h3>
+<table>
+  <tr><th>You do this…</th><th>…which changes…</th><th>…and the loop does</th></tr>
+  <tr><td><code>deploy svc r=3</code></td><td>desired = 3 of v1</td><td>schedules + <code>Start</code> ×3</td></tr>
+  <tr><td><code>scale svc r=5</code></td><td>desired = 5</td><td><code>Start</code> ×2 more</td></tr>
+  <tr><td><code>deploy svc:v2</code></td><td>desired = 3 of <b>v2</b></td><td>Start v2, health-gate, drain v1</td></tr>
+  <tr><td><code>kill replica</code> (chaos)</td><td>actual drops</td><td>notices gap → <code>Start</code> a replacement</td></tr>
+  <tr><td>nothing</td><td>nothing</td><td>loops, confirms desired==actual, sleeps</td></tr>
+</table>
+<p>You only ever express <b>intent</b>. The runtime only ever reports <b>truth</b>. The engine is the
+thin, relentless loop that makes truth match intent — and that loop is the whole product.</p>
+
+<h2><span class="n">A</span>Appendix — Isolation models (container / microVM / unikernel)</h2>
+<p>The orchestrator is <b>isolation-agnostic</b> — it drives the <code>Runtime</code> interface, so the
+choice below is a data-plane decision, not an engine one. But for a <i>multi-tenant</i> platform running
+untrusted code, it's the most important infra call, because it's fundamentally a <b>security</b>
+decision. The difference between the models comes down to one word: <b>kernel</b>.</p>
+
+<div class="ascii">
+ CONTAINER              NORMAL microVM           UNIKERNEL (Unikraft)
+ ┌────────┐             ┌──────────────┐         ┌──────────────┐
+ │  app   │             │     app      │         │ app + only   │  ← app & needed OS
+ └────────┘             │ guest Linux  │         │ the OS libs  │    libs compiled into
+ ══ shared host ══      │ (kernel+user)│         │ it needs     │    ONE image, single
+ ══   kernel    ══      └──────────────┘         └──────────────┘    address space
+ ════ hardware ═══       hypervisor (KVM/Firecracker) ═══════════
+                        ════════════ host hardware ══════════════
+
+ container = a process wearing a costume (still the HOST kernel underneath)
+ microVM   = a real separate computer, shrunk until it boots like a process
+ unikernel = the app IS the machine — no OS/app split at all
+</div>
+
+<table>
+  <tr><th></th><th>Container</th><th>microVM (Firecracker)</th><th>Unikernel</th><th>Full VM</th></tr>
+  <tr><td>Own kernel?</td><td>❌ shares host</td><td>✅ guest Linux</td><td>✅ (lib-OS, no split)</td><td>✅</td></tr>
+  <tr><td>Isolation boundary</td><td>kernel (weak)</td><td>hardware (strong)</td><td>hardware (strong)</td><td>hardware (strong)</td></tr>
+  <tr><td>Boot time</td><td>~ms</td><td>~125 ms</td><td>~4–15 ms</td><td>seconds</td></tr>
+  <tr><td>Memory overhead</td><td>~none</td><td>~5 MB</td><td>tiny</td><td>100s of MB</td></tr>
+  <tr><td>Density / host</td><td>thousands</td><td>thousands</td><td>thousands+</td><td>dozens</td></tr>
+  <tr><td>Trade-off</td><td>fast/cheap, weak wall</td><td>VM safety at ~container speed</td><td>fastest + smallest attack surface, but single-process &amp; must recompile to add OS features</td><td>strongest, heaviest</td></tr>
+  <tr><td>Used by</td><td>classic PaaS, k8s default</td><td><b>Railway builds</b>, AWS Lambda/Fargate, Fly</td><td>Unikraft Cloud (on modified Firecracker)</td><td>EC2-style "whole box"</td></tr>
+</table>
+
+<p>The core tension is a three-way: <b>isolation strength ↔ density/startup speed ↔ operational
+complexity</b>. Multi-tenant platforms push toward the microVM/unikernel end — a shared-kernel
+container escape would be a cross-customer breach. <b>For this take-home:</b> back the
+<code>Runtime</code> with goroutines (demo) or Docker (flex); name Firecracker microVMs as the
+production choice. Railway confirms the pattern — their build cells are Firecracker micro-VMs on
+bare-metal "stackers", with <code>cgroups</code> for limits.</p>
+
+<footer>
+  <p>Sources informing the design (Railway's real architecture):
+    <a href="https://blog.railway.com/p/launch-week-01-horizontal-scaling">So You Think You Can Scale? (the orchestrator flow)</a> ·
+    <a href="https://docs.railway.com/railway-metal">Railway Metal docs</a> ·
+    <a href="https://blog.railway.com/p/data-center-build-part-two">Zero-Touch Bare Metal at Scale</a> ·
+    <a href="https://blog.railway.com/p/new-builder-scale-big">Counting to 3 — new builder at scale</a> ·
+    <a href="https://docs.railway.com/deployments/healthchecks">Healthchecks</a> ·
+    <a href="https://docs.railway.com/guides/healthchecks">Zero-downtime deploys (overlap/drain)</a>.
+  </p>
+  <p>Isolation appendix sources:
+    <a href="https://unikraft.cloud/how-it-works/">Unikraft Cloud — how it works</a> ·
+    <a href="https://unikraft.cloud/blog/death-to-cold-starts/">Death to Cold Starts (unikernels on modified Firecracker)</a> ·
+    <a href="https://firecracker-microvm.github.io/">Firecracker microVM</a>.
+  </p>
+  <p class="kbd">ERD draft — orchestration engine pre-work · concise by design.</p>
+</footer>
+
+</div>
+</body>
+</html>
