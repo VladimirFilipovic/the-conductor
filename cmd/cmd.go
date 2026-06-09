@@ -1,20 +1,10 @@
-// Package cmd is the Conductor CLI dispatcher: Run parses argv, switches on the
-// first token, and calls the matching subcommand. Each subcommand lives in its
-// own file and follows the same shape — parse flags, resolve the
-// (project, environment, service) target, then hand off to the orchestration
-// engine.
-//
-// Unlike Railway there is no `link` command and no on-disk link file: every
-// command resolves its target from flags (--project/-p, --environment/-e,
-// --service/-s) or the matching CONDUCTOR_* environment variables. See
-// context.go.
 package cmd
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
-	"strconv"
 )
 
 // version is set by the linker (`-ldflags "-X conductor/cmd.version=..."`)
@@ -52,7 +42,6 @@ Other:
   --version, -v        Print the version
 `
 
-// Run is the entry point invoked from main. It returns a process exit code.
 func Run(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprint(os.Stderr, usage)
@@ -68,37 +57,50 @@ func Run(args []string) int {
 		return 0
 	}
 
-	rest := args[1:]
+	cmdArgs := args[1:]
+	var err error
 	switch args[0] {
 	case "init":
-		return cmdInit(rest)
+		err = cmdInit(cmdArgs)
 	case "add":
-		return cmdAdd(rest)
+		err = cmdAdd(cmdArgs)
 	case "environment", "env":
-		return cmdEnvironment(rest)
+		err = cmdEnvironment(cmdArgs)
 	case "service":
-		return cmdService(rest)
+		err = cmdService(cmdArgs)
 	case "up", "deploy":
-		return cmdUp(rest)
+		err = cmdUp(cmdArgs)
 	case "down":
-		return cmdDown(rest)
+		err = cmdDown(cmdArgs)
 	case "scale":
-		return cmdScale(rest)
+		err = cmdScale(cmdArgs)
 	case "volume":
-		return cmdVolume(rest)
+		err = cmdVolume(cmdArgs)
 	case "status":
-		return cmdStatus(rest)
+		err = cmdStatus(cmdArgs)
+	default:
+		fmt.Fprintf(os.Stderr, "conductor: unknown command %q\n\n%s", args[0], usage)
+		return 2
 	}
-
-	fmt.Fprintf(os.Stderr, "conductor: unknown command %q\n\n%s", args[0], usage)
-	return 2
+	return exitCode(err)
 }
 
-// --- shared helpers ---------------------------------------------------------
-
-// contParse is a sentinel returned by parse to mean "parsing succeeded, keep
-// going" — distinct from any real exit code.
-const contParse = -1
+func exitCode(err error) int {
+	var uerr *usageError
+	switch {
+	case err == nil:
+		return 0
+	case errors.Is(err, flag.ErrHelp):
+		return 0
+	case errors.As(err, &uerr):
+		fmt.Fprintf(os.Stderr, "conductor: %s\n", err)
+		return 2
+	default:
+		// A flag-parse error: the flag package already wrote the message and
+		// usage to stderr, so just signal a bad invocation.
+		return 2
+	}
+}
 
 // newFlagSet builds a flag set that prints the command's usage on error
 // instead of the default noisy dump.
@@ -108,39 +110,26 @@ func newFlagSet(name, usageText string) *flag.FlagSet {
 	return fs
 }
 
-// parse runs fs.Parse and maps the result to an exit code, or contParse to
-// continue. flag.ContinueOnError already prints the error followed by usage.
-func parse(fs *flag.FlagSet, args []string) int {
-	switch err := fs.Parse(args); err {
-	case nil:
-		return contParse
-	case flag.ErrHelp:
-		return 0
-	default:
-		return 2
-	}
-}
+// usageError marks a bad invocation. exitCode prints it (with the conductor
+// prefix) and returns 2. Flag-parse errors are not wrapped in it because the
+// flag package prints those itself.
+type usageError struct{ text string }
 
-// usageErr prints a one-line message plus the command usage and returns the
-// "bad invocation" exit code (2).
-func usageErr(usageText, msg string) int {
-	fmt.Fprintf(os.Stderr, "conductor: %s\n\n%s\n", msg, usageText)
-	return 2
-}
+func (e *usageError) Error() string { return e.text }
 
-// itoa is a small convenience wrapper around strconv.Itoa for building detail
-// strings.
-func itoa(n int) string { return strconv.Itoa(n) }
+func usageErr(usageText, msg string) error {
+	return &usageError{text: fmt.Sprintf("%s\n\n%s", msg, usageText)}
+}
 
 // engineTODO is the seam where a fully implemented command opens a client to
 // the orchestration engine, sends a desired-state mutation (or reads observed
 // state), and lets the reconcile loop converge. The interface layer stops here
 // and just echoes the resolved target.
-func engineTODO(action string, c Context, detail string) int {
+func engineTODO(action string, c Context, detail string) error {
 	fmt.Printf("→ %s  %s\n", action, c)
 	if detail != "" {
 		fmt.Printf("  %s\n", detail)
 	}
 	fmt.Println("  (not implemented — would patch desired state and reconcile)")
-	return 0
+	return nil
 }

@@ -12,11 +12,11 @@ Patch the desired per-region replica counts for a service. Each argument is a
 region=count pair, e.g. "us-west1=3 eu-west=2". The reconcile loop bin-packs
 the new counts onto the fleet. Requires project, environment, and service.`
 
-func cmdScale(args []string) int {
+func cmdScale(args []string) error {
 	rest, ctx := extractTarget(args)
 	fs := newFlagSet("scale", scaleUsage)
-	if code := parse(fs, rest); code != contParse {
-		return code
+	if err := fs.Parse(rest); err != nil {
+		return err
 	}
 	if err := ctx.require(true, true, true); err != nil {
 		return usageErr(scaleUsage, err.Error())

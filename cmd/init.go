@@ -5,12 +5,12 @@ const initUsage = `conductor init [name] [--name NAME]
 Create a new project and its default "production" environment. The project
 name may be given as a positional argument or via --name.`
 
-func cmdInit(args []string) int {
+func cmdInit(args []string) error {
 	rest, _ := extractTarget(args)
 	fs := newFlagSet("init", initUsage)
 	name := fs.String("name", "", "project name (else the first positional arg)")
-	if code := parse(fs, rest); code != contParse {
-		return code
+	if err := fs.Parse(rest); err != nil {
+		return err
 	}
 
 	project := *name

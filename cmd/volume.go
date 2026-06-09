@@ -1,5 +1,7 @@
 package cmd
 
+import "strconv"
+
 const volumeUsage = `conductor volume <subcommand> [flags]
 
 Manage a service's persistent volumes. A volume follows the service across
@@ -13,7 +15,7 @@ Subcommands:
   update --size GB [--mount PATH]  resize a volume (live)
   rm --mount PATH            detach and delete a volume`
 
-func cmdVolume(args []string) int {
+func cmdVolume(args []string) error {
 	rest, ctx := extractTarget(args)
 	if len(rest) == 0 {
 		return usageErr(volumeUsage, "a subcommand is required")
@@ -23,8 +25,8 @@ func cmdVolume(args []string) int {
 	fs := newFlagSet("volume "+sub, volumeUsage)
 	mount := fs.String("mount", "", "mount path inside the container")
 	size := fs.Int("size", 0, "volume size in GB (update only)")
-	if code := parse(fs, subArgs); code != contParse {
-		return code
+	if err := fs.Parse(subArgs); err != nil {
+		return err
 	}
 	if err := ctx.require(true, true, true); err != nil {
 		return usageErr(volumeUsage, err.Error())
@@ -42,7 +44,8 @@ func cmdVolume(args []string) int {
 		if *size <= 0 {
 			return usageErr(volumeUsage, "volume update requires --size > 0")
 		}
-		detail := "size → " + itoa(*size) + "GB"
+
+		detail := "size → " + strconv.Itoa(*size) + "GB"
 		if *mount != "" {
 			detail = "mount " + *mount + "  " + detail
 		}

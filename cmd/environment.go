@@ -7,11 +7,11 @@ With no argument, list the project's environments. With a name, select it as
 the active environment for subsequent commands. With "new", create a fresh
 environment by cloning the project's services. Requires a project.`
 
-func cmdEnvironment(args []string) int {
+func cmdEnvironment(args []string) error {
 	rest, ctx := extractTarget(args)
 	fs := newFlagSet("environment", environmentUsage)
-	if code := parse(fs, rest); code != contParse {
-		return code
+	if err := fs.Parse(rest); err != nil {
+		return err
 	}
 	if err := ctx.require(true, false, false); err != nil {
 		return usageErr(environmentUsage, err.Error())
