@@ -17,7 +17,7 @@ Usage:
   conductor <command> [args] [--project P --environment E --service S]
 
 Project lifecycle:
-  init [name]              Create a new project (+ default "production" env)
+  init -n NAME             Create a new project (+ default "production" env)
   add                      Add a service or database to the project
   environment [name]       List, select, or create environments
   service [name]           List or select services
@@ -96,9 +96,8 @@ func exitCode(err error) int {
 		fmt.Fprintf(os.Stderr, "conductor: %s\n", err)
 		return 2
 	default:
-		// A flag-parse error: the flag package already wrote the message and
-		// usage to stderr, so just signal a bad invocation.
-		return 2
+		fmt.Fprintf(os.Stderr, "conductor: %s\n", err)
+		return 1
 	}
 }
 

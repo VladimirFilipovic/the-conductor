@@ -627,6 +627,88 @@ changed goal or a changed reality.</div>
 <p>You only ever express <b>intent</b>. The runtime only ever reports <b>truth</b>. The engine is the
 thin, relentless loop that makes truth match intent — and that loop is the whole product.</p>
 
+<h2><span class="n">15</span>The Chaos CLI — the simulation harness</h2>
+<p>Everywhere above I trace behavior "in the chaos CLI." This is what it is: <b>not part of the
+orchestrator — the test harness wrapped around it.</b> It's a wind tunnel. The engine + reconcile loop
+(§14) is the real system under test; the CLI plays the <i>two roles the real world would otherwise
+play</i> and narrates the loop so a human can watch desired vs observed converge.</p>
+
+<div class="grid">
+  <div class="card good">
+    <h4>Role 1 — the user / API</h4>
+    <ul>
+      <li>Turns typed commands (<code>deploy</code>, <code>scale</code>, <code>kill</code>) into
+      <b>desired-state patches</b> on the store — exactly the §13 commands, minus GraphQL.</li>
+      <li>It never commands actions; it only <b>commits intent</b>. The loop does the rest.</li>
+    </ul>
+  </div>
+  <div class="card good">
+    <h4>Role 2 — the compute layer</h4>
+    <ul>
+      <li>Provides the <code>FakeRuntime</code> (§14) — goroutines pretending to be containers, so
+      no Docker/Firecracker needed to demo the logic.</li>
+      <li><b>Chaos injection</b> reaches <i>past</i> the engine and mutates the runtime's truth
+      directly (<code>kill r2</code> → <code>r2 EXITED</code>) — the engine never asked.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="ascii">
+   ┌──────────────────── CHAOS CLI  (simulator / harness) ────────────────────┐
+   │                                                                          │
+   │   typed cmds ──► patch desired state ──►┌──────────┐                      │
+   │   deploy/scale/down/var                 │  ENGINE  │  ◄── reconcile loop  │  REAL
+   │                                         │ (§14)    │      (system under   │
+   │                                         └────┬─────┘       test)          │
+   │                          Start/Stop/Health/List │                         │
+   │                                         ┌────▼─────────┐                  │
+   │   kill r2  ──► (chaos) ─────────────────►│ FakeRuntime  │                 │  FAKE
+   │   mutate truth directly, behind engine's │ (goroutines) │                 │  (CLI supplies)
+   │   back                                   └──────────────┘                 │
+   │                                                                          │
+   │   each tick prints:  desired / observed / decisions  ◄── observability    │
+   └──────────────────────────────────────────────────────────────────────────┘
+   The intelligence lives in the ENGINE. The CLI feeds it inputs (incl. failures) and shows the loop react.
+</div>
+
+<h3>How a human drives it — the tick loop</h3>
+<p>Two input channels, one loop. Each <b>tick</b> the engine does one pass of §14: observe
+(<code>List()</code>) → diff (desired − observed) → act on the gap (<code>Start</code>/<code>Stop</code>/forget)
+→ print. A human either:</p>
+<ul>
+  <li><b>Steps it</b> — <code>tick</code> / press enter to advance one tick at a time and read each
+  decision. Best for <i>explaining the algorithm</i> (the t0…t10 trace in §14 is exactly this).</li>
+  <li><b>Free-runs it</b> — auto-tick every <code>~1s</code>; you just type commands + chaos while it
+  self-heals live.</li>
+</ul>
+
+<table>
+  <tr><th>Command</th><th>Channel</th><th>Effect</th></tr>
+  <tr><td class="req">deploy svc r=N</td><td>desired state</td><td>set desired = N of current version → loop <code>Start</code>s the gap</td></tr>
+  <tr><td class="req">scale svc r=N</td><td>desired state</td><td>patch <code>replicas</code> → loop adds/drains the delta</td></tr>
+  <tr><td class="req">deploy svc:v2</td><td>desired state</td><td>patch <code>image</code> → surge v2, health-gate, drain v1</td></tr>
+  <tr><td class="req">down svc</td><td>desired state</td><td><code>replicas</code> → 0 → loop drains all</td></tr>
+  <tr><td class="req">kill r2 💥</td><td><b>runtime truth</b></td><td>chaos: force <code>EXITED</code> behind the engine → loop notices gap → replaces</td></tr>
+  <tr><td class="req">fail-host hostA 💥</td><td><b>runtime truth</b></td><td>chaos: stop heartbeats → host <code>NotReady</code> → reschedule (stateless) / fence (stateful, §8)</td></tr>
+  <tr><td class="req">tick</td><td>clock</td><td>advance one reconcile pass (step mode)</td></tr>
+  <tr><td class="req">inspect / ps</td><td>read-only</td><td>dump desired vs observed + per-replica phase</td></tr>
+</table>
+
+<div class="note"><b>Why the harness is the proof, not the product.</b> Because the engine only talks to
+the <code>Runtime</code> <i>interface</i>, the CLI's <code>FakeRuntime</code> and a future
+<code>DockerRuntime</code> are interchangeable — <b>same engine, swap the backend</b>. And chaos
+injection is the cleanest possible demo of correctness: <code>kill r2</code> (t5) drives the engine
+down the <i>identical code path</i> as a user-requested <code>scale</code> (t3) — the loop doesn't care
+<i>why</i> observed ≠ desired, it just closes the gap. That equivalence is the whole declarative,
+level-triggered claim made visible. The "tracking what's going on" is just the loop dumping its state
+each tick; turn the printing off and the same engine runs in production.</div>
+
+<h3>Maps to the milestones</h3>
+<p>The CLI <i>is</i> the demo surface for §11: M0 <code>inspect</code> shows replicas appear · M1
+<code>deploy r=5</code> shows bin-pack vs spread · <b>M2 <code>kill</code> is the headline — self-heal
+live</b> · M3 <code>deploy:v2</code> with a bad health gate auto-rolls-back · M4 <code>fail-host</code>
+shows a stateful replica wait for its volume lease.</p>
+
 <h2><span class="n">A</span>Appendix — Isolation models (container / microVM / unikernel)</h2>
 <p>The orchestrator is <b>isolation-agnostic</b> — it drives the <code>Runtime</code> interface, so the
 choice below is a data-plane decision, not an engine one. But for a <i>multi-tenant</i> platform running
@@ -666,20 +748,112 @@ container escape would be a cross-customer breach. <b>For this take-home:</b> ba
 production choice. Railway confirms the pattern — their build cells are Firecracker micro-VMs on
 bare-metal "stackers", with <code>cgroups</code> for limits.</p>
 
+<h2><span class="n">B</span>Scheduler — decisions, rationale &amp; interview prep</h2>
+<p>The placement story is the richest discussion surface (§6, §12). These are the calls made and
+<i>why</i>, plus the questions an interviewer is likely to push on and crisp answers.</p>
+
+<h3>Decisions &amp; why</h3>
+<table>
+  <tr><th>Decision</th><th>Why</th></tr>
+  <tr>
+    <td><b>Centralized scheduler</b> — one <i>active</i> writer of placements, one elected leader per region.</td>
+    <td>Makes the <b>bind</b> the single writer of allocations ⇒ no double-booking <i>without</i> distributed locking. Reconcilers stay dumb gap-detectors. Industry norm (k8s, Borg).</td>
+  </tr>
+  <tr>
+    <td><b>Reconciliation parallel, sharded per project-service.</b></td>
+    <td>Each service owns disjoint rows (<code>deployments</code>/<code>replicas</code>) ⇒ no cross-service contention; parallelism buys throughput. The <i>same</i> service reconciled twice at once is prevented by a per-key workqueue (one in-flight per service) + a per-service lease when the control plane is HA.</td>
+  </tr>
+  <tr>
+    <td><b>Split reconciler from scheduler</b> — reconciler emits an <i>unplaced</i> replica; the central scheduler does filter→score→bind.</td>
+    <td>Funnels all competition for shared host capacity into the one writer; reconcilers never choose a host. This is the Kubernetes controller/scheduler split.</td>
+  </tr>
+  <tr>
+    <td><b>Optimistic concurrency on the bind</b> (<code>revision</code> CAS / <code>SELECT … FOR UPDATE</code> on the host row).</td>
+    <td>Safety net for when &gt;1 actor mutates placement (multiple schedulers, or scheduler + self-heal firing together). With a single regional scheduler it's belt-and-braces, not load-bearing — but cheap insurance.</td>
+  </tr>
+  <tr>
+    <td><b>Leader election for the scheduler (HA).</b></td>
+    <td>Multiple processes, one active. Removes the SPOF; failover in seconds; only <i>new</i> placements pause during the gap — running workloads are untouched because scheduling is off the data path.</td>
+  </tr>
+  <tr>
+    <td><b>Scale out by sharding the pool</b> — one scheduler <i>per region</i>, never multiple schedulers over one shared pool.</td>
+    <td>Preserves "single writer per resource pool" (a us-west and an eu placement never contend) while scaling horizontally. How Google (many Borg cells) and k8s (many clusters) actually scale.</td>
+  </tr>
+  <tr>
+    <td><b>Level-triggered reconcile</b> (not edge-triggered).</td>
+    <td>Recompute from a full-state snapshot each tick; can't lose track if a status event is missed or reordered. Transient <code>desired ≠ observed</code> is normal — converge, don't react per-event.</td>
+  </tr>
+</table>
+
+<div class="note"><b>"Leader election" = multiple Go processes, one active.</b> You run N replicas of the
+control-plane binary (ideally on separate nodes, separate failure domains). They race to acquire a
+<b>lease</b>; the winner is the active scheduler, the rest idle as hot standbys and keep trying. If the
+leader's process dies or fails to renew, the lease expires and a standby takes over. In this stack the
+lease is cheap to build on what we already have: a Postgres advisory lock / a <code>leases</code> row
+with a TTL heartbeat, or a singleton Temporal workflow (workflow-id dedup gives "exactly one"
+for free). Goroutines <i>within</i> one process don't count — a single process dying takes them all,
+so they give parallelism, not availability.</div>
+
+<h3>Likely interview questions &amp; answers</h3>
+<table>
+  <tr><th>Question</th><th>Answer</th></tr>
+  <tr>
+    <td>Is a single scheduler realistic in production?</td>
+    <td><b>Yes</b> — one <i>active</i> leader + hot standbys is the norm. k8s runs ~5k nodes / 150k pods on one active kube-scheduler; a Borg cell (~10k machines) on one Borgmaster. Our 60k deploys/hr ≈ <b>17/s</b> — trivial. Scale by regional sharding, not by stacking schedulers.</td>
+  </tr>
+  <tr>
+    <td>Isn't one scheduler a SPOF?</td>
+    <td>No — leader election; a standby grabs the lease in seconds; running workloads are unaffected. Separate <b>availability</b> (leader election) from <b>throughput</b> (fast scheduler + sharding); conflating them is the mistake.</td>
+  </tr>
+  <tr>
+    <td>Do parallel per-service reconcilers compete?</td>
+    <td>Not on their own state — sharding by service partitions the rows. They compete only for shared <b>host capacity</b>, and that's resolved by routing every bind through the single scheduler. Same-service double-run is stopped by a per-key workqueue + lease.</td>
+  </tr>
+  <tr>
+    <td>You bin-pack on state that's stale a moment later — race?</td>
+    <td>Scoring is a <i>hint</i> on a possibly-stale read; the <b>bind</b> is an atomic CAS that re-checks fit inside a txn (loser re-scores). Reality is the final judge — a failed <code>Start</code> just means the next tick reschedules. Idempotency keyed on replica identity (<i>"r3 of d-v2"</i>) makes retries safe.</td>
+  </tr>
+  <tr>
+    <td>Edge- or level-triggered, and why?</td>
+    <td><b>Level.</b> Recompute from current full state each pass; robust to missed/reordered events. Edge-triggered loses track the moment one event is dropped.</td>
+  </tr>
+  <tr>
+    <td>How would you scale past one scheduler on a single pool?</td>
+    <td>The <b>Omega</b> model: many schedulers over <b>shared state</b> with lock-free <b>optimistic concurrency</b> — that's where the bind CAS becomes load-bearing. <b>Nomad</b> ships this (parallel scheduler workers + a plan queue serialized at the leader). Hyperscale only.</td>
+  </tr>
+  <tr>
+    <td>What's different about scheduling stateful workloads?</td>
+    <td>Placement is <b>determined</b>, not chosen — the replica must go where its volume lives; the single-writer lease enforces it; the scheduler skips scoring once the volume is bound (§4, §6).</td>
+  </tr>
+</table>
+
+<h2><span class="n">C</span>References</h2>
+
+<h3>Railway — the real architecture this ERD models</h3>
+<ul>
+  <li><a href="https://blog.railway.com/p/launch-week-01-horizontal-scaling">So You Think You Can Scale?</a> — the orchestrator flow: Temporal deploy workflow, stackers, fan-out sub-workflows per replica.</li>
+  <li><a href="https://docs.railway.com/railway-metal">Railway Metal</a> — the bare-metal fleet (4 regions) the orchestrator sits on.</li>
+  <li><a href="https://blog.railway.com/p/data-center-build-part-two">Zero-Touch Bare Metal at Scale</a>.</li>
+  <li><a href="https://blog.railway.com/p/new-builder-scale-big">Counting to 3 — new builder at scale</a>.</li>
+  <li><a href="https://docs.railway.com/deployments/healthchecks">Healthchecks</a> · <a href="https://docs.railway.com/guides/healthchecks">Zero-downtime deploys (overlap/drain)</a>.</li>
+</ul>
+
+<h3>Scheduling &amp; cluster management (§B)</h3>
+<ul>
+  <li><a href="https://research.google/pubs/omega-flexible-scalable-schedulers-for-large-compute-clusters/">Omega: flexible, scalable schedulers for large compute clusters</a> (<a href="https://people.csail.mit.edu/malte/pub/papers/2013-eurosys-omega.pdf">PDF</a>) — multiple schedulers over shared state with lock-free optimistic concurrency; the escape hatch past a single scheduler.</li>
+  <li><a href="https://research.google/pubs/large-scale-cluster-management-at-google-with-borg/">Large-scale cluster management at Google with Borg</a> (<a href="https://research.google.com/pubs/archive/43438.pdf">PDF</a>) — centralized Borgmaster per cell (~10k machines); the single-active-scheduler precedent.</li>
+  <li><a href="https://developer.hashicorp.com/nomad/docs/concepts/scheduling/scheduling">Nomad — Scheduling</a> · <a href="https://developer.hashicorp.com/nomad/docs/concepts/scheduling/how-scheduling-works">How scheduling works</a> — Omega-inspired optimistic concurrency in production (parallel workers + plan queue serialized at the leader).</li>
+  <li><a href="https://www.infoq.com/articles/scaling-containers-hashicorp-nomad/">Scheduling 1M containers with Nomad</a>.</li>
+  <li><a href="https://kubernetes.io/docs/concepts/scheduling-eviction/kube-scheduler/">Kubernetes — kube-scheduler</a> · <a href="https://kubernetes.io/docs/concepts/cluster-administration/coordinated-leader-election/">Coordinated Leader Election</a> — single active scheduler, HA via a lease.</li>
+</ul>
+
+<h3>Isolation / runtime (Appendix A)</h3>
+<ul>
+  <li><a href="https://unikraft.cloud/how-it-works/">Unikraft Cloud — how it works</a> · <a href="https://unikraft.cloud/blog/death-to-cold-starts/">Death to Cold Starts</a> — unikernels on modified Firecracker.</li>
+  <li><a href="https://firecracker-microvm.github.io/">Firecracker microVM</a> — the microVM isolation Railway's build cells use.</li>
+</ul>
+
 <footer>
-  <p>Sources informing the design (Railway's real architecture):
-    <a href="https://blog.railway.com/p/launch-week-01-horizontal-scaling">So You Think You Can Scale? (the orchestrator flow)</a> ·
-    <a href="https://docs.railway.com/railway-metal">Railway Metal docs</a> ·
-    <a href="https://blog.railway.com/p/data-center-build-part-two">Zero-Touch Bare Metal at Scale</a> ·
-    <a href="https://blog.railway.com/p/new-builder-scale-big">Counting to 3 — new builder at scale</a> ·
-    <a href="https://docs.railway.com/deployments/healthchecks">Healthchecks</a> ·
-    <a href="https://docs.railway.com/guides/healthchecks">Zero-downtime deploys (overlap/drain)</a>.
-  </p>
-  <p>Isolation appendix sources:
-    <a href="https://unikraft.cloud/how-it-works/">Unikraft Cloud — how it works</a> ·
-    <a href="https://unikraft.cloud/blog/death-to-cold-starts/">Death to Cold Starts (unikernels on modified Firecracker)</a> ·
-    <a href="https://firecracker-microvm.github.io/">Firecracker microVM</a>.
-  </p>
   <p class="kbd">ERD draft — orchestration engine pre-work · concise by design.</p>
 </footer>
 
