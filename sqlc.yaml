@@ -1,0 +1,13 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    # Reuse the goose migrations as the schema source of truth — no duplicate
+    # DDL for sqlc to drift from.
+    schema: "db/migrations"
+    queries: "db/queries"
+    gen:
+      go:
+        package: "db"
+        out: "internal/storage/db"
+        sql_package: "database/sql"
+        emit_json_tags: true
