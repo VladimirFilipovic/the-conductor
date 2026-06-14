@@ -7,13 +7,15 @@ replicas, regions, health, and the active deploy. Requires a project; narrows
 to an environment and service when those are supplied.`
 
 func cmdStatus(args []string) error {
-	rest, ctx := extractTarget(args)
 	fs := newFlagSet("status", statusUsage)
-	if err := fs.Parse(rest); err != nil {
+	var t Target
+	addTargetFlags(fs, &t)
+	if err := fs.parse(args); err != nil {
 		return err
 	}
-	if err := ctx.require(true, false, false); err != nil {
+	resolve(&t, true)
+	if err := t.require(false, false); err != nil {
 		return usageErr(statusUsage, err.Error())
 	}
-	return engineTODO("status", ctx, "observed vs. desired state")
+	return engineTODO("status", t, "observed vs. desired state")
 }

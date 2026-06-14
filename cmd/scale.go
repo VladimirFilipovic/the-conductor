@@ -13,12 +13,14 @@ region=count pair, e.g. "us-west1=3 eu-west=2". The reconcile loop bin-packs
 the new counts onto the fleet. Requires project, environment, and service.`
 
 func cmdScale(args []string) error {
-	rest, ctx := extractTarget(args)
 	fs := newFlagSet("scale", scaleUsage)
-	if err := fs.Parse(rest); err != nil {
+	var t Target
+	addTargetFlags(fs, &t)
+	if err := fs.parse(args); err != nil {
 		return err
 	}
-	if err := ctx.require(true, true, true); err != nil {
+	resolve(&t, true)
+	if err := t.require(true, true); err != nil {
 		return usageErr(scaleUsage, err.Error())
 	}
 	if fs.NArg() == 0 {
@@ -36,5 +38,5 @@ func cmdScale(args []string) error {
 		}
 		pairs = append(pairs, a)
 	}
-	return engineTODO("scale", ctx, "replicas: "+strings.Join(pairs, " "))
+	return engineTODO("scale", t, "replicas: "+strings.Join(pairs, " "))
 }
