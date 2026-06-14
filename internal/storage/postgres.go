@@ -16,9 +16,9 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-var ErrNotFound = errors.New("storage: not found")
+var ErrNotFound = errors.New("not found")
 
-var ErrExists = errors.New("storage: already exists")
+var ErrExists = errors.New("already exists")
 
 // uniqueViolation reports whether err is a Postgres unique-constraint failure
 // (SQLSTATE 23505), letting Insert paths map a duplicate to ErrExists without a
@@ -60,7 +60,7 @@ func NewPostgresClient(ctx context.Context, dsn string) (*PostgresClient, error)
 		return nil, fmt.Errorf("storage: open: %w", err)
 	}
 	if err := pool.PingContext(ctx); err != nil {
-		pool.Close()
+		_ = pool.Close()
 		return nil, fmt.Errorf("storage: connect: %w", err)
 	}
 	return &PostgresClient{querier: querier{queries: db.New(pool)}, pool: pool}, nil
@@ -78,7 +78,7 @@ func (c *PostgresClient) WithTx(ctx context.Context, fn func(project.Store) erro
 		return fmt.Errorf("storage: begin tx: %w", err)
 	}
 	// No-op after a successful Commit; guarantees rollback on error or panic.
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	if err := fn(querier{queries: c.queries.WithTx(tx)}); err != nil {
 		return err
@@ -100,6 +100,17 @@ func (q querier) CreateProject(ctx context.Context, name string) (db.Project, er
 	return p, nil
 }
 
+func (q querier) GetProject(ctx context.Context, name string) (db.Project, error) {
+	p, err := q.queries.GetProject(ctx, name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.Project{}, fmt.Errorf("project %q: %w", name, ErrNotFound)
+	}
+	if err != nil {
+		return db.Project{}, err
+	}
+	return p, nil
+}
+
 func (q querier) CreateEnvironment(ctx context.Context, projectName string, name string) (db.Environment, error) {
 	e, err := q.queries.CreateEnvironment(ctx, db.CreateEnvironmentParams{ProjectName: projectName, Name: name})
 	if uniqueViolation(err) {
@@ -107,6 +118,17 @@ func (q querier) CreateEnvironment(ctx context.Context, projectName string, name
 	}
 	if fkViolation(err) {
 		return db.Environment{}, fmt.Errorf("project %q: %w", projectName, ErrNotFound)
+	}
+	if err != nil {
+		return db.Environment{}, err
+	}
+	return e, nil
+}
+
+func (q querier) GetEnvironment(ctx context.Context, projectName string, name string) (db.Environment, error) {
+	e, err := q.queries.GetEnvironment(ctx, db.GetEnvironmentParams{ProjectName: projectName, Name: name})
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.Environment{}, fmt.Errorf("environment %q in project %q: %w", name, projectName, ErrNotFound)
 	}
 	if err != nil {
 		return db.Environment{}, err
@@ -126,6 +148,21 @@ func (q querier) CreateService(ctx context.Context, projectName string, name str
 		return db.Service{}, err
 	}
 	return s, nil
+}
+
+func (q querier) GetService(ctx context.Context, projectName string, name string) (db.Service, error) {
+	s, err := q.queries.GetService(ctx, db.GetServiceParams{ProjectName: projectName, Name: name})
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.Service{}, fmt.Errorf("service %q in project %q: %w", name, projectName, ErrNotFound)
+	}
+	if err != nil {
+		return db.Service{}, err
+	}
+	return s, nil
+}
+
+func (q querier) ListServicesByEnvironment(ctx context.Context, projectName string, environment string) ([]db.Service, error) {
+	return q.queries.ListServicesByEnvironment(ctx, db.ListServicesByEnvironmentParams{ProjectName: projectName, Name: environment})
 }
 
 func (q querier) AddServiceToEnvironment(ctx context.Context, environmentID, serviceID uuid.UUID, source json.RawMessage) (db.EnvironmentService, error) {

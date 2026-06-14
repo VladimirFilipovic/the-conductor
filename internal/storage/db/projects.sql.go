@@ -96,3 +96,102 @@ func (q *Queries) CreateService(ctx context.Context, arg CreateServiceParams) (S
 	)
 	return i, err
 }
+
+const getEnvironment = `-- name: GetEnvironment :one
+SELECT id, project_name, name, created_at FROM environments
+WHERE project_name = $1 AND name = $2
+`
+
+type GetEnvironmentParams struct {
+	ProjectName string `json:"project_name"`
+	Name        string `json:"name"`
+}
+
+func (q *Queries) GetEnvironment(ctx context.Context, arg GetEnvironmentParams) (Environment, error) {
+	row := q.db.QueryRowContext(ctx, getEnvironment, arg.ProjectName, arg.Name)
+	var i Environment
+	err := row.Scan(
+		&i.ID,
+		&i.ProjectName,
+		&i.Name,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getProject = `-- name: GetProject :one
+SELECT name, created_at FROM projects
+WHERE name = $1
+`
+
+func (q *Queries) GetProject(ctx context.Context, name string) (Project, error) {
+	row := q.db.QueryRowContext(ctx, getProject, name)
+	var i Project
+	err := row.Scan(&i.Name, &i.CreatedAt)
+	return i, err
+}
+
+const getService = `-- name: GetService :one
+SELECT id, project_name, name, stateful, created_at FROM services
+WHERE project_name = $1 AND name = $2
+`
+
+type GetServiceParams struct {
+	ProjectName string `json:"project_name"`
+	Name        string `json:"name"`
+}
+
+func (q *Queries) GetService(ctx context.Context, arg GetServiceParams) (Service, error) {
+	row := q.db.QueryRowContext(ctx, getService, arg.ProjectName, arg.Name)
+	var i Service
+	err := row.Scan(
+		&i.ID,
+		&i.ProjectName,
+		&i.Name,
+		&i.Stateful,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const listServicesByEnvironment = `-- name: ListServicesByEnvironment :many
+SELECT s.id, s.project_name, s.name, s.stateful, s.created_at FROM services s
+JOIN environment_services es ON es.service_id = s.id
+JOIN environments e ON e.id = es.environment_id
+WHERE e.project_name = $1 AND e.name = $2
+ORDER BY s.name
+`
+
+type ListServicesByEnvironmentParams struct {
+	ProjectName string `json:"project_name"`
+	Name        string `json:"name"`
+}
+
+func (q *Queries) ListServicesByEnvironment(ctx context.Context, arg ListServicesByEnvironmentParams) ([]Service, error) {
+	rows, err := q.db.QueryContext(ctx, listServicesByEnvironment, arg.ProjectName, arg.Name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Service
+	for rows.Next() {
+		var i Service
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectName,
+			&i.Name,
+			&i.Stateful,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
