@@ -4,7 +4,9 @@ PREFIX    ?= /usr/local
 VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS   := -X conductor/cmd.version=$(VERSION)
 
-.PHONY: build run install uninstall fmt vet test tidy clean migrate migrate-down migrate-status migrate-fresh sqlc db-up db-down
+.PHONY: build run install uninstall fmt vet lint test tidy clean migrate migrate-down migrate-status migrate-fresh sqlc db-up db-down seed
+
+GOLANGCI_LINT_VERSION ?= v2.11.4
 
 # Local dev database (docker-compose). Override these in your environment to
 # point elsewhere (?= keeps your value); `export` makes them visible to every
@@ -32,6 +34,12 @@ fmt:
 
 vet:
 	go vet ./...
+
+# Run golangci-lint (install once:
+# `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)`).
+# Pass `make lint ARGS="--fix"` to auto-fix issues where supported.
+lint:
+	golangci-lint run $(ARGS)
 
 test:
 	go test ./...
@@ -66,6 +74,13 @@ migrate-fresh:
 	docker compose down -v
 	docker compose up -d --wait
 	$(GOOSE) up
+
+# Load dev fixtures into the local Postgres. Piped into the container's own psql
+# (like db-up/db-down, this targets the docker-compose database) so you don't
+# need psql installed locally. Idempotent — safe to re-run. Run after `migrate`.
+SEED_FILE := db/seeds/hosts.sql
+seed:
+	docker compose exec -T postgres psql -U conductor -d conductor < $(SEED_FILE)
 
 # Regenerate type-safe query code from queries/ against the schema in
 # migrations/ (install once: `brew install sqlc`).
