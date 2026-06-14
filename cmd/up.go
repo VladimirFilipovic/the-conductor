@@ -1,38 +1,33 @@
 package cmd
 
-const upUsage = `conductor up [path] [--ci] [--detach]
+const upUsage = `conductor up [path]
 
 Tarball the code directory (default "."), build it, and commit the result as
 the service's desired state. The reconcile loop then schedules, health-gates,
 shifts traffic, and drains the old replicas. Requires project, environment,
-and service.
-
-Flags:
-  --ci       non-interactive: never prompt, fail fast on ambiguity
-  --detach   return immediately instead of streaming the deploy`
+and service.`
 
 func cmdUp(args []string) error {
-	rest, ctx := extractTarget(args)
+	// Peel the leading [path] positional before flag parsing: stdlib flag stops
+	// at the first positional, so `up ./dir -s foo` would otherwise drop -s foo.
+	path, rest := splitSubcommand(args)
+
 	fs := newFlagSet("up", upUsage)
-	ci := fs.Bool("ci", false, "non-interactive mode")
-	detach := fs.Bool("detach", false, "do not stream the deploy")
-	if err := fs.Parse(rest); err != nil {
+	var t Target
+	addTargetFlags(fs, &t)
+	if err := fs.parse(rest); err != nil {
 		return err
 	}
-	if err := ctx.require(true, true, true); err != nil {
+	resolve(&t, true)
+	if err := t.require(true, true); err != nil {
 		return usageErr(upUsage, err.Error())
 	}
+	if fs.NArg() > 0 {
+		return usageErr(upUsage, "unexpected argument: "+fs.Arg(0)+" (path goes first: up [path])")
+	}
 
-	path := fs.Arg(0)
 	if path == "" {
 		path = "."
 	}
-	detail := "code: " + path
-	if *ci {
-		detail += "  [ci]"
-	}
-	if *detach {
-		detail += "  [detached]"
-	}
-	return engineTODO("deploy", ctx, detail)
+	return engineTODO("deploy", t, "code: "+path)
 }

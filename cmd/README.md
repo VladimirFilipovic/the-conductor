@@ -4,52 +4,81 @@
 argv, switches on the first token, and calls the matching subcommand. Each
 subcommand lives in its own file and follows the same shape:
 
-1. `extractTarget(args)` pulls the universal `--project/-p`, `--environment/-e`,
-   `--service/-s` flags out of the arg list (from any position) and merges them
-   with the `CONDUCTOR_*` environment variables into a `Context`.
-2. A per-command `flag.FlagSet` parses the command-specific flags from what's
-   left.
-3. `ctx.require(...)` validates that the needed parts of the target are present.
-4. `engineTODO(...)` is the seam where a real implementation would talk to the
-   orchestration engine. The interface layer just echoes the resolved target.
+1. `newFlagSet(name, usage)` builds a silenced `flag.FlagSet`; the command
+   registers the universal target flags (`addTargetFlags`, or the per-field
+   `addProjectFlag`/`addEnvironmentFlag`/`addServiceFlag` when it overloads one
+   of the names) plus any command-specific flags, then calls `fs.parse(args)`.
+2. `resolve(&tgt, useLink)` fills any empty target field from the `CONDUCTOR_*`
+   env vars and then, when `useLink` is true, from the folder-link file.
+3. `tgt.require(environment, service)` validates the target — project is always
+   required; environment/service are gated by the two bools.
+4. The command acts. `init`, `link`/`unlink`, and `add --service` talk to the
+   control plane (Postgres) for real; everything else still bottoms out in
+   `engineTODO(...)`, the seam where a real engine call will go.
 
-## No `link`
+`Target` (in `cmd.go`) is the resolved `(project, environment, service)` triple,
+passed explicitly as an argument. It is distinct from `context.Context`, which
+the commands use only for cancellation/deadlines when opening the store.
 
-Unlike Railway, there is **no `link` command** and no on-disk link file. Every
-command resolves its `(project, environment, service)` target purely from flags
-or environment variables. Flags always win over env vars.
+## Target resolution
 
-| Need | Flag | Env var |
-|---|---|---|
-| Project   | `--project`, `-p`     | `CONDUCTOR_PROJECT`     |
+Every command resolves its `(project, environment, service)` target from three
+tiers, highest precedence first:
+
+1. **Flags** — `--project/-p`, `--environment/-e`, `--service/-s`
+2. **Env vars** — `CONDUCTOR_PROJECT`, `CONDUCTOR_ENVIRONMENT`, `CONDUCTOR_SERVICE`
+3. **Folder link** — `.conductor/config.json`, discovered by walking up from cwd
+   (see `internal/link`); written by `link`, `init`, and the
+   `environment/service select` subcommands
+
+| Need        | Flag                  | Env var                 |
+|-------------|-----------------------|-------------------------|
+| Project     | `--project`, `-p`     | `CONDUCTOR_PROJECT`     |
 | Environment | `--environment`, `-e` | `CONDUCTOR_ENVIRONMENT` |
-| Service   | `--service`, `-s`     | `CONDUCTOR_SERVICE`     |
-| Auth token | —                    | `CONDUCTOR_TOKEN`       |
+| Service     | `--service`, `-s`     | `CONDUCTOR_SERVICE`     |
+| Auth token  | —                     | `CONDUCTOR_TOKEN`       |
+
+`link` resolves with the folder-link disabled (`useLink=false`) so an existing
+link's project can't silently satisfy a re-link.
 
 ## Commands
 
-| File | Command | Requires (P/E/S) |
-|---|---|---|
-| `init.go`        | `init [name]`             | — (creates the project) |
-| `add.go`         | `add --service/--database`| P, E |
-| `environment.go` | `environment [new] [name]`| P |
-| `service.go`     | `service [name]`          | P, E |
-| `up.go`          | `up [path]`               | P, E, S |
-| `down.go`        | `down`                    | P, E, S |
-| `scale.go`       | `scale <region=N ...>`    | P, E, S |
-| `volume.go`      | `volume <sub>`            | P, E, S |
-| `status.go`      | `status`                  | P |
+| File             | Command                                          | Requires (P/E/S) |
+|------------------|--------------------------------------------------|------------------|
+| `init.go`        | `init -n NAME`                                   | — (creates the project + links dir) |
+| `link.go`        | `link -p PROJECT [-e ENV]`                       | P |
+| `link.go`        | `unlink`                                         | — |
+| `config.go`      | `config`                                         | — (prints whatever resolves) |
+| `add.go`         | `add (--service \| --database --engine T) --name N [--image I] [--repo U]` | P, E |
+| `environment.go` | `environment [list \| create -n NAME \| select NAME]` | P |
+| `service.go`     | `service [name]`                                 | P, E |
+| `up.go`          | `up [path] [--ci] [--detach]`                    | P, E, S |
+| `down.go`        | `down [--yes]`                                   | P, E, S |
+| `scale.go`       | `scale <region=N ...>`                           | P, E, S |
+| `volume.go`      | `volume <list \| add \| update \| rm>`           | P, E, S |
+| `status.go`      | `status`                                         | P |
+
+`init` and `link` write the folder link, so subsequent commands in that
+directory can omit `-p/-e/-s`. `environment select` / `service select` update
+the environment/service pointers in the same file.
 
 ## Examples
 
 ```bash
-conductor init rxlog-platform
-conductor add --database postgres -p rxlog-platform -e production
-conductor up -p rxlog-platform -e production -s web
-conductor scale us-west1=3 -s web -p rxlog-platform -e production
-conductor volume add --mount /var/lib/postgresql/data -s postgres -p rxlog-platform -e production
+# Create a project (+ default "production" env) and link this directory to it.
+conductor init -n rxlog-platform
 
-# or drive everything from the environment
+# From here -p/-e default to the link; add a code service and a database.
+conductor add --service --name web --repo https://github.com/acme/web
+conductor add --database --engine postgres --name pg
+
+# Deploy, scale, inspect — service comes from the link or -s.
+conductor up -s web
+conductor scale us-west1=3 -s web
+conductor volume add --mount /var/lib/postgresql/data -s pg
+conductor status
+
+# Or skip the link entirely and drive everything from the environment.
 export CONDUCTOR_PROJECT=rxlog-platform
 export CONDUCTOR_ENVIRONMENT=production
 export CONDUCTOR_SERVICE=web

@@ -10,13 +10,15 @@ Flags:
   --yes   skip the confirmation prompt`
 
 func cmdDown(args []string) error {
-	rest, ctx := extractTarget(args)
 	fs := newFlagSet("down", downUsage)
+	var t Target
+	addTargetFlags(fs, &t)
 	yes := fs.Bool("yes", false, "skip confirmation")
-	if err := fs.Parse(rest); err != nil {
+	if err := fs.parse(args); err != nil {
 		return err
 	}
-	if err := ctx.require(true, true, true); err != nil {
+	resolve(&t, true)
+	if err := t.require(true, true); err != nil {
 		return usageErr(downUsage, err.Error())
 	}
 
@@ -24,5 +26,5 @@ func cmdDown(args []string) error {
 	if *yes {
 		detail += "  [confirmed]"
 	}
-	return engineTODO("scale down", ctx, detail)
+	return engineTODO("scale down", t, detail)
 }

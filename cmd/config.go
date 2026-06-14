@@ -1,0 +1,30 @@
+package cmd
+
+import (
+	"fmt"
+
+	"conductor/internal/config"
+)
+
+const configUsage = `conductor config
+
+Print the resolved identity (from flags/env/link file) and the parsed
+conductor.toml spec. Read-only — touches neither the control plane nor any
+files. Useful for checking what 'conductor up' would act on before it exists.`
+
+func cmdConfig(args []string) error {
+	fs := newFlagSet("config", configUsage)
+	var t Target
+	addTargetFlags(fs, &t)
+	if err := fs.parse(args); err != nil {
+		return err
+	}
+	resolve(&t, true)
+
+	report, err := config.Render(t.Target)
+	if err != nil {
+		return err
+	}
+	fmt.Print(report)
+	return nil
+}

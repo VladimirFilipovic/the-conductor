@@ -1,34 +1,123 @@
 package cmd
 
-const environmentUsage = `conductor environment [name]
-conductor environment new <name>
+import (
+	"errors"
+	"fmt"
 
-With no argument, list the project's environments. With a name, select it as
-the active environment for subsequent commands. With "new", create a fresh
-environment by cloning the project's services. Requires a project.`
+	"conductor/internal/link"
+)
+
+const environmentsUsage = `conductor environments [<subcommand>] --project P
+
+Subcommands:
+  (none)            Print the currently selected environment for the project.
+  list              List the project's environments.
+  create -n NAME    Create a fresh environment by cloning the project's services.
+  select NAME       Set NAME as this CLI's active environment for the project.
+  use NAME          Alias for select.
+
+Requires a project (--project/-p or CONDUCTOR_PROJECT, or the linked project).
+select/use writes the environment pointer into the nearest .conductor/config.json
+and is used whenever -e/--environment is omitted.`
 
 func cmdEnvironment(args []string) error {
-	rest, ctx := extractTarget(args)
-	fs := newFlagSet("environment", environmentUsage)
-	if err := fs.Parse(rest); err != nil {
+	sub, rest := splitSubcommand(args)
+	switch sub {
+	case "":
+		return printCurrentEnvironment(rest)
+	case "list":
+		return listEnvironments(rest)
+	case "create", "new":
+		return createEnvironment(rest)
+	case "select", "use":
+		return selectEnvironmentCmd(rest)
+	default:
+		return usageErr(environmentsUsage, fmt.Sprintf("unknown subcommand %q", sub))
+	}
+}
+
+// environmentTarget parses the project/environment target flags shared by the
+// read-only environment subcommands and applies the env/link fallback.
+func environmentTarget(args []string) (Target, error) {
+	fs := newFlagSet("environment", environmentsUsage)
+	var t Target
+	addProjectFlag(fs, &t)
+	addEnvironmentFlag(fs, &t)
+	if err := fs.parse(args); err != nil {
+		return Target{}, err
+	}
+	resolve(&t, true)
+	return t, nil
+}
+
+func printCurrentEnvironment(args []string) error {
+	t, err := environmentTarget(args)
+	if err != nil {
 		return err
 	}
-	if err := ctx.require(true, false, false); err != nil {
-		return usageErr(environmentUsage, err.Error())
+	if err := t.require(false, false); err != nil {
+		return usageErr(environmentsUsage, err.Error())
 	}
+	if t.Environment == "" {
+		fmt.Printf("no environment selected for project %q (conductor environments select -p %s NAME)\n", t.Project, t.Project)
+		return nil
+	}
+	fmt.Println(t.Environment)
+	return nil
+}
 
-	switch fs.Arg(0) {
-	case "":
-		return engineTODO("list environments", ctx, "")
-	case "new", "create":
-		name := fs.Arg(1)
-		if name == "" {
-			return usageErr(environmentUsage, "environment new requires a name")
-		}
-		ctx.Environment = name
-		return engineTODO("create environment "+name, ctx, "clones existing services")
-	default:
-		ctx.Environment = fs.Arg(0)
-		return engineTODO("select environment "+fs.Arg(0), ctx, "")
+func listEnvironments(args []string) error {
+	t, err := environmentTarget(args)
+	if err != nil {
+		return err
 	}
+	if err := t.require(false, false); err != nil {
+		return usageErr(environmentsUsage, err.Error())
+	}
+	return engineTODO("list environments", t, "")
+}
+
+func createEnvironment(args []string) error {
+	fs := newFlagSet("environment create", environmentsUsage)
+	var t Target
+	addProjectFlag(fs, &t)
+	addEnvironmentFlag(fs, &t)
+	var name string
+	fs.StringVar(&name, "n", "", "environment name")
+	fs.StringVar(&name, "name", "", "environment name")
+	if err := fs.parse(args); err != nil {
+		return err
+	}
+	resolve(&t, true)
+	if err := t.require(false, false); err != nil {
+		return usageErr(environmentsUsage, err.Error())
+	}
+	if name == "" {
+		return usageErr(environmentsUsage, "create requires a name (-n NAME)")
+	}
+	t.Environment = name
+	return engineTODO("create environment "+name, t, "clones existing services")
+}
+
+func selectEnvironmentCmd(args []string) error {
+	fs := newFlagSet("environment select", environmentsUsage)
+	var t Target
+	addProjectFlag(fs, &t)
+	if err := fs.parse(args); err != nil {
+		return err
+	}
+	resolve(&t, true)
+	if fs.NArg() != 1 || fs.Arg(0) == "" {
+		return usageErr(environmentsUsage, "select requires exactly one environment name")
+	}
+	name := fs.Arg(0)
+	dir, err := link.SetEnvironment(name)
+	if errors.Is(err, link.ErrNotFound) {
+		return usageErr(environmentsUsage, "no link here — run `conductor link -p "+t.Project+"` first")
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Printf("selected environment %q in %s\n", name, dir)
+	return nil
 }

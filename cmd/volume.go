@@ -16,30 +16,32 @@ Subcommands:
   rm --mount PATH            detach and delete a volume`
 
 func cmdVolume(args []string) error {
-	rest, ctx := extractTarget(args)
-	if len(rest) == 0 {
+	sub, rest := splitSubcommand(args)
+	if sub == "" {
 		return usageErr(volumeUsage, "a subcommand is required")
 	}
-	sub, subArgs := rest[0], rest[1:]
 
 	fs := newFlagSet("volume "+sub, volumeUsage)
+	var t Target
+	addTargetFlags(fs, &t)
 	mount := fs.String("mount", "", "mount path inside the container")
 	size := fs.Int("size", 0, "volume size in GB (update only)")
-	if err := fs.Parse(subArgs); err != nil {
+	if err := fs.parse(rest); err != nil {
 		return err
 	}
-	if err := ctx.require(true, true, true); err != nil {
+	resolve(&t, true)
+	if err := t.require(true, true); err != nil {
 		return usageErr(volumeUsage, err.Error())
 	}
 
 	switch sub {
 	case "list", "ls":
-		return engineTODO("list volumes", ctx, "")
+		return engineTODO("list volumes", t, "")
 	case "add":
 		if *mount == "" {
 			return usageErr(volumeUsage, "volume add requires --mount")
 		}
-		return engineTODO("add volume", ctx, "mount "+*mount)
+		return engineTODO("add volume", t, "mount "+*mount)
 	case "update", "resize":
 		if *size <= 0 {
 			return usageErr(volumeUsage, "volume update requires --size > 0")
@@ -49,12 +51,12 @@ func cmdVolume(args []string) error {
 		if *mount != "" {
 			detail = "mount " + *mount + "  " + detail
 		}
-		return engineTODO("update volume", ctx, detail)
+		return engineTODO("update volume", t, detail)
 	case "rm", "remove", "delete":
 		if *mount == "" {
 			return usageErr(volumeUsage, "volume rm requires --mount")
 		}
-		return engineTODO("remove volume", ctx, "mount "+*mount)
+		return engineTODO("remove volume", t, "mount "+*mount)
 	}
 	return usageErr(volumeUsage, "unknown volume subcommand "+sub)
 }
