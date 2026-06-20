@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 
-	"conductor/internal/project"
 	"conductor/internal/storage/db"
 
 	"github.com/google/uuid"
@@ -40,7 +39,7 @@ type querier struct {
 	queries *db.Queries
 }
 
-// PostgresClient is a project.TxStore backed by a database/sql pool over the
+// PostgresClient is a TxStore backed by a database/sql pool over the
 // pgx driver. SQL lives in db/queries and is compiled to type-safe Go by sqlc
 // (the db package); this type only marshals values and maps the generated
 // results onto the package's sentinel errors.
@@ -72,7 +71,7 @@ func (c *PostgresClient) Close() error { return c.pool.Close() }
 // WithTx runs fn against a tx-scoped Store and commits if it returns nil. Any
 // error from fn (or commit) rolls the whole unit back, so multi-step workflows
 // in the project package are all-or-nothing.
-func (c *PostgresClient) WithTx(ctx context.Context, fn func(project.Store) error) error {
+func (c *PostgresClient) WithTx(ctx context.Context, fn func(Store) error) error {
 	tx, err := c.pool.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("storage: begin tx: %w", err)
