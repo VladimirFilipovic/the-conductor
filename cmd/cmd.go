@@ -42,25 +42,25 @@ Project lifecycle:
   init -n NAME             Create a new project (+ default "production" env)
   link -p NAME             Point this directory at a project (.conductor/config.json)
   unlink                   Remove this directory's link
-  config                   Print resolved identity + conductor.toml manifest
+  config                   Print resolved identity + config.toml spec
   add                      Add a service or database to the project
   environment [sub]        Print/list/create/select environments
   service [name]           List or select services
 
 Desired-state mutations (the reconcile loop converges to these):
-  up [path]                Build code & commit desired state for a service
+  up [config.toml]         Build & deploy the linked service from its spec (see example/)
+  rollback [--to vN]       Re-point the service at an earlier version (no rebuild)
   down                     Scale a service to zero (volumes/data preserved)
   scale <region=N ...>     Patch per-region replica counts
   volume <subcommand>      Manage persistent volumes (add/list/update/rm)
 
 Observability:
-  status                   Show observed state vs. desired state
+  status [-e E -s S]       Show observed vs. desired state (table; -e/-s narrow)
 
 Target resolution (flags win over env vars):
   --project,     -p   project name or id   (env: CONDUCTOR_PROJECT)
   --environment, -e   environment name     (env: CONDUCTOR_ENVIRONMENT)
   --service,     -s   service name         (env: CONDUCTOR_SERVICE)
-  auth token          (env: CONDUCTOR_TOKEN)
 
 Other:
   --help, -h           Show this message
@@ -101,6 +101,8 @@ func Run(args []string) int {
 		err = cmdService(cmdArgs)
 	case "up", "deploy":
 		err = cmdUp(cmdArgs)
+	case "rollback":
+		err = cmdRollback(cmdArgs)
 	case "down":
 		err = cmdDown(cmdArgs)
 	case "scale":
@@ -178,25 +180,11 @@ func usageErr(usageText, msg string) error {
 	return &usageError{text: fmt.Sprintf("%s\n\n%s", msg, usageText)}
 }
 
-// engineTODO is the seam where a fully implemented command opens a client to
-// the orchestration engine, sends a desired-state mutation (or reads observed
-// state), and lets the reconcile loop converge. The interface layer stops here
-// and just echoes the resolved target.
-func engineTODO(action string, c Target, detail string) error {
-	fmt.Printf("→ %s  %s\n", action, c)
-	if detail != "" {
-		fmt.Printf("  %s\n", detail)
-	}
-	fmt.Println("  (not implemented — would patch desired state and reconcile)")
-	return nil
-}
-
 // Environment-variable fallbacks, consulted when the matching flag is empty.
 const (
 	envProject     = "CONDUCTOR_PROJECT"
 	envEnvironment = "CONDUCTOR_ENVIRONMENT"
 	envService     = "CONDUCTOR_SERVICE"
-	envToken       = "CONDUCTOR_TOKEN" //nolint:unused // consumed by the engine client
 )
 
 // Target is the (project, environment, service) triple every command resolves
@@ -284,10 +272,19 @@ func resolve(t *Target, useLink bool) {
 	}
 }
 
-// splitSubcommand peels the leading verb off args. A leading flag (or empty
-// args) means no verb was given; the universal target flags are then parsed
-// from what remains. Verb comes first so the command's flag set never has to
-// see a positional before its flags (stdlib flag stops at the first positional).
+// resolveProject fills only the project field (flag > env var > link file),
+// leaving environment/service untouched. Commands that default to a whole-
+// project view (status) use this so the link's env/service can't silently
+// narrow the output — only an explicit -e/-s does.
+func resolveProject(t *Target) {
+	if t.Project = orEnv(t.Project, envProject); t.Project != "" {
+		return
+	}
+	if l, _, ok, err := link.Load(); err == nil && ok {
+		t.Project = l.Project
+	}
+}
+
 func splitSubcommand(args []string) (sub string, rest []string) {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		return "", args

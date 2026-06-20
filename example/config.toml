@@ -1,0 +1,41 @@
+# conductor service spec — `conductor up` (modeled on Railway's railway.toml).
+#
+# This file is BUILD/DEPLOY SETTINGS for ONE service. It deliberately carries no
+# identity: which project / environment / service it deploys to comes from the
+# folder link (.conductor/config.json) or -p/-e/-s, and the service's source
+# (repo or image) is recorded in the control plane by `conductor add`. So a
+# typical flow is:
+#
+#   conductor init -n storefront
+#   conductor add --service --name web --repo github.com/acme/web --link
+#   conductor up                       # reads this file, builds, deploys "web"
+
+# How to build the service's source into an image. Omit [build] entirely to let
+# the builder autodetect (nixpacks-style). Only meaningful when the service's
+# source is a repo; a prebuilt image skips the build.
+[build]
+builder        = "nixpacks"          # nixpacks | dockerfile | buildpacks
+build_command  = "yarn run build"    # overrides the builder's default
+watch_patterns = ["src/**"]          # paths whose changes should trigger a rebuild
+# dockerfile   = "Dockerfile"        # required when builder = "dockerfile"
+# root         = "."                 # sub-directory to build from (monorepos)
+
+# Runtime intent committed as the deployment's desired state.
+[deploy]
+start_command       = "node index.js"
+num_replicas        = 2              # replicas in `region` (Railway's numReplicas)
+region              = "us-east-1"    # one of the seeded fleet regions
+healthcheck_path    = "/health"
+healthcheck_timeout = 300
+restart_policy      = "on-failure"   # never | on-failure | always
+restart_max_retries = 10
+drain_seconds       = 30             # graceful-shutdown window
+cpu                 = "500m"         # millicores, or cores ("1", "1.5")
+memory              = "512Mi"        # Ki/Mi/Gi, or a plain byte count
+
+# Per-environment overrides: set fields win over the base above when that
+# environment is the deploy target (e.g. `conductor up -e production`).
+[environments.production.deploy]
+num_replicas = 5
+cpu          = "1"
+memory       = "1Gi"

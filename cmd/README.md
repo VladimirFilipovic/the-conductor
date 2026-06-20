@@ -12,9 +12,10 @@ subcommand lives in its own file and follows the same shape:
    env vars and then, when `useLink` is true, from the folder-link file.
 3. `tgt.require(environment, service)` validates the target — project is always
    required; environment/service are gated by the two bools.
-4. The command acts. `init`, `link`/`unlink`, and `add --service` talk to the
-   control plane (Postgres) for real; everything else still bottoms out in
-   `engineTODO(...)`, the seam where a real engine call will go.
+4. The command acts: it opens a Postgres client (`storage.NewPostgresClient`),
+   constructs the relevant domain service (`project.New(store)`, `status.New(store)`),
+   calls one of its methods, and renders the result. Read-only commands
+   (`config`, `unlink`) skip the store.
 
 `Target` (in `cmd.go`) is the resolved `(project, environment, service)` triple,
 passed explicitly as an argument. It is distinct from `context.Context`, which
@@ -36,7 +37,6 @@ tiers, highest precedence first:
 | Project     | `--project`, `-p`     | `CONDUCTOR_PROJECT`     |
 | Environment | `--environment`, `-e` | `CONDUCTOR_ENVIRONMENT` |
 | Service     | `--service`, `-s`     | `CONDUCTOR_SERVICE`     |
-| Auth token  | —                     | `CONDUCTOR_TOKEN`       |
 
 `link` resolves with the folder-link disabled (`useLink=false`) so an existing
 link's project can't silently satisfy a re-link.
@@ -74,7 +74,7 @@ conductor add --database --engine postgres --name pg
 
 # Deploy, scale, inspect — service comes from the link or -s.
 conductor up -s web
-conductor scale us-west1=3 -s web
+conductor scale us-east-1=3 -s web
 conductor volume add --mount /var/lib/postgresql/data -s pg
 conductor status
 

@@ -1,8 +1,8 @@
 // Package link manages the folder-link: a per-repo .conductor/config.json that
 // points a working tree at a project/environment/service in the control plane.
 // It holds identity pointers ONLY — never build/deploy settings (those live in
-// the committed conductor.toml, see internal/deployspec) and never replica
-// counts or secret values (the control-plane DB owns those).
+// the committed config.toml, see internal/deployspec) and never replica counts or
+// secret values (the control-plane DB owns those).
 package link
 
 import (

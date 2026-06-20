@@ -1,0 +1,518 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Conductor Orchestrator — What It Must Cover</title>
+<style>
+  :root {
+    --paper:      #f6f1e7;
+    --sheet:      #fbf7ef;
+    --ink:        #1f1a14;
+    --ink-soft:   #4a4136;
+    --muted:      #7a6f5e;
+    --rule:       #c9bda6;
+    --rule-soft:  #ddd2bb;
+    --accent:     #6b3a1f;
+    --accent-2:   #8a5a2b;
+    --mark:       #f0e4c2;
+    --ok:         #3d6b2a;
+    --no:         #8a2a2a;
+
+    --kw:         #6b3a1f;
+    --ident:      #2a4a6b;
+    --str:        #5a4a1f;
+    --comment:    #8a7f6e;
+    --num:        #6b4f1f;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0; padding: 0;
+    background:
+      repeating-linear-gradient(
+        90deg,
+        rgba(0,0,0,0.012) 0,
+        rgba(0,0,0,0.012) 1px,
+        transparent 1px,
+        transparent 3px
+      ),
+      var(--paper);
+    color: var(--ink);
+    font: 16px/1.65 "Iowan Old Style", "Palatino Linotype", "Palatino",
+                    "Charter", Georgia, "Times New Roman", serif;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  main {
+    max-width: 720px;
+    margin: 32px auto;
+    padding: 72px 56px 96px;
+    background: var(--paper);
+    box-shadow:
+      0 0 0 1px var(--rule-soft),
+      0 18px 60px -30px rgba(50, 35, 15, 0.35);
+    border: 1px solid var(--rule-soft);
+  }
+
+  h1 {
+    font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+    font-weight: 600;
+    font-size: 30px;
+    line-height: 1.2;
+    margin: 0 0 4px;
+    letter-spacing: -0.005em;
+    color: var(--ink);
+    text-align: center;
+  }
+  h1::after {
+    content: "";
+    display: block;
+    width: 60px;
+    height: 1px;
+    background: var(--accent);
+    margin: 14px auto 0;
+  }
+
+  h2 {
+    font-family: "Iowan Old Style", Georgia, serif;
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--accent);
+    margin: 40px 0 14px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--rule);
+    font-variant: small-caps;
+    letter-spacing: 0.04em;
+  }
+
+  h3 {
+    font-family: "Iowan Old Style", Georgia, serif;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--accent-2);
+    margin: 22px 0 8px;
+    font-variant: small-caps;
+    letter-spacing: 0.06em;
+  }
+
+  p { margin: 0 0 14px; color: var(--ink); }
+  p + p { text-indent: 1.4em; }
+
+  .lede {
+    color: var(--ink-soft);
+    font-style: italic;
+    font-size: 17px;
+    text-align: center;
+    margin: 0 auto 40px;
+    max-width: 560px;
+    line-height: 1.55;
+  }
+
+  ul { margin: 0 0 16px; padding-left: 22px; }
+  ul li { margin-bottom: 5px; }
+  ul li::marker { color: var(--accent); }
+
+  code, pre, .mono {
+    font-family: "Iosevka", "JetBrains Mono", "SF Mono", Menlo, ui-monospace, monospace;
+    font-size: 13.5px;
+  }
+  code {
+    background: var(--mark);
+    padding: 0 4px;
+    border-radius: 2px;
+    color: var(--ink);
+    border: 1px solid rgba(107, 58, 31, 0.12);
+  }
+
+  pre {
+    background: var(--sheet);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--accent);
+    border-radius: 0;
+    padding: 14px 18px;
+    overflow-x: auto;
+    margin: 0 0 18px;
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,0.015);
+    line-height: 1.55;
+  }
+  pre code { background: transparent; padding: 0; border: 0; color: var(--ink); }
+
+  .kw   { color: var(--kw);   font-weight: 600; }
+  .id   { color: var(--ident); }
+  .str  { color: var(--str); }
+  .com  { color: var(--comment); font-style: italic; }
+  .num  { color: var(--num); }
+
+  .callout {
+    border: 1px solid var(--rule);
+    border-left: 4px solid var(--accent);
+    background: var(--sheet);
+    padding: 14px 18px;
+    margin: 14px 0 22px;
+    font-size: 15px;
+    color: var(--ink-soft);
+  }
+  .callout strong { color: var(--accent); }
+  .callout.warn { border-left-color: var(--accent-2); }
+  .callout.warn strong { color: var(--accent-2); }
+
+  table {
+    width: 100%; border-collapse: collapse; margin: 0 0 22px;
+    font-size: 14px;
+    background: var(--sheet);
+    border: 1px solid var(--rule);
+  }
+  th, td {
+    text-align: left; padding: 9px 12px;
+    border-bottom: 1px solid var(--rule-soft);
+    vertical-align: top;
+  }
+  thead tr { background: var(--mark); }
+  th {
+    color: var(--accent); font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    font-variant: small-caps;
+    border-bottom: 1px solid var(--rule);
+  }
+  td.mono { white-space: nowrap; }
+  tbody tr:last-child td { border-bottom: 0; }
+
+  .tree {
+    font-family: "Iosevka", "JetBrains Mono", monospace;
+    font-size: 13px; line-height: 1.85;
+    background: var(--sheet);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--accent);
+    padding: 14px 20px;
+    margin: 0 0 22px;
+    white-space: pre;
+    color: var(--ink);
+  }
+  .tree .dir  { color: var(--accent); font-weight: 600; }
+  .tree .file { color: var(--ink); }
+  .tree .note { color: var(--muted); font-style: italic; }
+
+  .flow { display: grid; gap: 10px; grid-template-columns: 1fr; margin: 14px 0 22px; }
+  .step {
+    background: var(--sheet);
+    border: 1px solid var(--rule);
+    padding: 12px 16px;
+    display: grid; grid-template-columns: 32px 1fr; gap: 14px;
+    align-items: baseline;
+  }
+  .step .n {
+    color: var(--paper);
+    background: var(--accent);
+    border-radius: 50%;
+    width: 26px; height: 26px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-weight: 600; font-size: 13px;
+    font-family: "Iowan Old Style", Georgia, serif;
+  }
+  .step b { color: var(--ink); font-weight: 600; }
+  .step .why {
+    color: var(--ink-soft); display: block; margin-top: 4px;
+    font-size: 14.5px; font-style: italic;
+  }
+
+  .kvs {
+    display: grid; grid-template-columns: max-content 1fr;
+    gap: 6px 22px; margin: 0 0 22px;
+    padding: 14px 18px;
+    background: var(--sheet); border: 1px solid var(--rule);
+  }
+  .kvs dt {
+    color: var(--accent);
+    font-family: "Iowan Old Style", Georgia, serif;
+    font-variant: small-caps;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+  }
+  .kvs dd { margin: 0; color: var(--ink); }
+
+  hr {
+    border: 0;
+    text-align: center;
+    margin: 36px 0;
+    overflow: visible;
+    line-height: 0;
+  }
+  hr::before {
+    content: "✦  ✦  ✦";
+    color: var(--accent);
+    letter-spacing: 1em;
+    font-size: 13px;
+  }
+
+  .pill {
+    display: inline-block;
+    padding: 1px 9px;
+    border: 1px solid var(--rule);
+    background: var(--mark);
+    border-radius: 99px;
+    font-size: 11px;
+    font-family: "Iowan Old Style", Georgia, serif;
+    font-variant: small-caps;
+    letter-spacing: 0.06em;
+    color: var(--ink-soft);
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .pill.ok { color: var(--ok); border-color: rgba(61,107,42,0.4); }
+  .pill.no { color: var(--no); border-color: rgba(138,42,42,0.4); }
+  .pill.mid { color: var(--accent-2); border-color: rgba(138,90,43,0.4); }
+
+  .scn {
+    border: 1px solid var(--rule);
+    background: var(--sheet);
+    padding: 14px 18px;
+    margin: 0 0 14px;
+  }
+  .scn h3 { margin-top: 0; }
+  .scn dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
+  .scn dt {
+    color: var(--accent-2); font-variant: small-caps; letter-spacing: 0.05em;
+    font-weight: 600; font-size: 13px;
+  }
+  .scn dd { margin: 0; font-size: 14.5px; color: var(--ink-soft); }
+  .scn dd code { font-size: 12.5px; }
+
+  a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+  a:hover { color: var(--accent-2); }
+  .arrow { color: var(--muted); }
+
+  @media (max-width: 760px) {
+    main { padding: 36px 22px 64px; margin: 0; border: 0; box-shadow: none; }
+    body { background: var(--paper); }
+    h1 { font-size: 24px; }
+    .scn dl, .kvs { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<main>
+
+<h1>The Conductor Orchestrator</h1>
+<p class="lede">A reconcile engine that takes a user's desired state for a service and continuously works to make reality match — scenario by scenario, here is everything it must cover.</p>
+
+<dl class="kvs">
+  <dt>desired state</dt><dd>what the user asked for: <code>deployments</code> (the current commit) + <code>deployment_regions</code> (region&nbsp;&rarr;&nbsp;count). Written by the CLI.</dd>
+  <dt>observed state</dt><dd>what is actually running: <code>replicas</code> (phase, healthy, host) + <code>hosts</code> (capacity, heartbeat). Written by the engine.</dd>
+  <dt>reconcile</dt><dd>the loop that reads both, computes the diff, and takes one step toward closing it — then repeats, forever.</dd>
+  <dt>level-triggered</dt><dd>each tick re-derives intent from the database; it never trusts memory of the last tick. This is what lets it survive restarts.</dd>
+</dl>
+
+<h2>1 · The one idea</h2>
+<p>Every entity stores a <em>desired</em> and an <em>observed</em> half. The engine's whole job is closing that gap, on every tick, without assuming it remembers anything. That single property — level-triggered convergence — is what makes it self-healing and restart-safe.</p>
+
+<pre><code><span class="com">desired (committed by the CLI)            observed (written by the engine)</span>
+  deployments (is_current) ............... replicas (phase, healthy, host_id)
+  deployment_regions {region: N} ......... hosts (capacity, heartbeat, status)
+  volumes (desired_size) ................. volume_leases (single writer)</code></pre>
+
+<div class="callout">
+  <strong>Guiding principle.</strong> <em>"Each entity stores desired vs observed state. The reconciler's whole job is closing that gap."</em> Read the gap, take the next step, repeat.
+</div>
+
+<h2>2 · Vocabulary &rarr; tables</h2>
+<table>
+  <thead><tr><th>Term</th><th>Table</th><th>Who writes it</th></tr></thead>
+  <tbody>
+    <tr><td>desired commit</td><td class="mono">deployments + deployment_regions</td><td>CLI (<code>up</code>, <code>scale</code>)</td></tr>
+    <tr><td>running atom</td><td class="mono">replicas (phase, healthy)</td><td><strong>engine</strong></td></tr>
+    <tr><td>fleet node</td><td class="mono">hosts (capacity, heartbeat)</td><td>agent / heartbeat</td></tr>
+    <tr><td>persistent disk</td><td class="mono">volumes + volume_leases</td><td><strong>engine</strong></td></tr>
+  </tbody>
+</table>
+<p>The replica's life is a phase machine; the deployment's life is a status machine. The phases <em>are</em> the rollout steps.</p>
+<pre><code><span class="id">replica.phase</span>:   pending <span class="arrow">&rarr;</span> scheduling <span class="arrow">&rarr;</span> starting <span class="arrow">&rarr;</span> health_check <span class="arrow">&rarr;</span>
+              healthy <span class="arrow">&rarr;</span> shifting <span class="arrow">&rarr;</span> active <span class="arrow">&rarr;</span> draining <span class="arrow">&rarr;</span> reaped
+<span class="id">deploy.status</span>:   pending <span class="arrow">&rarr;</span> active <span class="arrow">&rarr;</span> draining / failed / rolledback / superseded</code></pre>
+
+<h2>3 · The scenarios</h2>
+<p>Each is framed as <em>trigger <span class="arrow">&rarr;</span> the gap <span class="arrow">&rarr;</span> what the engine does</em>. Tags mark the build phase:
+  <span class="pill ok">v1</span> stateless first slice,
+  <span class="pill mid">next</span> rollout &amp; fleet,
+  <span class="pill no">stateful</span> the hard tail.</p>
+
+<div class="scn">
+  <h3>1 · Initial deploy: 0 &rarr; N <span class="pill ok">v1</span></h3>
+  <dl>
+    <dt>trigger</dt><dd><code>up</code> writes a current deployment + <code>{us-east-1: 3}</code>.</dd>
+    <dt>gap</dt><dd>desired 3 replicas, observed 0.</dd>
+    <dt>engine</dt><dd>create 3 replicas (ordinals 0&ndash;2) <span class="arrow">&rarr;</span> bin-pack each onto a ready in-region host <span class="arrow">&rarr;</span> start <span class="arrow">&rarr;</span> health-gate <span class="arrow">&rarr;</span> <code>active</code>; mark deployment <code>active</code>.</dd>
+  </dl>
+</div>
+
+<div class="scn">
+  <h3>2 · Scale up: N &rarr; N+M <span class="pill ok">v1</span></h3>
+  <dl>
+    <dt>trigger</dt><dd><code>scale us-east-1=5</code>, or an <code>up</code> with a higher count.</dd>
+    <dt>gap</dt><dd>desired 5, observed 3.</dd>
+    <dt>engine</dt><dd>create 2 more, schedule + start; the existing 3 untouched.</dd>
+  </dl>
+</div>
+
+<div class="scn">
+  <h3>3 · Scale to zero / <code>down</code>: N &rarr; 0 <span class="pill ok">v1</span></h3>
+  <dl>
+    <dt>trigger</dt><dd><code>down</code>, or <code>scale region=0</code>.</dd>
+    <dt>gap</dt><dd>desired 0, observed 3.</dd>
+    <dt>engine</dt><dd>drain then reap all replicas. <strong>Volumes are preserved</strong> — only compute stops; the service and deployment rows remain.</dd>
+  </dl>
+</div>
+
+<div class="scn">
+  <h3>4 · New-version rollout (stateless) <span class="pill ok">v1</span> <span class="pill mid">next</span></h3>
+  <dl>
+    <dt>trigger</dt><dd><code>up</code> with a new image/config; old commit <span class="arrow">&rarr;</span> <code>superseded</code>.</dd>
+    <dt>gap</dt><dd>observed replicas point at the old deployment; desired is the new one.</dd>
+    <dt>engine</dt><dd><strong>surge:</strong> start NEW alongside old <span class="arrow">&rarr;</span> health-gate <span class="arrow">&rarr;</span> shift traffic <span class="arrow">&rarr;</span> drain old (<code>drain_seconds</code>) <span class="arrow">&rarr;</span> reap. New never healthy <span class="arrow">&rarr;</span> stop, leave old serving, <code>failed</code>.</dd>
+  </dl>
+</div>
+
+<div class="scn">
+  <h3>5 · Rollback &mdash; desired half done <span class="pill mid">engine: next</span></h3>
+  <dl>
+    <dt>trigger</dt><dd><code>conductor rollback [--to vN]</code> re-points <code>is_current</code> to an older deployment (old <span class="arrow">&rarr;</span> <code>rolledback</code>, target <span class="arrow">&rarr;</span> <code>pending</code>).</dd>
+    <dt>gap</dt><dd>same as a rollout, but the target image already exists — no rebuild.</dd>
+    <dt>engine</dt><dd>identical convergence as #4, toward the re-pointed version.</dd>
+  </dl>
+</div>
+
+<div class="scn">
+  <h3>6 · Replica crash &rarr; self-heal <span class="pill ok">v1</span></h3>
+  <dl>
+    <dt>trigger</dt><dd>a replica exits or fails its health check (<code>healthy=false</code>).</dd>
+    <dt>engine</dt><dd>restart with backoff, bumping <code>restart_count</code>, capped at <code>restart_max</code>; past the cap <span class="arrow">&rarr;</span> <code>failed</code>, surfaced, no hot-loop.</dd>
+    <dt>note</dt><dd>this proves the loop is level-triggered: delete a replica row and the next tick recreates it.</dd>
+  </dl>
+</div>
+
+<div class="scn">
+  <h3>7 · Host failure &rarr; reschedule <span class="pill mid">next</span></h3>
+  <dl>
+    <dt>trigger</dt><dd><code>hosts.last_heartbeat</code> goes stale <span class="arrow">&rarr;</span> mark <code>notready</code>.</dd>
+    <dt>engine</dt><dd>its replicas are presumed dead <span class="arrow">&rarr;</span> reschedule onto other hosts. Stateful needs the volume reachable first.</dd>
+  </dl>
+</div>
+
+<div class="scn">
+  <h3>8 · Host drain / cordon (maintenance) <span class="pill mid">next</span></h3>
+  <dl>
+    <dt>trigger</dt><dd>operator sets <code>draining</code> / <code>cordoned</code>.</dd>
+    <dt>engine</dt><dd><code>cordoned</code> = no new placements here; <code>draining</code> = evict existing replicas elsewhere, then the box is safe to pull.</dd>
+  </dl>
+</div>
+
+<div class="scn">
+  <h3>9 · No capacity / unschedulable <span class="pill ok">v1</span></h3>
+  <dl>
+    <dt>trigger</dt><dd>desired replicas exceed free fleet capacity in-region.</dd>
+    <dt>engine</dt><dd>replica stays <code>pending</code> with an <code>alloc_reason</code>; never overcommit. Placed automatically once capacity frees.</dd>
+  </dl>
+</div>
+
+<div class="scn">
+  <h3>10 · Multi-region spread <span class="pill mid">next</span></h3>
+  <dl>
+    <dt>trigger</dt><dd><code>{us-east-1: 3, eu-west-1: 2}</code>.</dd>
+    <dt>engine</dt><dd>reconcile each region independently; a region with no capacity stays pending without blocking the others.</dd>
+  </dl>
+</div>
+
+<div class="scn">
+  <h3>11 · Stateful placement + volume provisioning <span class="pill no">stateful</span></h3>
+  <dl>
+    <dt>trigger</dt><dd><code>add --database</code> then <code>up</code> for a stateful service.</dd>
+    <dt>gap</dt><dd>each ordinal needs a <code>volume</code> (e.g. <code>pg-0</code>) before its replica can run.</dd>
+    <dt>engine</dt><dd>provision a volume per ordinal, place it by <code>disk_bytes</code>, pin <code>replicas.volume_id</code>; placement is disk-aware, not just cpu/mem.</dd>
+  </dl>
+</div>
+
+<div class="scn">
+  <h3>12 · Stateful rollout / failover &rarr; volume handoff <span class="pill no">stateful</span></h3>
+  <dl>
+    <dt>trigger</dt><dd>new version, or the host holding <code>pg-0</code> dies.</dd>
+    <dt>constraint</dt><dd>exactly one writer per volume — the <code>volume_leases</code> primary key is the physical guarantee.</dd>
+    <dt>engine</dt><dd><strong>ordered, no surge:</strong> drain old <code>pg-0</code> <span class="arrow">&rarr;</span> release/expire its lease (fencing) <span class="arrow">&rarr;</span> new <code>pg-0</code> acquires the lease <span class="arrow">&rarr;</span> attach <span class="arrow">&rarr;</span> start <span class="arrow">&rarr;</span> health-gate <span class="arrow">&rarr;</span> only then <code>pg-1</code>.</dd>
+  </dl>
+</div>
+
+<div class="scn">
+  <h3>13 · Volume resize (grow-only) <span class="pill no">stateful</span></h3>
+  <dl>
+    <dt>trigger</dt><dd><code>desired_size_bytes</code> raised.</dd>
+    <dt>engine</dt><dd>grow the disk, reconcile <code>observed_size_bytes</code> up. Never shrink.</dd>
+  </dl>
+</div>
+
+<div class="scn">
+  <h3>14 · Control-plane restart / concurrency <span class="pill ok">v1</span></h3>
+  <dl>
+    <dt>trigger</dt><dd>the engine restarts mid-work, or two ticks overlap.</dd>
+    <dt>engine</dt><dd>re-derive everything from the DB each tick (no in-memory truth); guard every write with the <code>revision</code> column (optimistic concurrency). All steps idempotent.</dd>
+  </dl>
+</div>
+
+<div class="scn">
+  <h3>15 · Config-only vs image change <span class="pill ok">v1</span></h3>
+  <dl>
+    <dt>note</dt><dd>both are just a new <code>deployments</code> row, so both trigger a rollout (#4). v1 does not special-case "only env changed" — the version bump is the signal.</dd>
+  </dl>
+</div>
+
+<h2>4 · Stateless vs stateful</h2>
+<p>This split drives placement, rollout style, identity, and writer safety — almost every hard decision flows from it.</p>
+<table>
+  <thead><tr><th></th><th>Stateless</th><th>Stateful</th></tr></thead>
+  <tbody>
+    <tr><td>Placement</td><td>cpu/mem bin-pack, any host</td><td>+ <code>disk_bytes</code>, pinned to its volume's host</td></tr>
+    <tr><td>Rollout</td><td><strong>surge</strong> (new before old)</td><td><strong>handoff</strong>, one ordinal at a time, no overlap</td></tr>
+    <tr><td>Identity</td><td>fungible</td><td>stable <code>ordinal</code> (<code>pg-0</code>) tied to a volume</td></tr>
+    <tr><td>Writer safety</td><td>n/a</td><td>single-writer <code>volume_lease</code> + fencing</td></tr>
+    <tr><td>Scale to zero</td><td>drop all</td><td>drop compute, <strong>keep volumes</strong></td></tr>
+  </tbody>
+</table>
+
+<h2>5 · Build order</h2>
+<div class="flow">
+  <div class="step"><span class="n">1</span><div>
+    <b><span class="pill ok">v1</span> Stateless steady-state.</b>
+    <span class="why">Scenarios 1, 2, 3, 6, 9, 14: replica CRUD, host-capacity query, bin-packer, poll loop, simulated executor. Proves convergence + self-heal; <code>status</code> shows real numbers.</span>
+  </div></div>
+  <div class="step"><span class="n">2</span><div>
+    <b><span class="pill mid">next</span> Rollout &amp; fleet.</b>
+    <span class="why">Scenarios 4, 5, 7, 8, 10: version transitions (surge/drain), host liveness, multi-region.</span>
+  </div></div>
+  <div class="step"><span class="n">3</span><div>
+    <b><span class="pill no">stateful</span> Volumes, leases, handoff.</b>
+    <span class="why">Scenarios 11, 12, 13. The hard tail: disk-aware placement and the single-writer protocol at once.</span>
+  </div></div>
+</div>
+
+<h2>6 · The open decision: A vs B</h2>
+<p>One choice gates the engine's shape — how the reconcile loop runs.</p>
+<table>
+  <thead><tr><th>Option</th><th>What</th><th>Verdict</th></tr></thead>
+  <tbody>
+    <tr><td><strong>A · Plain Go loop</strong></td><td>one process polls desired vs observed and converges</td><td><span class="pill ok">recommended</span> for steady-state — it is already level-triggered via Postgres</td></tr>
+    <tr><td><strong>B · Temporal worker</strong></td><td>durable workflow drives the rollout choreography</td><td><span class="pill mid">later</span> only for the rollout state machine (#4/#12), kicked off keyed by <code>deployment_id</code></td></tr>
+  </tbody>
+</table>
+<div class="callout warn">
+  <strong>Trade-off.</strong> Don't take the Temporal dependency up front. Steady-state convergence wants a plain level-triggered loop; Temporal earns its keep only when the in-flight surge/drain sequencing (durable timers, per-step retries, rollback compensation) gets unwieldy.
+</div>
+
+<hr>
+<p style="color:var(--muted);font-size:12px">
+  Source: <code>docs/orchestrator-scenarios.md</code>, <code>docs/orchestration-engine.md</code>, <code>db/migrations/00001_create_control_plane.sql</code>. Generated 2026-06-19.
+</p>
+
+</main>
+</body>
+</html>

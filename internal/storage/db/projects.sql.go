@@ -7,6 +7,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 
 	"github.com/google/uuid"
@@ -34,6 +35,30 @@ func (q *Queries) AddServiceToEnvironment(ctx context.Context, arg AddServiceToE
 		&i.Source,
 	)
 	return i, err
+}
+
+const cloneEnvironmentServices = `-- name: CloneEnvironmentServices :execrows
+INSERT INTO environment_services (environment_id, service_id, source)
+SELECT $1, es.service_id, es.source
+FROM environment_services es
+WHERE es.environment_id = $2
+`
+
+type CloneEnvironmentServicesParams struct {
+	DstEnvironmentID uuid.UUID `json:"dst_environment_id"`
+	SrcEnvironmentID uuid.UUID `json:"src_environment_id"`
+}
+
+// CloneEnvironmentServices copies an environment's service bindings (and their
+// per-environment source) into a freshly created one, so `environment create`
+// starts a new env with the same services rather than empty. :execrows so the
+// caller can report how many were cloned.
+func (q *Queries) CloneEnvironmentServices(ctx context.Context, arg CloneEnvironmentServicesParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, cloneEnvironmentServices, arg.DstEnvironmentID, arg.SrcEnvironmentID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const createEnvironment = `-- name: CreateEnvironment :one
@@ -154,6 +179,40 @@ func (q *Queries) GetService(ctx context.Context, arg GetServiceParams) (Service
 	return i, err
 }
 
+const listEnvironments = `-- name: ListEnvironments :many
+SELECT id, project_name, name, created_at FROM environments
+WHERE project_name = $1
+ORDER BY name
+`
+
+func (q *Queries) ListEnvironments(ctx context.Context, projectName string) ([]Environment, error) {
+	rows, err := q.db.QueryContext(ctx, listEnvironments, projectName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Environment
+	for rows.Next() {
+		var i Environment
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectName,
+			&i.Name,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listServicesByEnvironment = `-- name: ListServicesByEnvironment :many
 SELECT s.id, s.project_name, s.name, s.stateful, s.created_at FROM services s
 JOIN environment_services es ON es.service_id = s.id
@@ -182,6 +241,97 @@ func (q *Queries) ListServicesByEnvironment(ctx context.Context, arg ListService
 			&i.Name,
 			&i.Stateful,
 			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const projectStatus = `-- name: ProjectStatus :many
+SELECT
+	e.name                            AS environment,
+	s.name                            AS service,
+	s.stateful                        AS stateful,
+	d.version                         AS deploy_version,
+	d.status                          AS deploy_status,
+	d.image_ref                       AS image_ref,
+	COALESCE(dr.desired_replicas, 0)  AS desired_replicas,
+	COALESCE(rc.observed_replicas, 0) AS observed_replicas,
+	COALESCE(rc.healthy_replicas, 0)  AS healthy_replicas
+FROM environment_services es
+JOIN environments e ON e.id = es.environment_id
+JOIN services     s ON s.id = es.service_id
+LEFT JOIN deployments d
+	ON d.environment_service_id = es.id AND d.is_current
+LEFT JOIN LATERAL (
+	SELECT SUM(replicas)::int AS desired_replicas
+	FROM deployment_regions
+	WHERE deployment_id = d.id
+) dr ON true
+LEFT JOIN LATERAL (
+	SELECT
+		COUNT(*)::int                        AS observed_replicas,
+		COUNT(*) FILTER (WHERE healthy)::int AS healthy_replicas
+	FROM replicas
+	WHERE deployment_id = d.id AND desired_status = 'running'
+) rc ON true
+WHERE e.project_name = $1
+	AND ($2::text = '' OR e.name = $2)
+	AND ($3::text = '' OR s.name = $3)
+ORDER BY e.name, s.name
+`
+
+type ProjectStatusParams struct {
+	ProjectName string `json:"project_name"`
+	Environment string `json:"environment"`
+	Service     string `json:"service"`
+}
+
+type ProjectStatusRow struct {
+	Environment      string         `json:"environment"`
+	Service          string         `json:"service"`
+	Stateful         bool           `json:"stateful"`
+	DeployVersion    sql.NullInt32  `json:"deploy_version"`
+	DeployStatus     sql.NullString `json:"deploy_status"`
+	ImageRef         sql.NullString `json:"image_ref"`
+	DesiredReplicas  int32          `json:"desired_replicas"`
+	ObservedReplicas int32          `json:"observed_replicas"`
+	HealthyReplicas  int32          `json:"healthy_replicas"`
+}
+
+// ProjectStatus reports one row per (environment, service) in a project: the
+// active deploy commit (desired intent) alongside the replicas the reconcile
+// loop has actually placed (observed). The deploy/region/replica joins are
+// LEFT so a service with no current deployment still shows up (as "no deploy").
+// The @environment/@service filters are no-ops when passed empty, so the same
+// query backs the whole-project view and the narrowed one.
+func (q *Queries) ProjectStatus(ctx context.Context, arg ProjectStatusParams) ([]ProjectStatusRow, error) {
+	rows, err := q.db.QueryContext(ctx, projectStatus, arg.ProjectName, arg.Environment, arg.Service)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ProjectStatusRow
+	for rows.Next() {
+		var i ProjectStatusRow
+		if err := rows.Scan(
+			&i.Environment,
+			&i.Service,
+			&i.Stateful,
+			&i.DeployVersion,
+			&i.DeployStatus,
+			&i.ImageRef,
+			&i.DesiredReplicas,
+			&i.ObservedReplicas,
+			&i.HealthyReplicas,
 		); err != nil {
 			return nil, err
 		}

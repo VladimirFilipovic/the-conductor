@@ -1,12 +1,12 @@
 // Package config renders the resolved view behind `conductor config`: the
 // identity a directory is aimed at (from internal/link) plus the parsed
-// conductor.toml spec (from internal/deployspec). It is read-only — it loads and
-// formats, never mutating the control plane or any files.
+// config.toml build/deploy spec (from internal/deployspec). It is read-only — it
+// loads and formats, never mutating the control plane or any files.
 package config
 
 import (
 	"fmt"
-	"sort"
+	"os"
 	"strings"
 
 	"conductor/internal/deployspec"
@@ -14,10 +14,9 @@ import (
 	"conductor/internal/target"
 )
 
-// Render returns the full `conductor config` report. A parse/validation error
-// in the spec is returned; a missing link or missing spec is reported inline,
-// not as an error. The identity is the resolved (project, environment, service)
-// the caller already worked out from flags/env/link.
+// Render returns the full `conductor config` report. A parse/validation error in
+// the spec is returned; a missing link or missing spec is reported inline, not as
+// an error.
 func Render(id target.Target) (string, error) {
 	var b strings.Builder
 
@@ -31,18 +30,25 @@ func Render(id target.Target) (string, error) {
 		b.WriteString("  link file:   - (run `conductor link` to create one)\n")
 	}
 
-	spec, path, ok, err := deployspec.Load()
+	// The spec lives at config.toml in the current directory — the same place
+	// `up` reads it (no walk-up), so `config` previews exactly what `up` would act
+	// on from here.
+	path := deployspec.FileName
+	b.WriteString("\nSpec\n")
+	if _, err := os.Stat(path); err != nil {
+		b.WriteString("  - (no config.toml in this directory)\n")
+		return b.String(), nil
+	}
+	spec, err := deployspec.Load(path)
 	if err != nil {
 		return "", err
 	}
-	b.WriteString("\nSpec\n")
-	if !ok {
-		b.WriteString("  - (no conductor.toml found)\n")
-		return b.String(), nil
-	}
 	fmt.Fprintf(&b, "  file: %s\n", path)
-	writeServices(&b, spec, id.Service)
-	noteIfServiceUnspecified(&b, spec, id.Service)
+	// Show the spec as it resolves for the active environment, so the reader sees
+	// exactly what `up` would commit (base merged with [environments.E] overrides).
+	bld, dep := spec.Resolve(id.Environment)
+	writeBuild(&b, bld)
+	writeDeploy(&b, dep)
 	return b.String(), nil
 }
 
@@ -53,47 +59,31 @@ func dash(s string) string {
 	return s
 }
 
-// writeServices marks the selected service so the reader sees which block `up`
-// would target.
-func writeServices(b *strings.Builder, spec deployspec.Spec, selected string) {
-	names := make([]string, 0, len(spec.Services))
-	for name := range spec.Services {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	for _, name := range names {
-		marker := ""
-		if name == selected {
-			marker = "  (selected)"
-		}
-		fmt.Fprintf(b, "  [services.%s]%s\n", name, marker)
-		writeServiceBody(b, spec.Services[name])
+func writeBuild(b *strings.Builder, bld deployspec.Build) {
+	b.WriteString("  [build]\n")
+	writeField(b, "builder", orAuto(bld.Builder))
+	writeField(b, "dockerfile", bld.Dockerfile)
+	writeField(b, "build_command", bld.BuildCommand)
+	writeField(b, "root", bld.Root)
+	if len(bld.WatchPatterns) > 0 {
+		writeField(b, "watch_patterns", strings.Join(bld.WatchPatterns, ", "))
 	}
 }
 
-func writeServiceBody(b *strings.Builder, s deployspec.Service) {
-	writeField(b, "builder", s.Builder)
-	writeField(b, "dockerfile", s.Dockerfile)
-	writeField(b, "build_command", s.BuildCommand)
-	writeField(b, "start_command", s.StartCommand)
-	writeField(b, "restart_policy", s.RestartPolicy)
-	if s.RestartMaxRetries != 0 {
-		fmt.Fprintf(b, "    restart_max_retries: %d\n", s.RestartMaxRetries)
+func writeDeploy(b *strings.Builder, dep deployspec.Deploy) {
+	b.WriteString("  [deploy]\n")
+	writeField(b, "start_command", dep.StartCommand)
+	fmt.Fprintf(b, "    num_replicas: %d\n", dep.ReplicasOrDefault())
+	writeField(b, "region", dep.RegionOrDefault())
+	writeField(b, "healthcheck_path", dep.HealthcheckPath)
+	if dep.HealthcheckTimeout != 0 {
+		fmt.Fprintf(b, "    healthcheck_timeout: %d\n", dep.HealthcheckTimeout)
 	}
-	if s.DrainSeconds != 0 {
-		fmt.Fprintf(b, "    drain_seconds: %d\n", s.DrainSeconds)
-	}
-	if s.Healthcheck != nil {
-		writeField(b, "healthcheck.path", s.Healthcheck.Path)
-		if s.Healthcheck.TimeoutSeconds != 0 {
-			fmt.Fprintf(b, "    healthcheck.timeout_seconds: %d\n", s.Healthcheck.TimeoutSeconds)
-		}
-	}
-	if s.Resources != nil {
-		writeField(b, "resources.cpu", s.Resources.CPU)
-		writeField(b, "resources.memory", s.Resources.Memory)
-	}
+	writeField(b, "restart_policy", dep.RestartPolicy)
+	fmt.Fprintf(b, "    restart_max_retries: %d\n", dep.RestartMaxOrDefault())
+	fmt.Fprintf(b, "    drain_seconds: %d\n", dep.DrainSecondsOrDefault())
+	fmt.Fprintf(b, "    cpu_millicores: %d\n", dep.CPUMillicores())
+	fmt.Fprintf(b, "    mem_bytes: %d\n", dep.MemBytes())
 }
 
 func writeField(b *strings.Builder, key, val string) {
@@ -103,16 +93,9 @@ func writeField(b *strings.Builder, key, val string) {
 	fmt.Fprintf(b, "    %s: %s\n", key, val)
 }
 
-// noteIfServiceUnspecified flags a selected service that has no [services.NAME]
-// block. This is legal under Camp B — the service lives in the DB and just has
-// no build/deploy overrides — but the note catches the far more common cause: a
-// typo in the link's service pointer.
-func noteIfServiceUnspecified(b *strings.Builder, spec deployspec.Spec, selected string) {
-	if selected == "" {
-		return
+func orAuto(builder string) string {
+	if builder == "" {
+		return "(autodetect)"
 	}
-	if _, ok := spec.Services[selected]; ok {
-		return
-	}
-	fmt.Fprintf(b, "  note: selected service %q has no [services.%s] block — it will deploy with defaults (or check for a typo)\n", selected, selected)
+	return builder
 }

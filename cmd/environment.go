@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
 	"conductor/internal/link"
+	"conductor/internal/project"
+	"conductor/internal/storage"
 )
 
 const environmentsUsage = `conductor environments [<subcommand>] --project P
@@ -74,7 +77,32 @@ func listEnvironments(args []string) error {
 	if err := t.require(false, false); err != nil {
 		return usageErr(environmentsUsage, err.Error())
 	}
-	return engineTODO("list environments", t, "")
+
+	ctx := context.Background()
+	store, err := storage.NewPostgresClient(ctx, databaseURL())
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	envs, err := project.New(store).ListEnvironments(ctx, t.Project)
+	if err != nil {
+		return err
+	}
+	if len(envs) == 0 {
+		fmt.Printf("no environments in project %q\n", t.Project)
+		return nil
+	}
+	// Mark the environment this directory currently resolves to (t.Environment),
+	// so `environment list` doubles as "which one am I on".
+	for _, e := range envs {
+		marker := "  "
+		if e.Name == t.Environment {
+			marker = "* "
+		}
+		fmt.Printf("%s%s\n", marker, e.Name)
+	}
+	return nil
 }
 
 func createEnvironment(args []string) error {
@@ -95,8 +123,28 @@ func createEnvironment(args []string) error {
 	if name == "" {
 		return usageErr(environmentsUsage, "create requires a name (-n NAME)")
 	}
-	t.Environment = name
-	return engineTODO("create environment "+name, t, "clones existing services")
+	// The resolved environment (link selection or -e) is the source to clone from;
+	// capture it before the new name takes its place in the target.
+	sourceEnv := t.Environment
+
+	ctx := context.Background()
+	store, err := storage.NewPostgresClient(ctx, databaseURL())
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	res, err := project.New(store).CreateEnvironment(ctx, t.Project, sourceEnv, name)
+	if err != nil {
+		return err
+	}
+
+	if res.SourceEnv == "" {
+		fmt.Printf("created environment %q in project %q (empty — no source environment to clone)\n", name, t.Project)
+		return nil
+	}
+	fmt.Printf("created environment %q in project %q (cloned %d service(s) from %q)\n", name, t.Project, res.ServicesCloned, res.SourceEnv)
+	return nil
 }
 
 func selectEnvironmentCmd(args []string) error {

@@ -9,8 +9,9 @@ import (
 const configUsage = `conductor config
 
 Print the resolved identity (from flags/env/link file) and the parsed
-conductor.toml spec. Read-only — touches neither the control plane nor any
-files. Useful for checking what 'conductor up' would act on before it exists.`
+config.toml spec, merged for the active environment. Read-only — touches neither
+the control plane nor any files. Useful for checking what 'conductor up' would
+deploy.`
 
 func cmdConfig(args []string) error {
 	fs := newFlagSet("config", configUsage)
