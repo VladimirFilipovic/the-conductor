@@ -1,5 +1,22 @@
 -- +goose Up
 
+-- Topology / reference ------------------------------------------------------
+
+-- The closed set of regions the fleet spans. Modeled as a table (not free text)
+-- so every region column below can be FK-guarded: a typo like 'us-east1' fails
+-- the write instead of silently creating a phantom region nothing can schedule
+-- onto. Seeded here, not in db/seeds, because the region set is fixed infra —
+-- the FKs must be satisfiable on a plain `migrate`, before any dev fixtures.
+CREATE TABLE regions (
+	name       text        PRIMARY KEY,
+	created_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO regions (name) VALUES
+	('us-east-1'),
+	('us-west-2'),
+	('eu-west-1');
+
 -- Identity / intent ---------------------------------------------------------
 
 CREATE TABLE projects (
@@ -67,7 +84,7 @@ CREATE UNIQUE INDEX one_current_deployment_per_service
 -- multiRegionConfig { region -> numReplicas }
 CREATE TABLE deployment_regions (
 	deployment_id uuid NOT NULL REFERENCES deployments ON DELETE CASCADE,
-	region        text NOT NULL,
+	region        text NOT NULL REFERENCES regions(name),
 	replicas      int  NOT NULL CHECK (replicas >= 0),
 	PRIMARY KEY (deployment_id, region)
 );
@@ -76,7 +93,7 @@ CREATE TABLE deployment_regions (
 
 CREATE TABLE hosts (
 	id             uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
-	region         text        NOT NULL,
+	region         text        NOT NULL REFERENCES regions(name),
 	hostname       text        NOT NULL UNIQUE,
 	cpu_millicores int         NOT NULL CHECK (cpu_millicores > 0),
 	mem_bytes      bigint      NOT NULL CHECK (mem_bytes > 0),
@@ -94,7 +111,7 @@ CREATE TABLE volumes (
 	service_id          uuid        NOT NULL REFERENCES services ON DELETE RESTRICT,
 	name                text        NOT NULL,             -- engine-internal id (slug of mount_path)
 	mount_path          text        NOT NULL,             -- user-facing handle: the container mount point
-	region              text        NOT NULL,
+	region              text        NOT NULL REFERENCES regions(name),
 	host_id             uuid        REFERENCES hosts,      -- where the disk lives (null until provisioned)
 	backing             text        NOT NULL DEFAULT 'local'
 	                    CHECK (backing IN ('local','networked')),   -- §4b failover story
@@ -134,7 +151,15 @@ CREATE TABLE replicas (
 	last_exit_reason text,
 	revision         bigint      NOT NULL DEFAULT 0,
 	created_at       timestamptz NOT NULL DEFAULT now(),
-	updated_at       timestamptz NOT NULL DEFAULT now()
+	updated_at       timestamptz NOT NULL DEFAULT now(),
+
+	-- A replica may only exist for a (deployment, region) the user actually asked
+	-- for. The denormalized region column stays (the scheduler filters on it every
+	-- tick) — this composite FK just keeps it honest. Transitively it also forces
+	-- region ∈ regions, so no separate FK to regions is needed. Default NO ACTION:
+	-- a region entry can't be dropped out from under live replicas — they must be
+	-- drained/reaped first (deleting the whole deployment still cascades cleanly).
+	FOREIGN KEY (deployment_id, region) REFERENCES deployment_regions (deployment_id, region)
 );
 
 CREATE INDEX replicas_host_id_idx   ON replicas (host_id);
@@ -176,3 +201,4 @@ DROP TABLE environment_services;
 DROP TABLE services;
 DROP TABLE environments;
 DROP TABLE projects;
+DROP TABLE regions;

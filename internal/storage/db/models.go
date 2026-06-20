@@ -69,6 +69,11 @@ type Project struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type Region struct {
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 type Replica struct {
 	ID             uuid.UUID      `json:"id"`
 	DeploymentID   uuid.UUID      `json:"deployment_id"`
