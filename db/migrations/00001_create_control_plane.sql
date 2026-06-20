@@ -92,7 +92,8 @@ CREATE TABLE hosts (
 CREATE TABLE volumes (
 	id                  uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
 	service_id          uuid        NOT NULL REFERENCES services ON DELETE RESTRICT,
-	name                text        NOT NULL,             -- stable identity, e.g. pg-0
+	name                text        NOT NULL,             -- engine-internal id (slug of mount_path)
+	mount_path          text        NOT NULL,             -- user-facing handle: the container mount point
 	region              text        NOT NULL,
 	host_id             uuid        REFERENCES hosts,      -- where the disk lives (null until provisioned)
 	backing             text        NOT NULL DEFAULT 'local'
@@ -103,18 +104,21 @@ CREATE TABLE volumes (
 	                    CHECK (status IN ('pending','attached','detached','resizing','failed')),
 	revision            bigint      NOT NULL DEFAULT 0,
 	created_at          timestamptz NOT NULL DEFAULT now(),
-	UNIQUE (service_id, name)
+	UNIQUE (service_id, name),
+	UNIQUE (service_id, mount_path)
 );
 
 CREATE INDEX volumes_host_id_idx ON volumes (host_id);
 
 -- The running atom (§3). Allocation folded in: host_id + reserved cpu/mem + reason.
+-- Railway-style: replicas are fungible (stateless) or a singleton (a volume-backed
+-- service runs ONE replica, recreate-on-deploy) — so there is no stable ordinal or
+-- per-ordinal identity. Replicated stateful sets (k8s StatefulSet) are out of scope;
+-- HA is composed from multiple single-instance services at the app layer.
 CREATE TABLE replicas (
 	id               uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
 	deployment_id    uuid        NOT NULL REFERENCES deployments ON DELETE CASCADE,
 	region           text        NOT NULL,
-	ordinal          int         NOT NULL,                -- §4b stable identity index
-	identity         text,                                -- stable name, e.g. pg-0.internal
 	host_id          uuid        REFERENCES hosts,         -- null until placed
 	volume_id        uuid        REFERENCES volumes,       -- stateful: the pinned volume
 	cpu_millicores   int         NOT NULL CHECK (cpu_millicores > 0),  -- reserved (folded allocation)
@@ -130,8 +134,7 @@ CREATE TABLE replicas (
 	last_exit_reason text,
 	revision         bigint      NOT NULL DEFAULT 0,
 	created_at       timestamptz NOT NULL DEFAULT now(),
-	updated_at       timestamptz NOT NULL DEFAULT now(),
-	UNIQUE (deployment_id, ordinal)
+	updated_at       timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE INDEX replicas_host_id_idx   ON replicas (host_id);

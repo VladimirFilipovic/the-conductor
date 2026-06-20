@@ -10,20 +10,22 @@ import (
 	"conductor/internal/storage"
 )
 
-const addUsage = `conductor add (--service | --database --engine TYPE) --name NAME [--image IMG] [--repo URL]
+const addUsage = `conductor add (--service | --database --engine TYPE) --name NAME [--image IMG] [--repo URL] [--stateful]
 
-Add a service to the project. --database marks it stateful: it is provisioned
-from a managed image (chosen by --engine) and gets a volume. --service is a
-code service, built from this repo (or the given --image). Requires a project
-and environment.
+Add a service to the project. --service is a code service, built from this repo
+(or the given --image); pass --stateful to run it as a single instance with a
+persistent volume (recreate-on-deploy, no replicas). --database is a preset: a
+stateful service on a managed image chosen by --engine. Requires a project and
+environment.
 
 Flags:
   --service        add a code service
-  --database       add a managed, stateful database
+  --database       add a managed, stateful database (a --service preset)
   --name NAME      service name (required, unique within the project)
   --engine TYPE    database engine: postgres, redis, mysql (required with --database)
   --image IMG      base image for a --service (skip the build step)
   --repo URL       source repo for a --service (default: current directory)
+  --stateful       mark a --service stateful (persistent volume, single instance)
   --link, -l       point this directory's link at the new service`
 
 var dbEngineImages = map[string]string{
@@ -45,6 +47,7 @@ func cmdAdd(args []string) error {
 	engine := fs.String("engine", "", "database engine: postgres, redis, mysql")
 	image := fs.String("image", "", "base image for a code service")
 	repo := fs.String("repo", "", "source repo for a code service")
+	stateful := fs.Bool("stateful", false, "mark a --service stateful (persistent volume, single instance)")
 	var linkAfter bool
 	fs.BoolVar(&linkAfter, "l", false, "point this directory's link at the new service")
 	fs.BoolVar(&linkAfter, "link", false, "point this directory's link at the new service")
@@ -64,13 +67,13 @@ func cmdAdd(args []string) error {
 	if *name == "" {
 		return usageErr(addUsage, "--name is required")
 	}
-	if linkAfter && *database {
-		return usageErr(addUsage, "--link is only valid with --service; databases cannot be linked")
-	}
 
 	t.Service = *name
 	if *service && *engine != "" {
 		return usageErr(addUsage, "--engine is only valid with --database")
+	}
+	if *stateful && *database {
+		return usageErr(addUsage, "--stateful is redundant with --database (databases are already stateful)")
 	}
 
 	ctx := context.Background()
@@ -88,7 +91,7 @@ func cmdAdd(args []string) error {
 		if err := addDatabase(ctx, proj, t, *engine); err != nil {
 			return err
 		}
-	} else if err := addService(ctx, proj, t, *image, *repo); err != nil {
+	} else if err := addService(ctx, proj, t, *image, *repo, *stateful); err != nil {
 		return err
 	}
 
@@ -131,19 +134,24 @@ func addDatabase(ctx context.Context, proj *project.Service, t Target, engine st
 	return nil
 }
 
-func addService(ctx context.Context, proj *project.Service, t Target, image, repo string) error {
+func addService(ctx context.Context, proj *project.Service, t Target, image, repo string, stateful bool) error {
 	if image != "" && repo != "" {
 		return usageErr(addUsage, "--image and --repo are mutually exclusive")
 	}
 
 	svc, err := proj.AddService(ctx, project.AddServiceInput{
-		Target: t.Target,
-		Source: project.Source{Repo: repo, Image: image},
+		Target:   t.Target,
+		Stateful: stateful,
+		Source:   project.Source{Repo: repo, Image: image},
 	})
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("added service %q to %s / %s\n", svc.Name, t.Project, t.Environment)
+	kind := "service"
+	if stateful {
+		kind = "stateful service"
+	}
+	fmt.Printf("added %s %q to %s / %s\n", kind, svc.Name, t.Project, t.Environment)
 	return nil
 }

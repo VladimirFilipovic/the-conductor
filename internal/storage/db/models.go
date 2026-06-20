@@ -73,8 +73,6 @@ type Replica struct {
 	ID             uuid.UUID      `json:"id"`
 	DeploymentID   uuid.UUID      `json:"deployment_id"`
 	Region         string         `json:"region"`
-	Ordinal        int32          `json:"ordinal"`
-	Identity       sql.NullString `json:"identity"`
 	HostID         uuid.NullUUID  `json:"host_id"`
 	VolumeID       uuid.NullUUID  `json:"volume_id"`
 	CpuMillicores  int32          `json:"cpu_millicores"`
@@ -102,6 +100,7 @@ type Volume struct {
 	ID                uuid.UUID     `json:"id"`
 	ServiceID         uuid.UUID     `json:"service_id"`
 	Name              string        `json:"name"`
+	MountPath         string        `json:"mount_path"`
 	Region            string        `json:"region"`
 	HostID            uuid.NullUUID `json:"host_id"`
 	Backing           string        `json:"backing"`

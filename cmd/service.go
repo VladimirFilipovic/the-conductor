@@ -13,9 +13,12 @@ import (
 
 const serviceUsage = `conductor service [name]
 
-With no argument, list the services in the current environment. With a name,
-select it as the active service: the name is written as the service pointer in
-the nearest .conductor/config.json. Requires a project and environment.`
+Subcommands:
+  (none)    List the services in the current environment.
+  NAME      Select NAME as the active service: writes the service pointer into
+            the nearest .conductor/config.json.
+
+Requires a project and environment.`
 
 func cmdService(args []string) error {
 	fs := newFlagSet("service", serviceUsage)
@@ -24,6 +27,12 @@ func cmdService(args []string) error {
 	addEnvironmentFlag(fs, &t)
 	if err := fs.parse(args); err != nil {
 		return err
+	}
+	// At most one positional (the service name). stdlib flag stops at the first
+	// positional, so a flag typed after the name (`service web -e prod`) lands here
+	// as an extra arg — reject it loudly instead of silently dropping the flag.
+	if fs.NArg() > 1 {
+		return usageErr(serviceUsage, "unexpected argument "+fs.Arg(1)+" (flags must come before the service name)")
 	}
 	resolve(&t, true)
 	if err := t.require(true, false); err != nil {
@@ -56,7 +65,7 @@ func listServicesCmd(ctx context.Context, proj *project.Service, t Target) error
 	for _, s := range services {
 		kind := "service"
 		if s.Stateful {
-			kind = "database"
+			kind = "stateful"
 		}
 		fmt.Printf("%-20s %s\n", s.Name, kind)
 	}

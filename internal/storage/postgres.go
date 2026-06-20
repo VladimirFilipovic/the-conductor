@@ -165,6 +165,175 @@ func (q querier) ListServicesByEnvironment(ctx context.Context, projectName stri
 	return q.queries.ListServicesByEnvironment(ctx, db.ListServicesByEnvironmentParams{ProjectName: projectName, Name: environment})
 }
 
+func (q querier) ProjectStatus(ctx context.Context, projectName, environment, service string) ([]db.ProjectStatusRow, error) {
+	return q.queries.ProjectStatus(ctx, db.ProjectStatusParams{
+		ProjectName: projectName,
+		Environment: environment,
+		Service:     service,
+	})
+}
+
+func (q querier) GetEnvironmentService(ctx context.Context, projectName, environment, service string) (db.GetEnvironmentServiceRow, error) {
+	row, err := q.queries.GetEnvironmentService(ctx, db.GetEnvironmentServiceParams{
+		ProjectName: projectName,
+		Environment: environment,
+		Service:     service,
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.GetEnvironmentServiceRow{}, fmt.Errorf("service %q in %s/%s: %w", service, projectName, environment, ErrNotFound)
+	}
+	if err != nil {
+		return db.GetEnvironmentServiceRow{}, err
+	}
+	return row, nil
+}
+
+func (q querier) NextDeploymentVersion(ctx context.Context, environmentServiceID uuid.UUID) (int32, error) {
+	return q.queries.NextDeploymentVersion(ctx, environmentServiceID)
+}
+
+func (q querier) SupersedeCurrentDeployments(ctx context.Context, environmentServiceID uuid.UUID) error {
+	return q.queries.SupersedeCurrentDeployments(ctx, environmentServiceID)
+}
+
+func (q querier) CreateDeployment(ctx context.Context, arg db.CreateDeploymentParams) (db.Deployment, error) {
+	return q.queries.CreateDeployment(ctx, arg)
+}
+
+func (q querier) SetDeploymentRegion(ctx context.Context, deploymentID uuid.UUID, region string, replicas int32) error {
+	return q.queries.SetDeploymentRegion(ctx, db.SetDeploymentRegionParams{
+		DeploymentID: deploymentID,
+		Region:       region,
+		Replicas:     replicas,
+	})
+}
+
+func (q querier) GetCurrentDeployment(ctx context.Context, environmentServiceID uuid.UUID) (db.GetCurrentDeploymentRow, error) {
+	row, err := q.queries.GetCurrentDeployment(ctx, environmentServiceID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.GetCurrentDeploymentRow{}, fmt.Errorf("no current deployment (run `conductor up` first): %w", ErrNotFound)
+	}
+	if err != nil {
+		return db.GetCurrentDeploymentRow{}, err
+	}
+	return row, nil
+}
+
+func (q querier) GetDeploymentByVersion(ctx context.Context, environmentServiceID uuid.UUID, version int32) (db.GetDeploymentByVersionRow, error) {
+	row, err := q.queries.GetDeploymentByVersion(ctx, db.GetDeploymentByVersionParams{
+		EnvironmentServiceID: environmentServiceID,
+		Version:              version,
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.GetDeploymentByVersionRow{}, ErrNotFound
+	}
+	if err != nil {
+		return db.GetDeploymentByVersionRow{}, err
+	}
+	return row, nil
+}
+
+func (q querier) PreviousDeploymentVersion(ctx context.Context, environmentServiceID uuid.UUID, before int32) (int32, error) {
+	v, err := q.queries.PreviousDeploymentVersion(ctx, db.PreviousDeploymentVersionParams{
+		EnvironmentServiceID: environmentServiceID,
+		Before:               before,
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	return v, err
+}
+
+func (q querier) MarkCurrentRolledBack(ctx context.Context, environmentServiceID uuid.UUID) error {
+	return q.queries.MarkCurrentRolledBack(ctx, environmentServiceID)
+}
+
+func (q querier) SetDeploymentCurrent(ctx context.Context, deploymentID uuid.UUID) error {
+	return q.queries.SetDeploymentCurrent(ctx, deploymentID)
+}
+
+func (q querier) ListEnvironments(ctx context.Context, projectName string) ([]db.Environment, error) {
+	return q.queries.ListEnvironments(ctx, projectName)
+}
+
+func (q querier) CloneEnvironmentServices(ctx context.Context, srcEnvironmentID, dstEnvironmentID uuid.UUID) (int64, error) {
+	return q.queries.CloneEnvironmentServices(ctx, db.CloneEnvironmentServicesParams{
+		DstEnvironmentID: dstEnvironmentID,
+		SrcEnvironmentID: srcEnvironmentID,
+	})
+}
+
+func (q querier) CurrentDeploymentID(ctx context.Context, projectName, environment, service string) (uuid.UUID, error) {
+	id, err := q.queries.CurrentDeploymentID(ctx, db.CurrentDeploymentIDParams{
+		ProjectName: projectName,
+		Environment: environment,
+		Service:     service,
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return uuid.UUID{}, fmt.Errorf("service %q in %s/%s has no active deployment: %w", service, projectName, environment, ErrNotFound)
+	}
+	if err != nil {
+		return uuid.UUID{}, err
+	}
+	return id, nil
+}
+
+func (q querier) ZeroDeploymentRegions(ctx context.Context, deploymentID uuid.UUID) error {
+	return q.queries.ZeroDeploymentRegions(ctx, deploymentID)
+}
+
+func (q querier) CreateVolume(ctx context.Context, serviceID uuid.UUID, name, region, mountPath string, sizeBytes int64) (db.Volume, error) {
+	v, err := q.queries.CreateVolume(ctx, db.CreateVolumeParams{
+		ServiceID:        serviceID,
+		Name:             name,
+		Region:           region,
+		MountPath:        mountPath,
+		DesiredSizeBytes: sizeBytes,
+	})
+	if uniqueViolation(err) {
+		return db.Volume{}, fmt.Errorf("volume at %q: %w", mountPath, ErrExists)
+	}
+	if err != nil {
+		return db.Volume{}, err
+	}
+	return v, nil
+}
+
+func (q querier) ListVolumesByService(ctx context.Context, projectName, service string) ([]db.Volume, error) {
+	return q.queries.ListVolumesByService(ctx, db.ListVolumesByServiceParams{ProjectName: projectName, Name: service})
+}
+
+func (q querier) UpdateVolumeSize(ctx context.Context, serviceID uuid.UUID, mountPath string, sizeBytes int64) (db.Volume, error) {
+	v, err := q.queries.UpdateVolumeSize(ctx, db.UpdateVolumeSizeParams{
+		DesiredSizeBytes: sizeBytes,
+		ServiceID:        serviceID,
+		MountPath:        mountPath,
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.Volume{}, fmt.Errorf("volume at %q: %w", mountPath, ErrNotFound)
+	}
+	if err != nil {
+		return db.Volume{}, err
+	}
+	return v, nil
+}
+
+func (q querier) DeleteVolume(ctx context.Context, serviceID uuid.UUID, mountPath string) (db.Volume, error) {
+	v, err := q.queries.DeleteVolume(ctx, db.DeleteVolumeParams{ServiceID: serviceID, MountPath: mountPath})
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.Volume{}, fmt.Errorf("volume at %q: %w", mountPath, ErrNotFound)
+	}
+	// A replica still pins this volume (replicas.volume_id FK); `down` the service
+	// first so the reconcile loop reaps the replicas, then the disk can go.
+	if fkViolation(err) {
+		return db.Volume{}, fmt.Errorf("volume at %q is still attached to a replica: scale the service down first", mountPath)
+	}
+	if err != nil {
+		return db.Volume{}, err
+	}
+	return v, nil
+}
+
 func (q querier) AddServiceToEnvironment(ctx context.Context, environmentID, serviceID uuid.UUID, source json.RawMessage) (db.EnvironmentService, error) {
 	if source == nil {
 		source = json.RawMessage("{}")
