@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"conductor/internal/deployspec"
+	"conductor/internal/storage"
 	"conductor/internal/target"
 )
 
@@ -44,7 +45,7 @@ type ScaleInput struct {
 // all-or-nothing. The service must have been deployed (`up`); an undeployed
 // service surfaces as storage.ErrNotFound.
 func (s *Service) Scale(ctx context.Context, in ScaleInput) error {
-	return s.store.WithTx(ctx, func(st Store) error {
+	return s.store.WithTx(ctx, func(st storage.Store) error {
 		svc, err := st.GetService(ctx, in.Project, in.Service)
 		if err != nil {
 			return err
@@ -75,7 +76,7 @@ func (s *Service) Scale(ctx context.Context, in ScaleInput) error {
 // compute while leaving the deployment (and its volumes) intact. Like Scale it
 // needs an active deployment.
 func (s *Service) Down(ctx context.Context, t target.Target) error {
-	return s.store.WithTx(ctx, func(st Store) error {
+	return s.store.WithTx(ctx, func(st storage.Store) error {
 		depID, err := st.CurrentDeploymentID(ctx, t.Project, t.Environment, t.Service)
 		if err != nil {
 			return err

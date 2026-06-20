@@ -3,6 +3,7 @@ package project
 import (
 	"context"
 
+	"conductor/internal/storage"
 	"conductor/internal/storage/db"
 )
 
@@ -30,7 +31,7 @@ type CreateEnvironmentResult struct {
 // environment is never visible. A blank sourceEnv creates an empty environment.
 func (s *Service) CreateEnvironment(ctx context.Context, projectName, sourceEnv, name string) (CreateEnvironmentResult, error) {
 	res := CreateEnvironmentResult{SourceEnv: sourceEnv}
-	err := s.store.WithTx(ctx, func(st Store) error {
+	err := s.store.WithTx(ctx, func(st storage.Store) error {
 		env, err := st.CreateEnvironment(ctx, projectName, name)
 		if err != nil {
 			return err

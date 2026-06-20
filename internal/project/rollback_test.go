@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"conductor/internal/project"
+	"conductor/internal/storage"
 	"conductor/internal/storage/db"
 	"conductor/internal/target"
 
@@ -45,13 +46,13 @@ func TestParseVersion(t *testing.T) {
 	}
 }
 
-// fakeStore implements project.TxStore with only the methods Rollback touches;
+// fakeStore implements storage.TxStore with only the methods Rollback touches;
 // every other Store method comes from the embedded nil interface and would panic
 // if called — which is exactly what we want a unit test to assert (Rollback
 // must not reach for anything else). WithTx runs the callback against the fake
 // itself, so the whole rollback runs in-memory.
 type fakeStore struct {
-	project.Store
+	storage.Store
 
 	es        db.GetEnvironmentServiceRow
 	current   db.GetCurrentDeploymentRow
@@ -64,7 +65,7 @@ type fakeStore struct {
 	setCurrentID uuid.UUID
 }
 
-func (f *fakeStore) WithTx(_ context.Context, fn func(project.Store) error) error {
+func (f *fakeStore) WithTx(_ context.Context, fn func(storage.Store) error) error {
 	return fn(f)
 }
 
