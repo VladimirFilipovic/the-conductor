@@ -1,15 +1,11 @@
 package engine
 
-import (
-	"conductor/internal/storage"
-)
-
 type Orchestrator struct {
-	store storage.Store
+	store OrchestratorStore
 }
 
 type Sensor struct {
-	store storage.Store
+	store SensorStore
 }
 
 func Run(orchestrator *Orchestrator, sensor *Sensor) error {
