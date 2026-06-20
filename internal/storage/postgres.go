@@ -72,6 +72,13 @@ func (c *PostgresClient) Close() error { return c.pool.Close() }
 // error from fn (or commit) rolls the whole unit back, so multi-step workflows
 // in the project package are all-or-nothing.
 func (c *PostgresClient) WithTx(ctx context.Context, fn func(Store) error) error {
+	return c.withTx(ctx, func(q querier) error { return fn(q) })
+}
+
+// withTx is the shared begin/commit/rollback plumbing behind every With*Tx
+// entry point. Each public entry hands the tx-scoped querier to its callback
+// typed as the narrow view that callback is allowed to touch.
+func (c *PostgresClient) withTx(ctx context.Context, fn func(querier) error) error {
 	tx, err := c.pool.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("storage: begin tx: %w", err)
