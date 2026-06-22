@@ -150,6 +150,7 @@ work. Between "image built" and "service serving traffic" sits the orchestration
     <ul>
       <li>Replica is <b>pinned</b> to its Volume's host (data has gravity).</li>
       <li><b>Single-writer</b> invariant: never two writers on one volume.</li>
+      <li><b>Exactly one replica</b> (singleton, <code>replicas=1</code>) — no horizontal scale; HA is the app's job.</li>
       <li>Rollout: <b>stop old, then start new</b> on same host (recreate), or orchestrated volume hand-off. Brief downtime unless replicated.</li>
       <li>Host failure → can't "just reschedule"; needs volume reattach/restore + fencing.</li>
     </ul>
@@ -191,15 +192,20 @@ disk's location — not the scheduler's free choice — decides where the replic
   <li><b>Stable identity</b> — a fixed name (<code>pg-0</code>), not a slot behind a load balancer, so clients/peers address a <i>specific</i> instance.</li>
 </ul>
 
-<h3>Scaling — the part people get wrong</h3>
+<h3>Scaling — the deliberate non-feature</h3>
 <p>You <b>cannot</b> add interchangeable copies like stateless — each instance needs its <i>own</i> data.
-Scaling stateful = <b>N distinct instances, each with its own volume and stable name</b>
-(<code>pg-0</code>, <code>pg-1</code>, …) — what Kubernetes calls a <i>StatefulSet</i>.</p>
-<div class="note"><b>Key boundary:</b> the orchestrator does <b>not</b> replicate data — it only guarantees
-<i>stable identity</i> + <i>stable volume binding</i> per instance. <b>Replication is the app's job</b>
-(Postgres streaming, Raft, etc.). Most stateful workloads run as <b>singletons</b>
-(<code>replicas=1</code>); HA lives inside the app via leader election. So "add a stateful workload"
-usually = provision 1 volume + run 1 pinned, named replica.</div>
+<b>Design decision (permanent): a stateful service runs exactly one replica</b> (<code>replicas=1</code>,
+recreate-on-deploy). We do <b>not</b> model the Kubernetes <i>StatefulSet</i> shape — N distinct ordinals
+(<code>pg-0</code>, <code>pg-1</code>, …), each with its own volume and an ordered rollout of the members.
+That is out of scope, by design, not "v1 only".</p>
+<div class="note"><b>Why a singleton, not a StatefulSet:</b> the orchestrator does <b>not</b> replicate data —
+it only guarantees a <i>single-writer volume binding</i> for the one instance. <b>Replication / HA is the
+app's job</b> (Postgres streaming, Raft, etc.); a user who wants HA composes it from multiple
+single-instance services at the app layer, not by asking us to scale one volume-backed service. So "add a
+stateful workload" is <i>always</i> = provision 1 volume + run 1 pinned replica. This collapses a whole
+class of hard problems — ordinal identity, per-ordinal volume provisioning, ordered N-member handoff —
+that we then never have to build. The schema enforces it: <code>replicas</code> carries no ordinal column,
+and a volume-backed service is reconciled to a single row.</div>
 
 <h3>The fork that decides the failure story: where does the disk live?</h3>
 <table>
@@ -246,24 +252,35 @@ stays policy-agnostic; any client (human, GitOps, autoscaler) drives it by patch
                                          │ watch / notify
                          ┌───────────────▼─────────────────────────────┐
                          │            CONTROL PLANE                     │
+                         │   TWO independent loops over one Postgres    │
+                         │   (`conductor run` = 2 goroutines)           │
                          │                                              │
+                         │  CONTROLLER side ─ writes DESIRED / intent   │
                          │  ┌─────────────┐   ┌──────────────────────┐ │
                          │  │ Reconciler  │──►│ Scheduler            │ │
-                         │  │ (level-     │   │ filter → score →     │ │
-                         │  │  triggered) │   │ bind (bin-pack)      │ │
+                         │  │ desired vs  │   │ filter → score →     │ │
+                         │  │ observed    │   │ bind (bin-pack)      │ │
                          │  └─────┬───────┘   └──────────────────────┘ │
                          │        │ emits desired Allocations           │
                          │  ┌─────▼───────────────────────────────────┐ │
                          │  │ Rollout Orchestrator (Temporal workflow)│ │
                          │  │ start→healthgate→shift→drain→reclaim    │ │
                          │  └─────┬───────────────────────────────────┘ │
-                         └────────┼─────────────────────────────────────┘
+                         │        │                                      │
+                         │  SENSOR side ─ writes OBSERVED only           │
+                         │  ┌─────┴───────────────────────────────────┐ │
+                         │  │ Observer  (own loop, makes NO decisions) │ │
+                         │  │ ingest heartbeats/status → write back:   │ │
+                         │  │ replicas.healthy, hosts.last_heartbeat,  │ │
+                         │  │ volumes.observed_size_bytes              │ │
+                         │  └─────┬───────────────────────────────────┘ │
+                         └────────┼──────────────────────────┬──────────┘
                                   │ gRPC desired-task stream  ▲ status/heartbeat
                          ┌────────▼──────────┐      ┌─────────┴─────────┐
                          │ Host Agent (node) │ ...  │ Host Agent (node) │
                          │ runs micro-VM/    │      │ pulls image,      │
                          │ container, mounts │      │ reports health    │
-                         │ volume, healthck  │      │                   │
+                         │ volume, healthck  │      │ (push heartbeat)  │
                          └───────────────────┘      └───────────────────┘
                               DATA PLANE  (bare-metal fleet, N regions)
 </div>
@@ -272,11 +289,29 @@ stays policy-agnostic; any client (human, GitOps, autoscaler) drives it by patch
 <table>
   <tr><th>Component</th><th>Responsibility</th><th>Notes</th></tr>
   <tr><td class="req">API + State Store</td><td>Accept desired specs; durable source of truth.</td><td>Postgres. Every change = a row; observed state written back.</td></tr>
-  <tr><td class="req">Reconciler</td><td>Compare desired vs observed; compute needed Replicas; drive convergence.</td><td><b>Level-triggered</b> control loop — recomputes from full state, not from events. Idempotent.</td></tr>
+  <tr><td class="req">Reconciler</td><td>Compare desired vs observed; compute needed Replicas; drive convergence. <b>Controller</b> — writes desired/intent only (creates replica rows, sets <code>desired_status</code>, drives the rollout).</td><td><b>Level-triggered</b> control loop — recomputes from full state, not from events. Idempotent. Reads observed columns; never reads the runtime directly (the Observer owns that).</td></tr>
+  <tr><td class="req">Observer</td><td>Ingest agent heartbeats/status and write <b>observed</b> state back to the store. Makes <b>no</b> placement/rollout decisions — pure sensor.</td><td>Separate level-triggered loop (its own goroutine). Owns the observed columns: <code>replicas.healthy</code>/phase, <code>hosts.last_heartbeat</code>/status, <code>volumes.observed_size_bytes</code>. Decoupling it from the Reconciler is load-bearing: <b>§8 host-down detection</b> needs liveness written by an independent signal, and it keeps <code>status</code> truthful even if the controller stalls.</td></tr>
   <tr><td class="req">Scheduler</td><td>Bind unplaced Replicas to Hosts.</td><td>Three-phase: <b>filter</b> (hard constraints) → <b>score</b> (bin-pack/spread) → <b>bind</b> (atomic reserve).</td></tr>
   <tr><td class="req">Rollout Orchestrator</td><td>Sequence a deploy's state machine durably.</td><td>Temporal workflow — survives restarts, retries activities, guarantees forward progress / rollback.</td></tr>
   <tr><td class="req">Host Agent</td><td>Execute desired tasks locally; report truth.</td><td>Pulls image, runs micro-VM/container, mounts volume, runs healthcheck, heartbeats. The only thing that touches reality.</td></tr>
 </table>
+<div class="note"><b>Sensor / controller split.</b> <code>conductor run</code> starts <b>two independent
+goroutines</b> coordinated only through Postgres: an <b>Observer</b> (sensor) that writes the observed
+columns, and a <b>Reconciler</b> (controller) that reads desired + observed and acts. Neither calls the
+other in memory. This is the classic control-theory split, and it buys three things: (1) <b>independent
+cadence</b> — heartbeat ingestion can tick fast while reconciliation ticks slower; (2) <b>failure
+isolation</b> — if the controller stalls, observed state stays fresh so <code>status</code> is truthful,
+and §8 host-down detection (stale-heartbeat) only works because liveness is an <i>independent</i> signal;
+(3) <b>free to split later</b> — the contract is DB columns, not function calls, so the two loops can
+become two processes (or the Reconciler can move to Temporal) without touching either side. Both loops
+guard every write with the <code>revision</code> CAS, so overlapping ticks stay safe. Agents <b>push</b>
+heartbeats (the <code>hosts</code> row is agent-written); the Observer is an <i>ingestor + staleness
+detector</i>, not something that reaches into machines.</div>
+<div class="note"><b>Where the replica's two halves live.</b> Per the desired/observed rule (§3), the
+<code>replicas</code> row is split by writer: the <b>Reconciler</b> owns the intent half
+(<code>desired_status</code> running/stopped, plus creating/placing the row); the <b>Observer</b> owns the
+truth half (<code>healthy</code>, observed phase, exit reason). That clean ownership boundary is what lets
+the two goroutines write the same table without contending.</div>
 
 <h2><span class="n">★</span>Reference: how Railway actually does this</h2>
 <p>Railway has publicly described its orchestrator. It is a <b>custom, Temporal-based engine — explicitly
@@ -582,6 +617,11 @@ the runtime reports back. Everything below is one continuous control loop.</p>
 marches through steps. You just <b>change <code>desired</code></b> (3→5 replicas, v1→v2) and the same
 loop closes the gap. Scale, deploy, rollback, self-heal are all <i>the same code path</i> reacting to a
 changed goal or a changed reality.</div>
+<div class="note"><b>One simplification above:</b> the loop calls <code>runtime.List()</code> inline to
+read truth. In the real control plane that read is a <i>separate loop</i> — the <b>Observer</b> (§5) —
+which writes observed state into Postgres; the Reconciler then reads <code>observed</code> from the store
+rather than the runtime directly. Collapsing both into one loop here keeps the example readable; the split
+is what makes it crash-safe and gives §8 its independent liveness signal.</div>
 
 <h3>Trace: deploy → scale → crash → self-heal</h3>
 <p>What you'd literally see in the chaos CLI, tick by tick:</p>
