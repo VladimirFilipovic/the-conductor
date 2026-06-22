@@ -14,8 +14,10 @@ GOLANGCI_LINT_VERSION ?= v2.11.4
 # all see them without you setting anything.
 CONDUCTOR_DATABASE_URL ?= postgres://conductor:conductor@localhost:5432/conductor?sslmode=disable
 CONDUCTOR_TEST_DSN     ?= postgres://conductor:conductor@localhost:5432/conductor?sslmode=disable
+LOG_LEVEL              ?= DEBUG
 export CONDUCTOR_DATABASE_URL
 export CONDUCTOR_TEST_DSN
+export LOG_LEVEL
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) .
