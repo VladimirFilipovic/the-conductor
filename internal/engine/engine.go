@@ -1,13 +1,18 @@
 package engine
 
-type Orchestrator struct {
-	store OrchestratorStore
-}
+import (
+	"context"
+	"log/slog"
+)
 
-type Sensor struct {
-	store SensorStore
-}
+func Run(ctx context.Context, scheduler *Scheduler, sensor *Sensor) error {
+	slog.Info("engine starting")
 
-func Run(orchestrator *Orchestrator, sensor *Sensor) error {
+	go sensor.tick(ctx)
+	go scheduler.tick(ctx)
+
+	<-ctx.Done()
+
+	slog.Info("engine shutting down")
 	return nil
 }
