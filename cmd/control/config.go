@@ -3,7 +3,7 @@ package control
 import (
 	"fmt"
 
-	"conductor/internal/config"
+	"conductor/internal/spec"
 )
 
 const configUsage = `conductor config
@@ -22,7 +22,7 @@ func cmdConfig(args []string) error {
 	}
 	resolve(&t, true)
 
-	report, err := config.Render(t.Target)
+	report, err := spec.Render(t.Target)
 	if err != nil {
 		return err
 	}

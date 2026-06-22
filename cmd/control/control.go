@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"conductor/internal/config"
 	"conductor/internal/link"
 	"conductor/internal/target"
 )
@@ -16,22 +17,12 @@ import (
 // for release builds; otherwise it falls back to "dev".
 var version = "dev"
 
-// envDatabaseURL holds the control-plane Postgres DSN.
-const envDatabaseURL = "CONDUCTOR_DATABASE_URL"
+// cfg is the process-wide environment, loaded once in Run before any command
+// dispatches. Commands read DSN / identity defaults from here, not os.Getenv.
+var cfg config.Config
 
-// defaultDatabaseURL targets the local docker-compose Postgres (see
-// docker-compose.yml) so dev commands work out of the box without exporting
-// CONDUCTOR_DATABASE_URL. The Makefile sets the same value for `make` recipes.
-const defaultDatabaseURL = "postgres://conductor:conductor@localhost:5432/conductor?sslmode=disable"
-
-// databaseURL resolves the control-plane DSN, falling back to the local dev
-// database when CONDUCTOR_DATABASE_URL is unset.
-func databaseURL() string {
-	if dsn := os.Getenv(envDatabaseURL); dsn != "" {
-		return dsn
-	}
-	return defaultDatabaseURL
-}
+// databaseURL is the control-plane DSN resolved at startup.
+func databaseURL() string { return cfg.DatabaseURL }
 
 const usage = `conductor — drive the orchestration engine
 
@@ -85,8 +76,14 @@ func Run(args []string) int {
 		return 0
 	}
 
+	loaded, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "conductor: %s\n", err)
+		return 1
+	}
+	cfg = loaded
+
 	cmdArgs := args[1:]
-	var err error
 	switch args[0] {
 	case "init":
 		err = cmdInit(cmdArgs)
@@ -183,13 +180,6 @@ func usageErr(usageText, msg string) error {
 	return &usageError{text: fmt.Sprintf("%s\n\n%s", msg, usageText)}
 }
 
-// Environment-variable fallbacks, consulted when the matching flag is empty.
-const (
-	envProject     = "CONDUCTOR_PROJECT"
-	envEnvironment = "CONDUCTOR_ENVIRONMENT"
-	envService     = "CONDUCTOR_SERVICE"
-)
-
 // Target is the (project, environment, service) triple every command resolves
 // before talking to the orchestration engine. Identity comes, in precedence
 // order, from flags, then environment variables, then the folder-link file
@@ -216,13 +206,13 @@ func dash(s string) string {
 func (c Target) require(environment, service bool) error {
 	var missing []string
 	if c.Project == "" {
-		missing = append(missing, "--project/-p (or "+envProject+")")
+		missing = append(missing, "--project/-p (or "+config.VarProject+")")
 	}
 	if environment && c.Environment == "" {
-		missing = append(missing, "--environment/-e (or "+envEnvironment+")")
+		missing = append(missing, "--environment/-e (or "+config.VarEnvironment+")")
 	}
 	if service && c.Service == "" {
-		missing = append(missing, "--service/-s (or "+envService+")")
+		missing = append(missing, "--service/-s (or "+config.VarService+")")
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("missing required target: %s", strings.Join(missing, ", "))
@@ -262,9 +252,9 @@ func addServiceFlag(fs *flagSet, t *Target) {
 // useLink=false so an existing link's project can't silently satisfy a re-link
 // (the whole point of `link` is to (re)set it).
 func resolve(t *Target, useLink bool) {
-	t.Project = orEnv(t.Project, envProject)
-	t.Environment = orEnv(t.Environment, envEnvironment)
-	t.Service = orEnv(t.Service, envService)
+	t.Project = orDefault(t.Project, cfg.Project)
+	t.Environment = orDefault(t.Environment, cfg.Environment)
+	t.Service = orDefault(t.Service, cfg.Service)
 	if !useLink {
 		return
 	}
@@ -280,7 +270,7 @@ func resolve(t *Target, useLink bool) {
 // project view (status) use this so the link's env/service can't silently
 // narrow the output — only an explicit -e/-s does.
 func resolveProject(t *Target) {
-	if t.Project = orEnv(t.Project, envProject); t.Project != "" {
+	if t.Project = orDefault(t.Project, cfg.Project); t.Project != "" {
 		return
 	}
 	if l, _, ok, err := link.Load(); err == nil && ok {
@@ -293,13 +283,6 @@ func splitSubcommand(args []string) (sub string, rest []string) {
 		return "", args
 	}
 	return args[0], args[1:]
-}
-
-func orEnv(flagVal, key string) string {
-	if flagVal != "" {
-		return flagVal
-	}
-	return os.Getenv(key)
 }
 
 func orDefault(val, fallback string) string {
