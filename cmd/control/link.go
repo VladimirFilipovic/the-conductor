@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"conductor/internal/config"
 	"conductor/internal/link"
 	"conductor/internal/project"
 	"conductor/internal/storage"
@@ -37,7 +38,7 @@ func cmdLink(args []string) error {
 	// satisfy a re-link, since the point of `link` is to (re)set it.
 	resolve(&t, false)
 	if t.Project == "" {
-		return usageErr(linkUsage, "link requires a project (--project/-p or "+envProject+")")
+		return usageErr(linkUsage, "link requires a project (--project/-p or "+config.VarProject+")")
 	}
 
 	dir, err := os.Getwd()

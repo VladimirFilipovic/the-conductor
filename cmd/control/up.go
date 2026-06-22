@@ -113,7 +113,7 @@ func cmdUp(args []string) error {
 		RestartMax:    deployCfg.RestartMaxOrDefault(),
 		Region:        deployCfg.RegionOrDefault(),
 		NumReplicas:   deployCfg.ReplicasOrDefault(),
-		CreatedBy:     os.Getenv("USER"),
+		CreatedBy:     cfg.User,
 	})
 	if err != nil {
 		return err
