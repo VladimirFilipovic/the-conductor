@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"conductor/internal/storage/db"
 
@@ -18,6 +19,28 @@ import (
 var ErrNotFound = errors.New("not found")
 
 var ErrExists = errors.New("already exists")
+
+// maskDSN redacts the password component of a postgres DSN so it's safe to log.
+func maskDSN(dsn string) string {
+	// Best-effort: replace everything between :// and @ with user:***
+	if i := len("postgres://"); len(dsn) > i {
+		if at := findByte(dsn[i:], '@'); at >= 0 {
+			if colon := findByte(dsn[i:i+at], ':'); colon >= 0 {
+				return "postgres://" + dsn[i:i+colon+1] + "***" + dsn[i+at:]
+			}
+		}
+	}
+	return dsn
+}
+
+func findByte(s string, b byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == b {
+			return i
+		}
+	}
+	return -1
+}
 
 // uniqueViolation reports whether err is a Postgres unique-constraint failure
 // (SQLSTATE 23505), letting Insert paths map a duplicate to ErrExists without a
@@ -62,6 +85,7 @@ func NewPostgresClient(ctx context.Context, dsn string) (*PostgresClient, error)
 		_ = pool.Close()
 		return nil, fmt.Errorf("storage: connect: %w", err)
 	}
+	slog.Info("storage: connected", "dsn", maskDSN(dsn))
 	return &PostgresClient{querier: querier{queries: db.New(pool)}, pool: pool}, nil
 }
 
@@ -72,14 +96,25 @@ func (c *PostgresClient) Close() error { return c.pool.Close() }
 // error from fn (or commit) rolls the whole unit back, so multi-step workflows
 // in the project package are all-or-nothing.
 func (c *PostgresClient) WithTx(ctx context.Context, fn func(Store) error) error {
-	return c.withTx(ctx, func(q querier) error { return fn(q) })
+	return c.withTx(ctx, nil, func(q querier) error { return fn(q) })
+}
+
+// WithReadTx runs fn against a tx-scoped SnapshotReader at REPEATABLE READ, so
+// every read fn issues observes one frozen instant: the desired and observed
+// halves of a reconcile pass can't drift between queries and tear the diff. The
+// tx is read-only — it takes no row locks and exists only to pin the snapshot,
+// so it always rolls back regardless of fn's error.
+func (c *PostgresClient) WithReadTx(ctx context.Context, fn func(SnapshotReader) error) error {
+	opts := &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}
+	return c.withTx(ctx, opts, func(q querier) error { return fn(q) })
 }
 
 // withTx is the shared begin/commit/rollback plumbing behind every With*Tx
-// entry point. Each public entry hands the tx-scoped querier to its callback
-// typed as the narrow view that callback is allowed to touch.
-func (c *PostgresClient) withTx(ctx context.Context, fn func(querier) error) error {
-	tx, err := c.pool.BeginTx(ctx, nil)
+// entry point. opts is nil for the default read-write tx; read paths pass a
+// read-only snapshot isolation. Each public entry hands the tx-scoped querier to
+// its callback typed as the narrow view that callback is allowed to touch.
+func (c *PostgresClient) withTx(ctx context.Context, opts *sql.TxOptions, fn func(querier) error) error {
+	tx, err := c.pool.BeginTx(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("storage: begin tx: %w", err)
 	}

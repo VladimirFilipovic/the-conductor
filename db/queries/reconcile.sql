@@ -55,6 +55,15 @@ WHERE volume_leases.expires_at <= now()
 -- name: SetReplicaDesiredStatus :exec
 UPDATE replicas SET desired_status = $2 WHERE id = $1;
 
+-- Advance a replica's lifecycle phase under optimistic concurrency: the write
+-- only lands if revision still matches what the loop read, so a phase decided
+-- against stale observed state (the Sensor moved it meanwhile) is dropped rather
+-- than clobbering. rows-affected = 0 signals the lost race.
+-- name: SetReplicaPhase :execrows
+UPDATE replicas
+SET phase = $2, revision = revision + 1
+WHERE id = $1 AND revision = $3;
+
 -- Drop a lease so a freed volume is immediately re-leasable.
 -- name: ReleaseVolumeLease :exec
 DELETE FROM volume_leases WHERE volume_id = $1;
