@@ -193,3 +193,27 @@ func (q *Queries) SetReplicaDesiredStatus(ctx context.Context, arg SetReplicaDes
 	_, err := q.db.ExecContext(ctx, setReplicaDesiredStatus, arg.ID, arg.DesiredStatus)
 	return err
 }
+
+const setReplicaPhase = `-- name: SetReplicaPhase :execrows
+UPDATE replicas
+SET phase = $2, revision = revision + 1
+WHERE id = $1 AND revision = $3
+`
+
+type SetReplicaPhaseParams struct {
+	ID       uuid.UUID `json:"id"`
+	Phase    string    `json:"phase"`
+	Revision int64     `json:"revision"`
+}
+
+// Advance a replica's lifecycle phase under optimistic concurrency: the write
+// only lands if revision still matches what the loop read, so a phase decided
+// against stale observed state (the Sensor moved it meanwhile) is dropped rather
+// than clobbering. rows-affected = 0 signals the lost race.
+func (q *Queries) SetReplicaPhase(ctx context.Context, arg SetReplicaPhaseParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, setReplicaPhase, arg.ID, arg.Phase, arg.Revision)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}

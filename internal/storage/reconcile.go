@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"conductor/internal/storage/db"
@@ -18,7 +19,7 @@ import (
 // decision — the next tick recomputes from fresh state.
 var ErrConflict = errors.New("conflict")
 
-// ReplicaSpec is the desired shape of a replica the Orchestrator schedules for a
+// ReplicaSpec is the desired shape of a replica the Scheduler places for a
 // deployment in a region. Host and volume are bound afterwards, once placement
 // is decided.
 type ReplicaSpec struct {
@@ -48,6 +49,9 @@ type ReconcileTx interface {
 	// held by a different replica returns ErrConflict.
 	AcquireVolumeLease(ctx context.Context, volumeID, replicaID uuid.UUID, expiresAt time.Time) error
 	SetReplicaDesiredStatus(ctx context.Context, replicaID uuid.UUID, desiredStatus string) error
+	// SetReplicaPhase advances the lifecycle phase iff expectRevision still
+	// matches; a moved revision (the Sensor wrote first) returns ErrConflict.
+	SetReplicaPhase(ctx context.Context, replicaID uuid.UUID, phase string, expectRevision int64) error
 
 	ReleaseVolumeLease(ctx context.Context, volumeID uuid.UUID) error
 	DeleteReplica(ctx context.Context, replicaID uuid.UUID) error
@@ -60,7 +64,7 @@ var _ ReconcileTx = querier{}
 // returns nil. Any error — including an ErrConflict from a lost CAS — rolls the
 // whole placement back, so the loop re-converges on the next tick.
 func (c *PostgresClient) WithReconcileTx(ctx context.Context, fn func(ReconcileTx) error) error {
-	return c.withTx(ctx, func(q querier) error { return fn(q) })
+	return c.withTx(ctx, nil, func(q querier) error { return fn(q) })
 }
 
 func (q querier) ActiveVolumeLease(ctx context.Context, volumeID uuid.UUID) (db.VolumeLease, error) {
@@ -97,6 +101,7 @@ func (q querier) AssignReplicaHost(ctx context.Context, replicaID, hostID uuid.U
 		return err
 	}
 	if n == 0 {
+		slog.Debug("reconcile: host revision moved, dropping placement", "replica", replicaID, "host", hostID)
 		return ErrConflict
 	}
 	return nil
@@ -119,6 +124,7 @@ func (q querier) AcquireVolumeLease(ctx context.Context, volumeID, replicaID uui
 		return err
 	}
 	if n == 0 {
+		slog.Debug("reconcile: volume lease contested", "volume", volumeID, "replica", replicaID)
 		return ErrConflict
 	}
 	return nil
@@ -129,6 +135,22 @@ func (q querier) SetReplicaDesiredStatus(ctx context.Context, replicaID uuid.UUI
 		ID:            replicaID,
 		DesiredStatus: desiredStatus,
 	})
+}
+
+func (q querier) SetReplicaPhase(ctx context.Context, replicaID uuid.UUID, phase string, expectRevision int64) error {
+	n, err := q.queries.SetReplicaPhase(ctx, db.SetReplicaPhaseParams{
+		ID:       replicaID,
+		Phase:    phase,
+		Revision: expectRevision,
+	})
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		slog.Debug("reconcile: replica revision moved, dropping phase write", "replica", replicaID, "phase", phase)
+		return ErrConflict
+	}
+	return nil
 }
 
 func (q querier) ReleaseVolumeLease(ctx context.Context, volumeID uuid.UUID) error {
