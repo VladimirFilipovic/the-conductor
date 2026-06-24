@@ -16,9 +16,11 @@ type SnapshotReader interface {
 	// SnapshotDesired returns one row per (current deployment, region): the
 	// replica target plus the spec needed to mint a replica.
 	SnapshotDesired(ctx context.Context) ([]db.SnapshotDesiredRow, error)
-	// ListActiveReplicas returns the live fleet under current deployments — the
-	// observed half the diff compares against SnapshotDesired.
-	ListActiveReplicas(ctx context.Context) ([]db.Replica, error)
+	// ListActiveReplicas returns the live fleet for services with a current
+	// deployment — the observed half the diff compares against SnapshotDesired.
+	// Includes replicas still under a superseded deployment (an in-flight
+	// rollout); IsCurrent splits the new revision from the outgoing one.
+	ListActiveReplicas(ctx context.Context) ([]db.ListActiveReplicasRow, error)
 	// ListSchedulableHosts returns 'ready' hosts across all regions; the caller
 	// buckets by region for bin-packing.
 	ListSchedulableHosts(ctx context.Context) ([]db.Host, error)
@@ -34,7 +36,7 @@ func (q querier) SnapshotDesired(ctx context.Context) ([]db.SnapshotDesiredRow, 
 	return q.queries.SnapshotDesired(ctx)
 }
 
-func (q querier) ListActiveReplicas(ctx context.Context) ([]db.Replica, error) {
+func (q querier) ListActiveReplicas(ctx context.Context) ([]db.ListActiveReplicasRow, error) {
 	return q.queries.ListActiveReplicas(ctx)
 }
 

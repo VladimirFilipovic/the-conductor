@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"time"
 
+	"conductor/internal/domain"
 	"conductor/internal/storage/db"
 
 	"github.com/google/uuid"
@@ -48,10 +49,10 @@ type ReconcileTx interface {
 	// AcquireVolumeLease takes (or renews) the single-writer lease; a live lease
 	// held by a different replica returns ErrConflict.
 	AcquireVolumeLease(ctx context.Context, volumeID, replicaID uuid.UUID, expiresAt time.Time) error
-	SetReplicaDesiredStatus(ctx context.Context, replicaID uuid.UUID, desiredStatus string) error
+	SetReplicaDesiredStatus(ctx context.Context, replicaID uuid.UUID, desiredStatus domain.ReplicaDesiredStatus) error
 	// SetReplicaPhase advances the lifecycle phase iff expectRevision still
 	// matches; a moved revision (the Sensor wrote first) returns ErrConflict.
-	SetReplicaPhase(ctx context.Context, replicaID uuid.UUID, phase string, expectRevision int64) error
+	SetReplicaPhase(ctx context.Context, replicaID uuid.UUID, phase domain.ReplicaPhase, expectRevision int64) error
 
 	ReleaseVolumeLease(ctx context.Context, volumeID uuid.UUID) error
 	DeleteReplica(ctx context.Context, replicaID uuid.UUID) error
@@ -130,17 +131,17 @@ func (q querier) AcquireVolumeLease(ctx context.Context, volumeID, replicaID uui
 	return nil
 }
 
-func (q querier) SetReplicaDesiredStatus(ctx context.Context, replicaID uuid.UUID, desiredStatus string) error {
+func (q querier) SetReplicaDesiredStatus(ctx context.Context, replicaID uuid.UUID, desiredStatus domain.ReplicaDesiredStatus) error {
 	return q.queries.SetReplicaDesiredStatus(ctx, db.SetReplicaDesiredStatusParams{
 		ID:            replicaID,
-		DesiredStatus: desiredStatus,
+		DesiredStatus: string(desiredStatus),
 	})
 }
 
-func (q querier) SetReplicaPhase(ctx context.Context, replicaID uuid.UUID, phase string, expectRevision int64) error {
+func (q querier) SetReplicaPhase(ctx context.Context, replicaID uuid.UUID, phase domain.ReplicaPhase, expectRevision int64) error {
 	n, err := q.queries.SetReplicaPhase(ctx, db.SetReplicaPhaseParams{
 		ID:       replicaID,
-		Phase:    phase,
+		Phase:    string(phase),
 		Revision: expectRevision,
 	})
 	if err != nil {
