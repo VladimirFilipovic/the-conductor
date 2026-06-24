@@ -7,27 +7,64 @@ package db
 
 import (
 	"context"
+	"database/sql"
+	"time"
 
 	"github.com/google/uuid"
 )
 
 const listActiveReplicas = `-- name: ListActiveReplicas :many
-SELECT r.id, r.deployment_id, r.region, r.host_id, r.volume_id, r.cpu_millicores, r.mem_bytes, r.alloc_reason, r.desired_status, r.phase, r.healthy, r.restart_count, r.last_exit_reason, r.revision, r.created_at, r.updated_at FROM replicas r
-JOIN deployments d ON d.id = r.deployment_id
-WHERE d.is_current AND r.phase <> 'reaped'
+SELECT r.id, r.deployment_id, r.region, r.host_id, r.volume_id, r.cpu_millicores, r.mem_bytes, r.alloc_reason, r.desired_status, r.phase, r.healthy, r.restart_count, r.last_exit_reason, r.revision, r.created_at, r.updated_at, d.environment_service_id, es.service_id, d.version, d.is_current
+FROM replicas r
+JOIN deployments d           ON d.id = r.deployment_id
+JOIN environment_services es ON es.id = d.environment_service_id
+WHERE r.phase <> 'reaped'
+  AND EXISTS (
+    SELECT 1 FROM deployments c
+    WHERE c.environment_service_id = d.environment_service_id
+      AND c.is_current
+  )
 `
 
-// Observed fleet: every replica under a current deployment, the set the diff
-// compares against SnapshotDesired. Reaped replicas are terminal and excluded.
-func (q *Queries) ListActiveReplicas(ctx context.Context) ([]Replica, error) {
+type ListActiveReplicasRow struct {
+	ID                   uuid.UUID      `json:"id"`
+	DeploymentID         uuid.UUID      `json:"deployment_id"`
+	Region               string         `json:"region"`
+	HostID               uuid.NullUUID  `json:"host_id"`
+	VolumeID             uuid.NullUUID  `json:"volume_id"`
+	CpuMillicores        int32          `json:"cpu_millicores"`
+	MemBytes             int64          `json:"mem_bytes"`
+	AllocReason          sql.NullString `json:"alloc_reason"`
+	DesiredStatus        string         `json:"desired_status"`
+	Phase                string         `json:"phase"`
+	Healthy              bool           `json:"healthy"`
+	RestartCount         int32          `json:"restart_count"`
+	LastExitReason       sql.NullString `json:"last_exit_reason"`
+	Revision             int64          `json:"revision"`
+	CreatedAt            time.Time      `json:"created_at"`
+	UpdatedAt            time.Time      `json:"updated_at"`
+	EnvironmentServiceID uuid.UUID      `json:"environment_service_id"`
+	ServiceID            uuid.UUID      `json:"service_id"`
+	Version              int32          `json:"version"`
+	IsCurrent            bool           `json:"is_current"`
+}
+
+// Observed fleet for every service that has a current deployment — INCLUDING
+// replicas still running under a superseded deployment (an in-flight rollout
+// from version N to N+1). The orchestrator groups by (environment_service_id,
+// region) and splits on is_current: is_current replicas are the new revision to
+// converge toward, the rest are the old revision to drain. Filtering on
+// d.is_current here would hide the outgoing replicas and leak them as orphans
+// nothing ever reaps. Reaped replicas are terminal and excluded.
+func (q *Queries) ListActiveReplicas(ctx context.Context) ([]ListActiveReplicasRow, error) {
 	rows, err := q.db.QueryContext(ctx, listActiveReplicas)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []Replica
+	var items []ListActiveReplicasRow
 	for rows.Next() {
-		var i Replica
+		var i ListActiveReplicasRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.DeploymentID,
@@ -45,6 +82,10 @@ func (q *Queries) ListActiveReplicas(ctx context.Context) ([]Replica, error) {
 			&i.Revision,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.EnvironmentServiceID,
+			&i.ServiceID,
+			&i.Version,
+			&i.IsCurrent,
 		); err != nil {
 			return nil, err
 		}
@@ -150,13 +191,14 @@ func (q *Queries) ListSchedulableHosts(ctx context.Context) ([]Host, error) {
 const snapshotDesired = `-- name: SnapshotDesired :many
 
 SELECT
-	d.id             AS deployment_id,
-	svc.id           AS service_id,
-	dr.region        AS region,
-	dr.replicas      AS desired_replicas,
-	d.cpu_millicores AS cpu_millicores,
-	d.mem_bytes      AS mem_bytes,
-	svc.stateful     AS stateful
+	d.environment_service_id AS environment_service_id,
+	d.id                     AS deployment_id,
+	svc.id                   AS service_id,
+	dr.region                AS region,
+	dr.replicas              AS desired_replicas,
+	d.cpu_millicores         AS cpu_millicores,
+	d.mem_bytes              AS mem_bytes,
+	svc.stateful             AS stateful
 FROM deployments d
 JOIN deployment_regions dr   ON dr.deployment_id = d.id
 JOIN environment_services es ON es.id = d.environment_service_id
@@ -165,13 +207,14 @@ WHERE d.is_current
 `
 
 type SnapshotDesiredRow struct {
-	DeploymentID    uuid.UUID `json:"deployment_id"`
-	ServiceID       uuid.UUID `json:"service_id"`
-	Region          string    `json:"region"`
-	DesiredReplicas int32     `json:"desired_replicas"`
-	CpuMillicores   int32     `json:"cpu_millicores"`
-	MemBytes        int64     `json:"mem_bytes"`
-	Stateful        bool      `json:"stateful"`
+	EnvironmentServiceID uuid.UUID `json:"environment_service_id"`
+	DeploymentID         uuid.UUID `json:"deployment_id"`
+	ServiceID            uuid.UUID `json:"service_id"`
+	Region               string    `json:"region"`
+	DesiredReplicas      int32     `json:"desired_replicas"`
+	CpuMillicores        int32     `json:"cpu_millicores"`
+	MemBytes             int64     `json:"mem_bytes"`
+	Stateful             bool      `json:"stateful"`
 }
 
 // Reconcile-read path. The Scheduler runs these three together inside a single
@@ -181,6 +224,9 @@ type SnapshotDesiredRow struct {
 // Desired state: one row per (current deployment, region) carrying the replica
 // target plus the spec the Scheduler needs to mint a replica. Joined to services
 // for the stateful flag, which selects the volume/lease placement path.
+// environment_service_id is the reconcile grouping key (a service shared across
+// environments has one current deployment per env — service_id alone would
+// collide them); it ties this desired row to its replicas in ListActiveReplicas.
 func (q *Queries) SnapshotDesired(ctx context.Context) ([]SnapshotDesiredRow, error) {
 	rows, err := q.db.QueryContext(ctx, snapshotDesired)
 	if err != nil {
@@ -191,6 +237,7 @@ func (q *Queries) SnapshotDesired(ctx context.Context) ([]SnapshotDesiredRow, er
 	for rows.Next() {
 		var i SnapshotDesiredRow
 		if err := rows.Scan(
+			&i.EnvironmentServiceID,
 			&i.DeploymentID,
 			&i.ServiceID,
 			&i.Region,
