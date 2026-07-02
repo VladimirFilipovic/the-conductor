@@ -32,7 +32,7 @@ type Sensor struct {
 }
 
 // tick processes incoming host heartbeats and replica observations, marking
-// stale hosts down so the Scheduler can reschedule their replicas.
+// stale hosts down so the Reconciler can reschedule their replicas.
 func (s *Sensor) tick(ctx context.Context) error {
 	return errors.New("not implemented")
 }
