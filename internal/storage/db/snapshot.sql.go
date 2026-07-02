@@ -152,7 +152,7 @@ SELECT id, region, hostname, cpu_millicores, mem_bytes, disk_bytes, labels, stat
 `
 
 // Hosts eligible to receive placements this pass: 'ready' only (notready,
-// draining, cordoned are skipped). All regions — the Scheduler buckets by region.
+// draining, cordoned are skipped). All regions — the Engine buckets by region.
 func (q *Queries) ListSchedulableHosts(ctx context.Context) ([]Host, error) {
 	rows, err := q.db.QueryContext(ctx, listSchedulableHosts)
 	if err != nil {
@@ -217,12 +217,12 @@ type SnapshotDesiredRow struct {
 	Stateful             bool      `json:"stateful"`
 }
 
-// Reconcile-read path. The Scheduler runs these three together inside a single
+// Reconcile-read path. The Engine runs these three together inside a single
 // read-only REPEATABLE READ tx (storage.WithReadTx) so the desired and observed
 // halves of a pass observe one frozen snapshot — desired can't scale out from
 // under the replica list between queries, which would tear the placement diff.
 // Desired state: one row per (current deployment, region) carrying the replica
-// target plus the spec the Scheduler needs to mint a replica. Joined to services
+// target plus the spec the Reconciler needs to mint a replica. Joined to services
 // for the stateful flag, which selects the volume/lease placement path.
 // environment_service_id is the reconcile grouping key (a service shared across
 // environments has one current deployment per env — service_id alone would

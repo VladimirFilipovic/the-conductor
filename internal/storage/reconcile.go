@@ -20,7 +20,7 @@ import (
 // decision — the next tick recomputes from fresh state.
 var ErrConflict = errors.New("conflict")
 
-// ReplicaSpec is the desired shape of a replica the Scheduler places for a
+// ReplicaSpec is the desired shape of a replica the Reconciler places for a
 // deployment in a region. Host and volume are bound afterwards, once placement
 // is decided.
 type ReplicaSpec struct {

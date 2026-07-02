@@ -46,9 +46,9 @@ func Run(_ []string) int {
 	// Sensor still wires a zero store — its SensorStore methods aren't on the
 	// Postgres client yet; it gets a real store once those land.
 	sensor := engine.Sensor{}
-	scheduler := engine.NewScheduler(client)
+	eng := engine.NewEngine(client, engine.NewReconciler(), engine.NewActuator(client))
 
-	if err := engine.Run(ctx, scheduler, &sensor); err != nil {
+	if err := engine.Run(ctx, eng, &sensor); err != nil {
 		fmt.Println(err)
 		return 1
 	}
