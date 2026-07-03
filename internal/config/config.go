@@ -14,6 +14,7 @@ import (
 const (
 	VarDatabaseURL = "CONDUCTOR_DATABASE_URL"
 	VarLogLevel    = "LOG_LEVEL"
+	VarLogFile     = "CONDUCTOR_LOG_FILE"
 	VarProject     = "CONDUCTOR_PROJECT"
 	VarEnvironment = "CONDUCTOR_ENVIRONMENT"
 	VarService     = "CONDUCTOR_SERVICE"
@@ -33,6 +34,9 @@ type Config struct {
 	DatabaseURL string
 	// LogLevel is the engine's slog level (LOG_LEVEL), defaulting to Info.
 	LogLevel slog.Level
+	// LogFile, when set (CONDUCTOR_LOG_FILE), additionally appends engine logs
+	// to this path; empty means stderr only.
+	LogFile string
 
 	// Target-identity defaults; an explicit -p/-e/-s flag overrides each.
 	Project     string
@@ -50,6 +54,7 @@ func Load() (Config, error) {
 	cfg := Config{
 		DatabaseURL: orDefault(VarDatabaseURL, DefaultDatabaseURL),
 		LogLevel:    slog.LevelInfo,
+		LogFile:     os.Getenv(VarLogFile),
 		Project:     os.Getenv(VarProject),
 		Environment: os.Getenv(VarEnvironment),
 		Service:     os.Getenv(VarService),

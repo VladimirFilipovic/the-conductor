@@ -21,15 +21,19 @@ func Run(_ []string) int {
 		return 1
 	}
 
-	logFile, err := os.OpenFile("engine.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "open log file: %v\n", err)
-		return 1
+	logW := io.Writer(os.Stderr)
+	if cfg.LogFile != "" {
+		logFile, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "open log file: %v\n", err)
+			return 1
+		}
+		defer logFile.Close()
+		logW = io.MultiWriter(os.Stderr, logFile)
 	}
-	defer logFile.Close()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(
-		io.MultiWriter(os.Stderr, logFile),
+		logW,
 		&slog.HandlerOptions{Level: cfg.LogLevel},
 	)))
 
