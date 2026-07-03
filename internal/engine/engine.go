@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"conductor/internal/storage"
-	"conductor/internal/storage/db"
 )
 
 // reconcileInterval is the idle gap between reconcile passes, not a fixed
@@ -16,8 +15,23 @@ import (
 // TODO: source from config once the engine wires it.
 const reconcileInterval = 2 * time.Second
 
+// maxConsecutiveFailures is how many passes may fail back-to-back before the
+// engine gives up. A lone failure is logged and retried — transient DB errors
+// self-heal on the next tick; only a persistent fault takes the engine down.
+const maxConsecutiveFailures = 5
+
 type SnapshotStore interface {
 	WithReadTx(ctx context.Context, fn func(storage.SnapshotReader) error) error
+}
+
+// Consumer-side views of the pass stages, so tests can fake either
+// independently of the concrete Reconciler/Actuator.
+type reconciler interface {
+	Reconcile(groups []replicaGroup) []Intent
+}
+
+type actuator interface {
+	Apply(ctx context.Context, intents []Intent) error
 }
 
 // Engine drives the reconcile loop: it snapshots state, buckets replicas into
@@ -25,48 +39,46 @@ type SnapshotStore interface {
 // intents to the Actuator to commit.
 type Engine struct {
 	store      SnapshotStore
-	reconciler *Reconciler
-	actuator   *Actuator
+	reconciler reconciler
+	actuator   actuator
 }
 
-type stateSnapshot struct {
-	desired  []db.SnapshotDesiredRow
-	replicas []db.ListActiveReplicasRow
-	hosts    []db.Host
-	volumes  []db.Volume
+func New(store SnapshotStore, r reconciler, a actuator) *Engine {
+	return &Engine{store: store, reconciler: r, actuator: a}
 }
 
-func NewEngine(store SnapshotStore, reconciler *Reconciler, actuator *Actuator) *Engine {
-	return &Engine{store: store, reconciler: reconciler, actuator: actuator}
-}
+// run drives reconcile passes until ctx is cancelled. One pass runs fully
+// before the next starts — passes never overlap. Blocking.
+func (e *Engine) run(ctx context.Context) error {
+	// Timer over Ticker: re-armed after each pass so the interval is a true
+	// idle gap — a pass slower than the interval can't stack a buffered tick
+	// and turn the loop into a busy spin.
+	timer := time.NewTimer(reconcileInterval)
+	defer timer.Stop()
 
-func Run(ctx context.Context, e *Engine, sensor *Sensor) error {
-	slog.Info("engine starting")
-
-	// TODO: rerun up to 3 times on errors, restart the counter
-	go sensor.tick(ctx)
-	go e.tick(ctx)
-
-	<-ctx.Done()
-
-	slog.Info("engine shutting down")
-	return nil
-}
-
-// tick runs reconcile passes until ctx is cancelled. One pass runs fully before
-// the next starts (single goroutine, sequential) — passes never overlap — and
-// the loop idles reconcileInterval between them, breaking promptly on cancel.
-func (e *Engine) tick(ctx context.Context) error {
+	failures := 0
 	for {
-		if err := e.reconcile(ctx); err != nil {
-			return err
+		switch err := e.reconcile(ctx); {
+		case err == nil:
+			failures = 0
+		case ctx.Err() != nil:
+			slog.Info("engine -> done")
+			return nil
+		default:
+			failures++
+			if failures >= maxConsecutiveFailures {
+				return fmt.Errorf("engine: %d consecutive failed passes: %w", failures, err)
+			}
+			slog.Warn("engine: reconcile pass failed, retrying next tick",
+				"err", err, "consecutive", failures)
 		}
 
+		timer.Reset(reconcileInterval)
 		select {
 		case <-ctx.Done():
 			slog.Info("engine -> done")
 			return nil
-		case <-time.Tick(reconcileInterval):
+		case <-timer.C:
 		}
 	}
 }
@@ -93,51 +105,40 @@ func (e *Engine) reconcile(ctx context.Context) error {
 
 func buildReplicaGroups(snap stateSnapshot) []replicaGroup {
 	type replicaBucket struct {
-		target   []db.ListActiveReplicasRow
-		outgoing []db.ListActiveReplicasRow
+		target   []replica
+		outgoing []replica
 	}
-	replicaIndex := make(map[string]replicaBucket, len(snap.replicas))
-	for _, ri := range snap.replicas {
-		key := replicaGroupKey(replicaSlot{ri.EnvironmentServiceID, ri.Region})
-		b := replicaIndex[key]
-		if ri.IsCurrent {
-			b.target = append(b.target, ri)
+	replicaIndex := make(map[replicaSlot]replicaBucket, len(snap.replicas))
+	for _, r := range snap.replicas {
+		b := replicaIndex[r.Slot]
+		if r.Current {
+			b.target = append(b.target, r)
 		} else {
-			b.outgoing = append(b.outgoing, ri)
+			b.outgoing = append(b.outgoing, r)
 		}
-		replicaIndex[key] = b
+		replicaIndex[r.Slot] = b
 	}
 
 	groups := make([]replicaGroup, 0, len(snap.desired))
 	for _, d := range snap.desired {
-		b := replicaIndex[replicaGroupKey(replicaSlot{d.EnvironmentServiceID, d.Region})]
+		b := replicaIndex[d.Slot]
+		delete(replicaIndex, d.Slot)
 		groups = append(groups, replicaGroup{
 			Desired:          d,
 			TargetReplicas:   b.target,
 			OutgoingReplicas: b.outgoing,
 		})
 	}
-	return groups
-}
 
-func (e *Engine) loadSnapshot(ctx context.Context) (stateSnapshot, error) {
-	var snap stateSnapshot
-	err := e.store.WithReadTx(ctx, func(r storage.SnapshotReader) error {
-		var err error
-		if snap.desired, err = r.SnapshotDesired(ctx); err != nil {
-			return err
-		}
-		if snap.replicas, err = r.ListActiveReplicas(ctx); err != nil {
-			return err
-		}
-		if snap.hosts, err = r.ListSchedulableHosts(ctx); err != nil {
-			return err
-		}
-		snap.volumes, err = r.ListActiveVolumes(ctx)
-		return err
-	})
-	if err != nil {
-		return stateSnapshot{}, err
+	// Leftover slots the current deployment no longer declares — a region
+	// dropped between versions. They still need a group, with a zero replica
+	// target, so the Reconciler drains them instead of leaking them forever.
+	for slot, b := range replicaIndex {
+		groups = append(groups, replicaGroup{
+			Desired:          desiredState{Slot: slot},
+			TargetReplicas:   b.target,
+			OutgoingReplicas: b.outgoing,
+		})
 	}
-	return snap, nil
+	return groups
 }

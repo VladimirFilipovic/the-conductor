@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"conductor/internal/storage/db"
@@ -31,8 +30,11 @@ type Sensor struct {
 	store SensorStore
 }
 
-// tick processes incoming host heartbeats and replica observations, marking
-// stale hosts down so the Reconciler can reschedule their replicas.
-func (s *Sensor) tick(ctx context.Context) error {
-	return errors.New("not implemented")
+// run processes incoming host heartbeats and replica observations, marking
+// stale hosts down so the Reconciler can reschedule their replicas. Blocking.
+// TODO: implement the observation loop; parks on ctx until then so the
+// supervisor doesn't treat the sensor as failed at startup.
+func (s *Sensor) run(ctx context.Context) error {
+	<-ctx.Done()
+	return nil
 }

@@ -2,8 +2,6 @@ package engine
 
 import (
 	"github.com/google/uuid"
-
-	"conductor/internal/storage/db"
 )
 
 type IntentKind string
@@ -20,19 +18,19 @@ type Intent struct {
 	ReplicaID uuid.UUID
 }
 
+// replicaSlot is the reconcile grouping key; comparable, so it indexes maps
+// directly.
 type replicaSlot struct {
 	EnvironmentServiceID uuid.UUID
 	Region               string
 }
 
 type replicaGroup struct {
-	Desired          db.SnapshotDesiredRow
-	TargetReplicas   []db.ListActiveReplicasRow
-	OutgoingReplicas []db.ListActiveReplicasRow
-}
-
-func replicaGroupKey(s replicaSlot) string {
-	return s.EnvironmentServiceID.String() + "_" + s.Region
+	// Desired is zero apart from Slot when the current deployment no longer
+	// declares this slot — the group then only exists to drain its replicas.
+	Desired          desiredState
+	TargetReplicas   []replica
+	OutgoingReplicas []replica
 }
 
 // Reconciler diffs desired vs observed per replica group and decides what
