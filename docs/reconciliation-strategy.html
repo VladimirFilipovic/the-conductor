@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reconciliation Strategy — conductor engine</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1d212a; --ink:#e7ebf0; --muted:#9aa4b2;
+    --line:#2a2f3a; --accent:#7c8cff; --accent2:#5ad1b0; --warn:#f0b35b; --bad:#f07a7a;
+    --good:#5ad1b0;
+    --mono:"SF Mono",ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.6;font-size:16px}
+  .wrap{max-width:1000px;margin:0 auto;padding:48px 26px 110px}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin:0 0 10px}
+  h1{font-size:31px;line-height:1.2;margin:0 0 10px}
+  h2{font-size:22px;margin:54px 0 6px;scroll-margin-top:20px}
+  h2 .e{margin-right:10px}
+  h3{font-size:16px;margin:22px 0 6px;color:var(--ink);font-family:var(--mono)}
+  .sub{color:var(--muted);margin:2px 0 14px}
+  p{color:#cfd6df;margin:10px 0}
+  b{color:var(--ink)}
+  a{color:var(--accent)}
+  .lead{font-size:18px;color:var(--ink);background:var(--panel2);border-left:3px solid var(--accent);
+    border-radius:0 10px 10px 0;padding:16px 20px;margin:18px 0}
+  code{font-family:var(--mono);background:#0b0d11;border:1px solid var(--line);padding:1px 6px;border-radius:5px;font-size:.85em;color:#d8def5;word-break:break-word}
+  .ref{font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin:16px 0}
+  .diagram{background:#0b0d11;border:1px solid var(--line);border-radius:12px;padding:22px;margin:18px 0;overflow-x:auto}
+  .diagram svg{max-width:none !important;height:auto}
+  .diagram .mermaid{min-width:max-content;margin:0 auto}
+
+  /* status banner */
+  .status{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;margin:18px 0}
+  @media(max-width:680px){.status{grid-template-columns:minmax(0,1fr)}}
+  .scol{border:1px solid var(--line);border-radius:12px;padding:16px 18px;min-width:0}
+  .scol.built{background:linear-gradient(180deg,#13211c,#141a18);border-color:#2f6b5c}
+  .scol.todo{background:linear-gradient(180deg,#24201a,#1a1714);border-color:#6b5a2f}
+  .scol h4{margin:0 0 10px;font-size:14px;font-family:var(--mono);display:flex;align-items:center;gap:8px}
+  .scol.built h4{color:var(--good)}
+  .scol.todo h4{color:var(--warn)}
+  .scol ul{margin:0;padding-left:18px}
+  .scol li{margin:6px 0;font-size:14px;color:#cfd6df}
+
+  /* observe-decide-act loop */
+  .loop{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0;align-items:stretch;margin:6px 0}
+  @media(max-width:760px){.loop{grid-template-columns:minmax(0,1fr)}}
+  .stage{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 16px;min-width:0;position:relative}
+  .stage+.stage{margin-left:0}
+  .stage .tag{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+  .stage h4{margin:6px 0 8px;font-size:16px}
+  .stage p{font-size:13.5px;margin:6px 0;color:#cfd6df}
+  .stage .who{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-top:8px}
+  .stage.obs{border-color:#2f6b5c}.stage.obs .tag{color:var(--accent2)}
+  .stage.dec{border-color:var(--accent)}.stage.dec .tag{color:var(--accent)}
+  .stage.act{border-color:#6b5a2f}.stage.act .tag{color:var(--warn)}
+  .loopwrap{position:relative}
+  .loopback{text-align:center;font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:10px;padding:8px;border:1px dashed var(--line);border-radius:10px}
+
+  /* phase chain */
+  .phases{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:14px 0}
+  .ph{font-family:var(--mono);font-size:12.5px;padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:var(--panel);white-space:nowrap}
+  .ph.live{border-color:var(--accent);color:#cdd4ff}
+  .ph.serve{border-color:var(--good);color:#bdeede;background:#13211c}
+  .ph.term{border-color:var(--bad);color:#f3b6b6;background:#211616}
+  .ph.drain{border-color:var(--warn);color:#f0d2a3;background:#211c14}
+  .sep{color:var(--muted);font-family:var(--mono)}
+
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:14px;display:block;overflow-x:auto}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--muted);font-family:var(--mono);font-size:12px;letter-spacing:.04em;text-transform:uppercase;font-weight:600;white-space:nowrap}
+  td code{font-size:.82em}
+  tr:nth-child(even) td{background:#13161c}
+
+  /* comparison */
+  .cmp{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;margin:18px 0}
+  @media(max-width:760px){.cmp{grid-template-columns:minmax(0,1fr)}}
+  .opt{border:1px solid var(--line);border-radius:14px;padding:18px 20px;min-width:0}
+  .opt.rolling{border-color:#3a4a8a;background:linear-gradient(180deg,#161a2b,#14161f)}
+  .opt.recreate{border-color:#2f6b5c;background:linear-gradient(180deg,#13211c,#141a18)}
+  .opt h4{margin:0 0 2px;font-size:17px}
+  .opt .when{font-family:var(--mono);font-size:12px;color:var(--muted);margin-bottom:12px}
+  .opt .row{display:flex;gap:10px;margin:9px 0;font-size:14px}
+  .opt .row .k{flex:0 0 96px;color:var(--muted);font-family:var(--mono);font-size:12px;padding-top:1px}
+  .opt .row .vv{flex:1;min-width:0}
+  .pill{display:inline-block;font-family:var(--mono);font-size:11px;padding:2px 8px;border-radius:20px;border:1px solid var(--line);margin-top:10px}
+  .pill.good{color:var(--good);border-color:#2f6b5c}
+  .pill.cost{color:var(--warn);border-color:#6b5a2f}
+
+  /* race cards */
+  .races{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin:16px 0}
+  @media(max-width:820px){.races{grid-template-columns:minmax(0,1fr)}}
+  .race{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0}
+  .race h4{margin:0 0 6px;font-size:14px;color:var(--accent2);font-family:var(--mono)}
+  .race .guard{font-family:var(--mono);font-size:11.5px;color:var(--accent);margin:8px 0;word-break:break-word}
+  .race p{font-size:13px;margin:6px 0}
+
+  .callout{background:linear-gradient(180deg,#1a2030,#171a21);border:1px solid var(--line);border-radius:14px;padding:18px 22px;margin:18px 0}
+  .callout h4{margin:0 0 8px;color:var(--accent2);font-size:14px;font-family:var(--mono)}
+  .callout.warnbox{border-color:#6b5a2f}.callout.warnbox h4{color:var(--warn)}
+
+  .toc{font-family:var(--mono);font-size:13px;display:flex;flex-wrap:wrap;gap:6px 16px;margin:18px 0 0}
+  .toc a{color:var(--muted);text-decoration:none}.toc a:hover{color:var(--accent)}
+  .grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px}
+  @media(max-width:680px){.grid2{grid-template-columns:minmax(0,1fr)}}
+  hr{border:none;border-top:1px solid var(--line);margin:40px 0 0}
+  .foot{color:var(--muted);font-size:13px;margin-top:24px}
+  .mermaid{display:flex;justify-content:center}
+
+  /* reconcile pipeline overview (§8) */
+  .rpipe{display:flex;flex-direction:column;gap:0;max-width:660px;margin:16px auto 6px}
+  .rstage{border:1px solid var(--line);border-left-width:4px;border-radius:11px;padding:11px 15px;background:var(--panel);display:flex;justify-content:space-between;align-items:baseline;gap:12px;min-width:0}
+  .rstage .n{font-family:var(--mono);font-weight:700;font-size:13.5px;color:var(--ink)}
+  .rstage .d{font-size:12px;color:var(--muted);margin-top:3px}
+  .rstage .mech{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);white-space:nowrap;padding-top:2px}
+  .rarr{align-self:center;color:var(--muted);font-size:15px;padding:5px 0;opacity:.55}
+  .rarr.dot{font-size:11.5px;opacity:.45;font-family:var(--mono)}
+  .rregion{border:1.5px dashed;border-radius:13px;padding:9px 9px 4px;margin:5px 0}
+  .rregion .rl{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;margin:2px 4px 8px;display:block}
+  .rregion.cf{border-color:#5a4f6b}.rregion.cf .rl{color:#c9b8d8}
+  .rregion.heart{border-color:#2f6b5c;background:rgba(90,209,176,.05)}.rregion.heart .rl{color:var(--good)}
+  .rbranch{font-size:11px;color:#d9b3b3;border-left:2px solid var(--bad);padding:3px 9px;margin:8px 0 2px}
+  .km-io{border-left-color:#5b5b66}.km-derive{border-left-color:var(--warn)}
+  .km-halt{border-left-color:var(--bad)}.km-emitg{border-left-color:var(--good)}
+  .km-emitr{border-left-color:#5ac6d1}.km-trim{border-left-color:var(--accent)}
+  .km-solver{border-left-color:#b07af0}
+  .mdot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px;vertical-align:middle}
+
+  /* code block (rule table in code) */
+  pre.code{background:#0b0d11;border:1px solid var(--line);border-radius:12px;padding:15px 18px;margin:15px 0;overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.6;color:#d8def5;white-space:pre}
+  pre.code .kw{color:#7c8cff}
+  pre.code .ty{color:#5ad1b0}
+  pre.code .cm{color:#6b7689}
+  pre.code .cm.live{color:#8a93c8}
+  pre.code .cm.serve{color:#6fae9a}
+  pre.code .cm.drain{color:#c8a567}
+  pre.code .cm.term{color:#c88a8a}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">conductor · control plane</p>
+  <h1>Reconciliation Strategy</h1>
+  <p class="sub">How the engine drives the live fleet toward what the user declared — one level-triggered tick at a time.</p>
+
+  <div class="toc">
+    <a href="#idea">① The core idea</a>
+    <a href="#status">② Built vs designed</a>
+    <a href="#loop">③ Observe · Decide · Act</a>
+    <a href="#snapshot">④ The snapshot read-tx</a>
+    <a href="#grouping">⑤ Target vs outgoing</a>
+    <a href="#lifecycle">⑥ Replica lifecycle</a>
+    <a href="#rollout">⑦ Rolling vs recreate</a>
+    <a href="#flow">⑧ One reconcile tick</a>
+    <a href="#cas">⑨ Losing races safely</a>
+    <a href="#converge">⑩ Convergence</a>
+  </div>
+
+  <h2 id="idea"><span class="e">①</span>The core idea</h2>
+  <p class="lead">
+    Postgres is the single source of truth. Every tick the scheduler reads <b>desired</b> state (what the user declared)
+    and <b>observed</b> state (what the fleet actually is) in one frozen snapshot, computes the gap, and emits the
+    minimal set of writes to close it. No in-memory state machine, no hidden assumptions — the loop is
+    <b>level-triggered</b> and <b>declarative</b>, so a slow, skipped, or crashed pass simply self-heals on the next one.
+  </p>
+  <div class="grid2">
+    <div class="card">
+      <h3>Two goroutines, one DB</h3>
+      <p style="font-size:14px">The engine launches a <b>Sensor</b> (writes observed reality back to the DB) and a
+      <b>Scheduler</b> (reads desired+observed, writes intents). They never talk directly — they coordinate
+      <i>through</i> the database.</p>
+      <p class="ref">internal/engine/engine.go:8 — <code>go sensor.tick(ctx); go scheduler.tick(ctx)</code></p>
+    </div>
+    <div class="card">
+      <h3>Idle gap, not a fixed cadence</h3>
+      <p style="font-size:14px">A pass runs <b>fully to completion</b>, then the loop idles <code>reconcileInterval</code>
+      (2s) before the next. Passes never overlap — single goroutine, sequential.</p>
+      <p class="ref">internal/engine/scheduler.go:15-19, :73-86</p>
+    </div>
+  </div>
+
+  <h2 id="status"><span class="e">②</span>What's built vs what's designed</h2>
+  <p class="sub">Honest framing: the <b>plumbing and invariants are in code</b>; the orchestrator's decision logic is fully
+  specified in <code>docs/rollout-strategy.md</code> but still a stub.</p>
+  <div class="status">
+    <div class="scol built">
+      <h4>✓ Built &amp; in code</h4>
+      <ul>
+        <li>Engine loop — sensor + scheduler goroutines (<span class="ref">engine.go</span>)</li>
+        <li>Snapshot read-tx at <code>REPEATABLE READ</code> (<span class="ref">postgres.go · WithReadTx</span>)</li>
+        <li><code>loadSnapshot</code> → desired + replicas + hosts + volumes</li>
+        <li>Grouping by <code>(env_service, region)</code>, split on <code>is_current</code></li>
+        <li>Typed status enums — replica phase, deployment status, desired status</li>
+        <li><code>ReconcileTx</code> interface — all CAS-guarded write primitives</li>
+        <li>Optimistic-concurrency guards + <code>ErrConflict</code> (host rev, replica rev, lease PK)</li>
+      </ul>
+    </div>
+    <div class="scol todo">
+      <h4>◷ Designed, not yet wired</h4>
+      <ul>
+        <li><code>reconcileIntentsFor(groups)</code> — returns <code>nil</code> today (<span class="ref">scheduler.go:136</span>)</li>
+        <li>diff → intent map (create / assign / drain / destroy)</li>
+        <li>bin-packing creates onto <code>snap.hosts</code></li>
+        <li>committing intents via <code>WithReconcileTx</code></li>
+        <li>the rollout gate machine (health / placement / crash / drain window)</li>
+        <li>Sensor loop body — currently <code>not implemented</code></li>
+      </ul>
+    </div>
+  </div>
+  <p class="ref">scheduler.go:121 — <code>_ := s.reconcileIntentsFor(replicaGroups)</code> &nbsp;//&nbsp; the gap between these two columns is the next milestone.</p>
+
+  <h2 id="loop"><span class="e">③</span>The control loop: Observe · Decide · Act</h2>
+  <div class="loopwrap">
+    <div class="loop">
+      <div class="stage obs">
+        <span class="tag">Observe</span>
+        <h4>Read the world</h4>
+        <p>Sensor records host heartbeats, replica phase/health, observed volume size. Scheduler reads one frozen snapshot of desired + observed.</p>
+        <p class="who">Sensor.tick → DB · Scheduler.loadSnapshot</p>
+      </div>
+      <div class="stage dec">
+        <span class="tag">Decide</span>
+        <h4>Compute the gap</h4>
+        <p>In-memory only. Group by service×region, split target vs outgoing, check gates, produce <b>intents</b> — no DB writes yet.</p>
+        <p class="who">reconcileIntentsFor(groups) → []Intent</p>
+      </div>
+      <div class="stage act">
+        <span class="tag">Act</span>
+        <h4>Commit atomically</h4>
+        <p>Each intent runs through <code>WithReconcileTx</code> under CAS guards. Lost race → roll back, retry next tick.</p>
+        <p class="who">WithReconcileTx → create / phase / lease</p>
+      </div>
+    </div>
+    <div class="loopback">↻ &nbsp; idle <code>reconcileInterval</code> (2s) &nbsp; → &nbsp; repeat from Observe &nbsp; — &nbsp; every tick re-derives from fresh DB state</div>
+  </div>
+
+  <h2 id="snapshot"><span class="e">④</span>The snapshot read-tx — why one frozen instant</h2>
+  <p>Desired and observed are read in a single <code>REPEATABLE READ</code>, read-only transaction. Both halves of the
+  diff observe the <b>same instant</b>, so they can't drift between queries and tear the comparison. It's read-only —
+  takes no row locks, exists only to pin the snapshot — so it always rolls back.</p>
+  <div class="card">
+    <h3>loadSnapshot — four reads, one tx</h3>
+    <table>
+      <thead><tr><th>Read</th><th>Returns</th><th>Role in the diff</th></tr></thead>
+      <tbody>
+        <tr><td><code>SnapshotDesired()</code></td><td>1 row per current deployment × region</td><td><b>Desired:</b> target replica count + per-replica spec + <code>stateful</code> flag</td></tr>
+        <tr><td><code>ListActiveReplicas()</code></td><td>every non-reaped replica, incl. outgoing</td><td><b>Observed:</b> rollout-aware — carries <code>is_current</code> + <code>environment_service_id</code></td></tr>
+        <tr><td><code>ListSchedulableHosts()</code></td><td>fleet capacity by region</td><td>bin-packing target for new replicas</td></tr>
+        <tr><td><code>ListActiveVolumes()</code></td><td>stateful disks + lease state</td><td>single-writer coordination</td></tr>
+      </tbody>
+    </table>
+    <p class="ref">internal/engine/scheduler.go:140-160 · internal/storage/postgres.go · WithReadTx</p>
+  </div>
+
+  <h2 id="grouping"><span class="e">⑤</span>How "new" is told apart from "old"</h2>
+  <p>For every desired row, the scheduler builds a <code>replicaGroup</code> keyed by
+  <code>(environment_service_id, region)</code>, then splits the bucket on <code>is_current</code>:</p>
+  <div class="cmp">
+    <div class="card" style="border-color:#3a4a8a">
+      <h3 style="color:#9fb0ff">is_current = true → TARGET</h3>
+      <p style="font-size:14px">The new version you're converging toward. The scheduler scales these <i>up</i> to <code>desired_replicas</code> and health-gates them.</p>
+    </div>
+    <div class="card" style="border-color:var(--warn)">
+      <h3 style="color:var(--warn)">is_current = false → OUTGOING</h3>
+      <p style="font-size:14px">Old replicas still running under a superseded deployment. The scheduler drains then reaps these once the new side is healthy.</p>
+    </div>
+  </div>
+  <div class="callout warnbox">
+    <h4>⚠ Subtle but critical</h4>
+    <p style="margin:0;font-size:14px">The discriminator is <b><code>is_current</code></b>, <b>not <code>replicas.revision</code></b>.
+    <code>revision</code> is the CAS counter for the Sensor↔Scheduler race — it has nothing to do with deployment version.
+    A partial unique index <code>one_current_deployment_per_service</code> guarantees exactly one current commit per service.</p>
+  </div>
+
+  <h2 id="lifecycle"><span class="e">⑥</span>Replica lifecycle</h2>
+  <p class="sub">A replica walks a single forward path; two phases are terminal and excluded from snapshots.</p>
+  <div class="phases">
+    <span class="ph live">pending</span><span class="sep">→</span>
+    <span class="ph live">scheduling</span><span class="sep">→</span>
+    <span class="ph live">starting</span><span class="sep">→</span>
+    <span class="ph live">health_check</span><span class="sep">→</span>
+    <span class="ph live">healthy</span><span class="sep">→</span>
+    <span class="ph serve">active</span>
+  </div>
+  <div class="phases">
+    <span class="ph serve">active</span><span class="sep">— IntentDrain →</span>
+    <span class="ph drain">draining</span><span class="sep">— drain_seconds elapses →</span>
+    <span class="ph term">reaped</span>
+    <span class="sep" style="margin-left:18px">· on crash past restart_max →</span>
+    <span class="ph term">failed</span>
+  </div>
+  <table>
+    <thead><tr><th>Phase</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td><code>pending</code></td><td>created, awaiting placement</td></tr>
+      <tr><td><code>scheduling</code></td><td>bin-packing: searching for a host</td></tr>
+      <tr><td><code>starting</code></td><td>container coming up on the host</td></tr>
+      <tr><td><code>health_check</code></td><td>up, awaiting first healthy probe</td></tr>
+      <tr><td><code>healthy</code></td><td>passed probe, not yet in rotation</td></tr>
+      <tr><td><code>shifting</code></td><td>migrating between hosts</td></tr>
+      <tr><td><code>active</code></td><td>serving traffic</td></tr>
+      <tr><td><code>draining</code></td><td>graceful shutdown — got SIGTERM, finishing in-flight requests</td></tr>
+      <tr><td><code>reaped</code> <span class="ref">terminal</span></td><td>container gone, excluded from <code>ListActiveReplicas</code> (<code>WHERE phase &lt;&gt; 'reaped'</code>)</td></tr>
+      <tr><td><code>failed</code> <span class="ref">terminal</span></td><td><code>restart_count &gt; restart_max</code> — engine won't restart it</td></tr>
+    </tbody>
+  </table>
+  <p class="ref">internal/domain/replica.go · docs/rollout-strategy.md:47-76</p>
+
+  <div class="callout">
+    <h4>⏱ drain_seconds — the graceful window (default 30s)</h4>
+    <p style="font-size:14px;margin:6px 0">On <code>IntentDrain</code> the engine sets <code>phase=draining</code> and stamps
+    <code>drained_at</code>. The <code>draining → reaped</code> transition fires only after the <b>full window elapses</b>
+    — even if the container already stopped. Why wait? A stale load-balancer routing entry could still send new requests
+    to a dead replica; waiting guarantees the LB has converged first. <code>drain_seconds=0</code> → reap immediately
+    (fine for stateless services where the LB converges fast).</p>
+  </div>
+
+  <h2 id="rollout"><span class="e">⑦</span>Two rollout strategies — chosen by <code>stateful</code></h2>
+  <p>v1 deliberately has <b>no speed knobs</b> (no k8s-style <code>maxSurge</code>/<code>maxUnavailable</code>). Behavior
+  is derived purely from the <code>services.stateful</code> flag, which arrives in <code>SnapshotDesiredRow.Stateful</code>.</p>
+  <div class="cmp">
+    <div class="opt rolling">
+      <h4>Rolling</h4>
+      <div class="when">stateful = false · fungible replicas</div>
+      <div class="row"><div class="k">surge</div><div class="vv">lift <b>1 new</b> before killing 1 old (surge=1, unavailable=0)</div></div>
+      <div class="row"><div class="k">order</div><div class="vv">new → healthy → <i>then</i> drain old → reap after window</div></div>
+      <div class="row"><div class="k">gate</div><div class="vv">don't drain old until the new side equals <code>desired_count</code> and is healthy</div></div>
+      <div class="row"><div class="k">why</div><div class="vv">replicas are interchangeable; a brief extra one is cheap</div></div>
+      <span class="pill good">zero downtime</span> <span class="pill cost">brief 2× replica count</span>
+    </div>
+    <div class="opt recreate">
+      <h4>Recreate</h4>
+      <div class="when">stateful = true · single-writer volume</div>
+      <div class="row"><div class="k">surge</div><div class="vv"><b>0</b> — drain old fully, <i>then</i> lift new</div></div>
+      <div class="row"><div class="k">order</div><div class="vv">drain all outgoing → wait lease free → create new → health-gate</div></div>
+      <div class="row"><div class="k">gate</div><div class="vv">don't create new while any outgoing replica isn't <code>reaped</code></div></div>
+      <div class="row"><div class="k">why</div><div class="vv">two replicas can't hold the same <code>volume_lease</code> (PK) → surge is impossible</div></div>
+      <span class="pill good">single-writer safe</span> <span class="pill cost">brief unavailability</span>
+    </div>
+  </div>
+
+  <h3>deployments.status — the deploy lifecycle</h3>
+  <table>
+    <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td><code>pending</code></td><td>just committed; orchestrator hasn't started lifting replicas</td></tr>
+      <tr><td><code>active</code></td><td>the current (<code>is_current</code>) deploy, all target replicas healthy — steady state</td></tr>
+      <tr><td><code>draining</code></td><td>rollout in flight: new coming up, this deploy's old replicas draining</td></tr>
+      <tr><td><code>failed</code></td><td>new replicas crashloop (<code>restart_count &gt; restart_max</code>) — rollout frozen</td></tr>
+      <tr><td><code>rolledback</code></td><td><code>is_current</code> flipped back to a prior version</td></tr>
+      <tr><td><code>superseded</code></td><td>a newer deploy replaced it; its remaining replicas are being shut down</td></tr>
+    </tbody>
+  </table>
+  <p class="ref">internal/domain/deployment.go · docs/rollout-strategy.md:30-45 — typical swap: old <code>active→superseded</code>, new <code>pending→active</code></p>
+
+  <div class="callout warnbox">
+    <h4>🧊 status=failed → rollout freezes, no auto-rollback</h4>
+    <p style="font-size:14px;margin:6px 0">When a new replica trips <code>restart_max</code> (default 5): replica →
+    <code>failed</code> (terminal), deployment → <code>failed</code>, and the <b>old version keeps serving</b> — the new
+    one never takes over. The engine does <b>not</b> auto-rollback; <code>failed</code> is a signal column for the operator.
+    Exit paths: <code>conductor rollback</code> (re-point <code>is_current</code>, failed→rolledback) or
+    <code>conductor up</code> with a fix (new deploy row, prior failed→superseded).</p>
+  </div>
+
+  <h2 id="flow"><span class="e">⑧</span>One reconcile tick — the control flow</h2>
+
+  <h3>The eight stages — pipeline at a glance</h3>
+  <p>One tick is a pipeline, not a flat rule list. The <b>rule table is only the heart (stages 4–5)</b>; derive feeds
+  it, gates fence it, clamp budgets it, bin-pack places it, commit persists it. The detailed gate machine further down
+  is the <i>inside</i> of stages 3–5.</p>
+  <div class="rpipe">
+    <div class="rstage km-io"><div><div class="n">1 · loadSnapshot</div><div class="d">desired + observed in one REPEATABLE READ tx</div></div><div class="mech">I/O</div></div>
+    <div class="rarr">↓</div>
+    <div class="rstage km-derive"><div><div class="n">2 · derive group facts</div><div class="d">group by (env_service, region) · split is_current · counts, leases</div></div><div class="mech">derive</div></div>
+    <div class="rarr">↓</div>
+    <div class="rregion cf"><span class="rl">Control flow · guard + action (3·4·5)</span>
+      <div class="rstage km-halt"><div><div class="n">3 · abort gates <span style="color:var(--muted)">· per group</span></div><div class="d">stale? frozen? cordoned? no hosts?</div><div class="rbranch">halt ⇒ skip group this tick</div></div><div class="mech">halt</div></div>
+      <div class="rarr">↓ proceed</div>
+      <div class="rregion heart"><span class="rl">Rule table · the heart (4·5)</span>
+        <div class="rstage km-emitg"><div><div class="n">4 · group rules <span style="color:var(--muted)">· run once</span></div><div class="d">failDeployment · createReplica(deficit)</div></div><div class="mech">emit · group</div></div>
+        <div class="rarr">↓</div>
+        <div class="rstage km-emitr"><div><div class="n">5 · replica rules <span style="color:var(--muted)">· per replica, first-match</span></div><div class="d">schedule · promote · drain · destroy</div></div><div class="mech">emit · replica</div></div>
+      </div>
+    </div>
+    <div class="rarr">↓</div>
+    <div class="rstage km-trim"><div><div class="n">6 · clamp <span style="color:var(--muted)">· per group</span></div><div class="d">max-surge · max-unavailable · min-healthy</div></div><div class="mech">trim</div></div>
+    <div class="rarr">↓</div>
+    <div class="rstage km-solver"><div><div class="n">7 · bin-pack</div><div class="d">assign hosts to create intents</div></div><div class="mech">solver</div></div>
+    <div class="rarr">↓</div>
+    <div class="rstage km-io"><div><div class="n">8 · commit <span style="color:var(--muted)">· ReconcileTx</span></div><div class="d">CAS per intent · ErrConflict → retry next tick</div></div><div class="mech">I/O</div></div>
+    <div class="rarr dot">↻ +2s → back to stage 1</div>
+  </div>
+  <p class="sub" style="text-align:center">Decision region = stages 3–6. Control-flow mechanism = 3–5 only (clamp is a set transform, not control flow). Everything outside 3–6 is plumbing: read · derive · place · persist.</p>
+
+  <table>
+    <thead><tr><th>#</th><th>Stage</th><th>Scope</th><th>Mechanism</th><th>Output</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><code>loadSnapshot</code></td><td>—</td><td><span class="mdot" style="background:#5b5b66"></span>I/O</td><td>desired + observed, one tx</td></tr>
+      <tr><td>2</td><td><code>derive facts</code></td><td>per group</td><td><span class="mdot" style="background:var(--warn)"></span>derive (aggregate)</td><td>counts, has_outgoing, leases</td></tr>
+      <tr><td>3</td><td><code>abort gates</code></td><td>per group</td><td><span class="mdot" style="background:var(--bad)"></span>halt (guard → skip)</td><td>proceed / skip group</td></tr>
+      <tr><td>4</td><td><code>group rules</code></td><td>per group · once</td><td><span class="mdot" style="background:var(--good)"></span>emit · group</td><td>fail / create(deficit)</td></tr>
+      <tr><td>5</td><td><code>replica rules</code></td><td>per replica · 1st match</td><td><span class="mdot" style="background:#5ac6d1"></span>emit · replica</td><td>schedule / promote / drain / destroy</td></tr>
+      <tr><td>6</td><td><code>clamp</code></td><td>per group</td><td><span class="mdot" style="background:var(--accent)"></span>trim (set transform)</td><td>budgeted intent list</td></tr>
+      <tr><td>7</td><td><code>bin-pack</code></td><td>per region</td><td><span class="mdot" style="background:#b07af0"></span>solver</td><td>host assignments</td></tr>
+      <tr><td>8</td><td><code>commit</code></td><td>per intent</td><td><span class="mdot" style="background:#5b5b66"></span>I/O</td><td>CAS writes, retry on conflict</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Inside the rule table — the gate machine per group</h3>
+  <p class="sub">The gate machine the orchestrator will run per group. Source: <code>docs/rollout-strategy.md</code> (translated). Scroll the diagram sideways if it runs past the edge.<br/><b>Nothing blocks</b> — every "hold/wait" leaf just ends the tick; the loop idles <code>reconcileInterval</code> (~2s) and re-derives from a fresh snapshot, so a held replica is simply re-checked next tick.</p>
+  <div class="phases" style="margin:12px 0 2px">
+    <span class="ref" style="margin-right:4px">▢ action fill = target phase →</span>
+    <span class="ph live">placing / live</span>
+    <span class="ph serve">active</span>
+    <span class="ph drain">draining</span>
+    <span class="ph term">reaped / failed</span>
+  </div>
+  <div class="phases" style="margin:2px 0 6px">
+    <span class="ref" style="margin-right:4px">◇ guard tint = rule scope →</span>
+    <span class="ph" style="border-color:#9a7fd0;color:#d8ccf2;background:#241f33">group rule · run once</span>
+    <span class="ph" style="border-color:#5ac6d1;color:#b6e8ef;background:#14282e">replica rule · per replica</span>
+    <span class="ph" style="border:1px dashed #8a8f9c;color:#c6ccd6;background:#1c1f27">decision guard · holds tick</span>
+    <span class="ph" style="border-color:#2a2f3a;color:#9aa4b2;background:#13161c">split / I/O / leaf · neutral</span>
+    <span class="ref" style="margin-left:6px">· a guard takes the class of the action it gates · CRASH → failDeployment = group rule · HEALTH/PROG = decision guards that hold (not abort gates)</span>
+  </div>
+  <div class="diagram">
+    <div class="mermaid">
+flowchart TD
+    START([tick]) --> SNAP[loadSnapshot<br/>desired + replicas + hosts + volumes]
+    SNAP --> GROUP[group replicas by<br/>service x region · split on is_current]
+    GROUP --> CRASH{<b>crashloop kill-switch</b><br/>any new replica:<br/>restart_count &gt; restart_max?<br/><i>new version proven broken?</i>}
+
+    CRASH -->|yes| FAIL[deployment.status = failed<br/>freeze: old version keeps serving]
+    FAIL --> FREEZE([STOP — wait for operator<br/>rollback / up with a fix])
+
+    CRASH -->|no / none exist| REPLACE{any new replica lost its host?<br/>host_id NULL after placement · host gone / shifting}
+    REPLACE -->|yes| RASSIGN[IntentAssign · re-bind existing replica<br/>bin-pack snap.hosts · AssignReplicaHost · CAS host.revision<br/>no host fits → stay unplaced, retry next tick]
+    RASSIGN --> DONE([end tick])
+
+    REPLACE -->|no| HEALTH{health gate —<br/>have all new replicas passed<br/>their health probe? phase ≥ healthy<br/>zero new replicas exist ⇒ vacuously pass}
+    HEALTH -->|no| PROG{health-gate open &gt;<br/>progress_deadline?}
+    PROG -->|no| WAITH([hold this group —<br/>end tick, re-check next tick · no blocking])
+    PROG -->|yes| STALL[deployment.status = failed<br/>stalled — no progress]
+    STALL --> FREEZE
+
+    HEALTH -->|yes| SF{stateful?}
+
+    SF -->|false · rolling| RC{count new healthy/active<br/>vs desired_count}
+    RC -->|below · ramp up| RBATCH{outgoing empty?}
+    RBATCH -->|yes · nothing to protect| RCREATEN[IntentCreate × desired − current<br/>each: create + assign host · one tx<br/>no host fits → skip, retry next tick]
+    RCREATEN --> DONE
+    RBATCH -->|no · surge=1| RCREATE[IntentCreate +1<br/>create + assign host · one tx]
+    RCREATE --> DONE
+    RC -->|above · scale down| RSHRINK[IntentDrain excess target<br/>→ draining → reaped]
+    RSHRINK --> DONE
+    RC -->|at desired| RALL{all outgoing reaped?<br/><i>fresh check each tick</i>}
+    RALL -->|yes · rollout done| RDONE[deployment.status = active]
+    RDONE --> DONE
+    RALL -->|no · still retiring| RDRAIN{outgoing in active?}
+    RDRAIN -->|yes| RID[IntentDrain outgoing → draining<br/>deployment.status = draining]
+    RID --> DONE
+    RDRAIN -->|no| RWIN{drained_at + drain_seconds &lt; now?}
+    RWIN -->|no| DONE
+    RWIN -->|yes| RDESTROY[IntentDestroy → reaped]
+    RDESTROY --> DONE
+
+    SF -->|true · recreate| RCO{any outgoing left?<br/>!= reaped · observed this tick}
+    RCO -->|yes · drain before lift| RCACT{outgoing still in active?}
+    RCACT -->|yes| RCDRAIN[IntentDrain all active outgoing<br/>deployment.status = draining]
+    RCDRAIN --> DONE
+    RCACT -->|no · already draining| RCWIN{drained_at + drain_seconds &lt; now?}
+    RCWIN -->|no · wait| DONE
+    RCWIN -->|yes| RCDESTROY[IntentDestroy → reaped]
+    RCDESTROY --> DONE
+    RCO -->|no · volume free| RCCOUNT{count new<br/>vs desired_count}
+    RCCOUNT -->|below · ramp up| RCCREATE[IntentCreate × desired − current<br/>each: create + assign host + lease · one tx<br/>outgoing already reaped]
+    RCCREATE --> DONE
+    RCCOUNT -->|above · scale down| RCSHRINK[IntentDrain excess target → reaped<br/>release volume_lease]
+    RCSHRINK --> DONE
+    RCCOUNT -->|at desired| RCDONE[deployment.status = active]
+    RCDONE --> DONE
+
+    classDef live fill:#161a2b,stroke:#7c8cff,color:#cdd4ff;
+    classDef serve fill:#13211c,stroke:#5ad1b0,color:#bdeede;
+    classDef drain fill:#211c14,stroke:#f0b35b,color:#f0d2a3;
+    classDef term fill:#211616,stroke:#f07a7a,color:#f3b6b6;
+    class RASSIGN,RCREATEN,RCREATE,RCCREATE live;
+    class RID,RCDRAIN,RSHRINK,RCSHRINK drain;
+    class RDESTROY,RCDESTROY,FAIL,STALL term;
+    class RDONE,RCDONE serve;
+
+    classDef gGuard fill:#241f33,stroke:#9a7fd0,stroke-width:2px,color:#d8ccf2;
+    classDef rGuard fill:#14282e,stroke:#5ac6d1,stroke-width:2px,color:#b6e8ef;
+    class CRASH,RBATCH,RC,RCCOUNT,RALL gGuard;
+    class REPLACE,RDRAIN,RWIN,RCO,RCWIN,RCACT rGuard;
+    classDef holdGuard fill:#1c1f27,stroke:#8a8f9c,stroke-width:2px,stroke-dasharray:5 3,color:#c6ccd6;
+    class HEALTH,PROG holdGuard;
+    </div>
+  </div>
+
+  <div class="callout">
+    <h4>↪ How cold start, placement, and is_current flips actually behave</h4>
+    <p style="margin:0 0 10px;font-size:14px"><b>Cold start.</b> A fresh deploy (zero target replicas observed) isn't a
+    separate branch — it <i>falls through</i> the three "new replica" gates because each is an <b>existential</b> check:
+    <code>any</code> crashed → none; <code>any</code> lost its host → none; <code>all</code> healthy → vacuously true with
+    zero replicas. The flow lands at the <b>count gate</b> (<code>count new vs desired_count</code>), which sees
+    <code>below</code>. Because <code>outgoing</code> is empty there's no old version to protect, so it
+    <b>batch-creates all <code>desired − current</code> replicas in one tick</b> instead of +1. The <code>+1</code> surge
+    throttle only applies while <code>outgoing &gt; 0</code> (a rolling update draining an old version); with nothing to
+    keep serving, serializing would be pure latency. The same shortcut covers a plain scale-up of an already-running
+    version.</p>
+    <p style="margin:0 0 10px;font-size:14px"><b>Create and assign are one atomic action.</b> <code>IntentCreate</code>
+    commits <code>CreateReplica</code> + <code>AssignReplicaHost</code> in a single <code>WithReconcileTx</code>: the scheduler
+    bin-packs a host during the decide phase, then creates the row and reserves the host <i>together</i> under the
+    <code>host.revision</code> CAS. So a replica is <b>born already placed</b> — <code>host_id</code> is never <code>NULL</code>
+    from the create path, and <code>pending → scheduling</code> collapse to an instant (it lands in <code>starting</code>). If
+    the chosen host was grabbed first → <code>ErrConflict</code> rolls the whole tx back, nothing is created, retry next tick;
+    if no host fits at decide time, the create just isn't emitted this tick.</p>
+    <p style="margin:0 0 10px;font-size:14px"><b>A replica only goes host-less by <i>losing</i> its host afterward</b> — the
+    host dies/drains, or a <code>shifting</code> migration. That's the one case <code>host_id NULL</code> appears, and the
+    <b>re-placement gate</b> (<code>REPLACE → IntentAssign</code>) handles it: re-bind the <i>existing</i> row to a new host,
+    no re-create. It sits right after the crash gate so lost capacity is restored before health/counts are evaluated, and it
+    self-resolves the moment a host frees up or joins.</p>
+    <p style="margin:0;font-size:14px"><b><code>is_current</code> flips at <code>conductor up</code>, not after the new
+    version is healthy.</b> From the very first tick the new deploy is <code>is_current=true</code> (the target) and the
+    prior deploy is <code>is_current=false</code> (outgoing). During a <i>failed</i> rollout the new deploy stays
+    <code>is_current=true · status=failed</code> while the outgoing (<code>is_current=false</code>) replicas keep serving —
+    the drain gate never opened, so old traffic is never cut. <code>conductor rollback</code> is the only thing that flips
+    <code>is_current</code> back.</p>
+    <p style="margin:10px 0 0;font-size:14px"><b>Drain is all-at-once; create is one-at-a-time.</b> The
+    <code>RDRAIN → RID</code> branch drains <i>every</i> outgoing replica still in <code>active</code> in a single tick
+    (all → <code>draining</code>, <code>status=draining</code>), and they reap together after <code>drain_seconds</code>.
+    That's safe because RID is only reached once the health gate <i>and</i> the count gate have both passed — the full new
+    version is already up and serving, so complete replacement capacity exists. The create side is deliberately the
+    opposite: while an outgoing version still exists it ramps <code>+1 per tick</code> (surge=1), so a broken new version
+    trips its health check or crashloop at <b>replica 1</b> — blast radius 1 — before the engine commits to all N. Cautious
+    ramp-up, decisive drain. (Batch-create-all applies only at cold start / scale-up, when there's no outgoing to protect.)</p>
+  </div>
+
+  <div class="callout warnbox">
+    <h4>＋ What this gate machine adds beyond a pure N→N+1 rollout</h4>
+    <p style="margin:0 0 10px;font-size:14px">The original <code>rollout-strategy.md</code> only described version rollouts.
+    A complete v1 reconcile loop also has to handle the steady-state and failure cases below — now folded into the diagram:</p>
+    <ul style="margin:0 0 10px;padding-left:20px;font-size:14px">
+      <li><b>Scale-down / scale-to-zero.</b> The count gate is now three-way (<code>below</code> / <code>at</code> /
+      <code>above</code> desired). <code>above</code> drains the excess <i>target</i> replicas (<code>IntentDrain → reaped</code>;
+      recreate also releases the <code>volume_lease</code>). Previously every "≠ desired" went to <code>IntentCreate</code>,
+      so lowering <code>desired_replicas</code> would have created replicas forever.</li>
+      <li><b>Reaping is general, not outgoing-only.</b> Both the excess <i>target</i> replicas from a scale-down
+      (<code>RSHRINK</code>) and the <i>outgoing</i> replicas from a rollout (<code>RID</code>) land in
+      <code>draining</code> and are reaped by the <b>same</b> transition: any replica with
+      <code>drained_at + drain_seconds &lt; now</code> → <code>reaped</code>. It's a per-replica, version-agnostic step —
+      the flowchart draws the reap under the outgoing branch for the rollout story, but a scale-down-drained target replica
+      is caught by the identical rule (<code>{drainWindowElapsed, destroy}</code>). Unconditionally safe, because entering
+      <code>draining</code> already passed the right gate. <i>Status:</i> this reaper lives in the reconcile loop —
+      <code>reconcileIntentsFor</code> is still a stub, so it's designed-not-yet-wired (comments in <code>postgres.go</code>
+      / <code>deployments.sql.go</code> already assume "the reconcile loop reaps the replicas").</li>
+      <li><b>Progress deadline on the health gate.</b> A new replica that comes up but never goes healthy (and never crashes to
+      trip <code>restart_max</code>) used to wedge the rollout indefinitely. Now <code>health-gate open &gt; progress_deadline</code>
+      trips the deployment to <code>failed · stalled</code> and freezes for the operator — same exit as a crashloop.</li>
+      <li><b>Status bookkeeping.</b> The loop now writes <code>status = draining</code> when it starts draining outgoing, and
+      <code>active</code> / <code>failed</code> at their terminals. The remaining transitions are set <i>outside</i> this loop:
+      <code>pending</code> + the prior deploy's <code>superseded</code> at <code>conductor up</code>, and <code>rolledback</code>
+      at <code>conductor rollback</code>.</li>
+    </ul>
+    <p style="margin:0;font-size:14px;opacity:0.85">Still deliberately out of v1: per-deployment speed knobs (canary,
+    <code>maxSurge</code>/<code>maxUnavailable</code>), manual single-replica restart, and automatic rollback.</p>
+  </div>
+
+  <h3>The same gate machine, as a rule table in code</h3>
+  <p>That branchy flowchart collapses to a flat, inspectable table. A <b>rule</b> is a <code>guard + action</code> pair —
+  the same mechanism as the abort gates; only the action's outcome differs (gate → halt, rule → emit). Two things keep it
+  uniform across the group/replica split:</p>
+  <ul style="font-size:14px;color:#cfd6df;padding-left:20px">
+    <li><b>A scope tag</b> — group rules run <i>once per group</i>; replica rules run <i>per replica</i>. Without it, a
+    group rule like <code>createDeficit</code> would fire once per replica and over-create.</li>
+    <li><b><code>emit</code> returns <code>[]Intent</code></b> — so a group rule can emit the whole create deficit
+    (<code>desired − healthy</code>) in one shot, while most replica rules emit one.</li>
+  </ul>
+  <pre class="code"><span class="cm">// One rule = guard + action — the same mechanism as the abort gates.</span>
+<span class="cm">// Only the action differs: a gate halts, a rule emits intents.</span>
+<span class="kw">type</span> <span class="ty">scope</span> <span class="kw">int</span>
+<span class="kw">const</span> ( ScopeGroup <span class="ty">scope</span> = <span class="kw">iota</span>; ScopeReplica )
+
+<span class="kw">type</span> <span class="ty">rule</span> <span class="kw">struct</span> {
+    scope <span class="ty">scope</span>
+    when  <span class="kw">func</span>(c <span class="ty">ctx</span>) <span class="kw">bool</span>
+    emit  <span class="kw">func</span>(c <span class="ty">ctx</span>) []<span class="ty">Intent</span>   <span class="cm">// []Intent: a group rule emits the whole deficit</span>
+}
+
+<span class="kw">type</span> <span class="ty">ctx</span> <span class="kw">struct</span> {
+    g <span class="ty">group</span>     <span class="cm">// derived facts: counts, has_outgoing, leases</span>
+    r *<span class="ty">replica</span>  <span class="cm">// nil for group-scoped rules</span>
+}</pre>
+  <p>The rolling strategy is then just data — each row tagged with its scope, and (comment) the replica phase that branch
+  drives toward, matching the diagram's tints:</p>
+  <pre class="code"><span class="kw">var</span> rollingRules = []<span class="ty">rule</span>{
+    <span class="cm">// group-scoped — run ONCE per group</span>
+    {ScopeGroup,   anyCrashedPastMax,  failDeployment},  <span class="cm term">// → failed</span>
+    {ScopeGroup,   belowDesired,       createDeficit},    <span class="cm live">// → pending ×(desired−healthy)</span>
+
+    <span class="cm">// replica-scoped — run PER replica, first match wins</span>
+    {ScopeReplica, pendingPlacement,   scheduleOnHost},  <span class="cm live">// → scheduling</span>
+    {ScopeReplica, healthyAndCurrent,  promoteToActive}, <span class="cm serve">// → active</span>
+    {ScopeReplica, outgoingNewHealthy, drain},           <span class="cm drain">// → draining</span>
+    {ScopeReplica, drainTimerElapsed,  destroy},         <span class="cm term">// → reaped</span>
+}</pre>
+  <p>The engine is two passes over that one table — group-scoped once, replica-scoped per replica with first-match-wins —
+  feeding the clamp (stage 6) afterwards:</p>
+  <pre class="code"><span class="kw">func</span> evalRolling(g <span class="ty">group</span>) []<span class="ty">Intent</span> {
+    <span class="kw">var</span> out []<span class="ty">Intent</span>
+
+    <span class="cm">// 1 · group rules — once</span>
+    <span class="kw">for</span> _, rl := <span class="kw">range</span> rollingRules {
+        <span class="kw">if</span> rl.scope != ScopeGroup { <span class="kw">continue</span> }
+        c := <span class="ty">ctx</span>{g: g}
+        <span class="kw">if</span> rl.when(c) { out = <span class="kw">append</span>(out, rl.emit(c)...) }
+    }
+
+    <span class="cm">// 2 · replica rules — per replica, first match wins</span>
+    <span class="kw">for</span> i := <span class="kw">range</span> g.replicas {
+        c := <span class="ty">ctx</span>{g: g, r: &amp;g.replicas[i]}
+        <span class="kw">for</span> _, rl := <span class="kw">range</span> rollingRules {
+            <span class="kw">if</span> rl.scope != ScopeReplica { <span class="kw">continue</span> }
+            <span class="kw">if</span> rl.when(c) {
+                out = <span class="kw">append</span>(out, rl.emit(c)...)
+                <span class="kw">break</span>  <span class="cm">// one action per replica per tick</span>
+            }
+        }
+    }
+    <span class="kw">return</span> out
+}</pre>
+  <div class="callout">
+    <h4>↪ Scope by the action's reach, not the guard's</h4>
+    <p style="margin:0;font-size:14px"><code>failDeployment</code>'s guard reads a single replica
+    (<code>restart_count &gt; restart_max</code>) but its <i>effect</i> is group-wide. So it's a <b>group</b> rule with an
+    existential guard (<code>any</code>) — emitted once, not once per crashed replica. The cold-start / scale-up shortcut
+    falls out for free: with <code>outgoing</code> empty, <code>createDeficit</code> emits all
+    <code>desired − healthy</code> at once; the <code>+1</code> surge throttle lives in the <b>clamp</b>, not the rule.</p>
+  </div>
+
+  <h3>The full cascade, in priority order — 1:1 with the gate machine</h3>
+  <p>The teaching table above is the shape; this is the faithful encoding. Because the diagram takes <b>one branch per
+  group per tick</b>, it's a single <b>per-group ordered cascade</b>, first-match-wins — so <b>row order alone</b> carries
+  every precedence (CRASH before HEALTH before count before drain). Two effects fall out for free, no special type needed:
+  <b>hold</b> = a row that emits nothing; <b>fail</b> = a row that emits a <code>status=failed</code> write (the freeze is
+  the <i>next</i> tick's precondition gate). Comments tag the diagram node + target phase.</p>
+  <pre class="code"><span class="cm">// stateful = false · per-group cascade · first-match-wins · one branch / tick.</span>
+<span class="kw">var</span> rollingCascade = []<span class="ty">rule</span>{
+    <span class="cm">// ── fail-fast, then restore lost capacity ──────────────────</span>
+    {anyNewCrashedPastMax,          emit(deployFailed)},        <span class="cm term">// CRASH   → failed (freeze)</span>
+    {anyNewLostHost,                reassignHostless},          <span class="cm live">// REPLACE → assign</span>
+    <span class="cm">// ── health gate — holds the whole group until new side is up ─</span>
+    {newHealthOpenPastDeadline,     emit(deployStalled)},       <span class="cm term">// PROG    → failed (stalled)</span>
+    {newNotAllHealthyYet,           hold},                       <span class="cm">// HEALTH  → emit nothing, end tick</span>
+    <span class="cm">// ── converge the count (at-desired falls through to retire) ─</span>
+    {belowDesired &amp;&amp; noOutgoing,    createDeficit},              <span class="cm live">// cold start / scale-up — batch N</span>
+    {belowDesired,                  createOneSurge},            <span class="cm live">// rolling surge +1</span>
+    {aboveDesired,                  drainExcessTarget},         <span class="cm drain">// scale down</span>
+    <span class="cm">// ── retire the outgoing version ────────────────────────────</span>
+    {outgoingStillInActive,         drainOutgoing_setDraining}, <span class="cm drain">// RDRAIN  → draining</span>
+    {outgoingDrainWindowElapsed,    destroyDrained},            <span class="cm term">// RWIN    → reaped</span>
+    {allOutgoingReaped,             setActive},                 <span class="cm serve">// RALL    → active</span>
+}
+
+<span class="cm">// stateful = true · drain-before-lift · surge = 0 (single-writer volume).</span>
+<span class="kw">var</span> recreateCascade = []<span class="ty">rule</span>{
+    {anyNewCrashedPastMax,          emit(deployFailed)},        <span class="cm term">// CRASH</span>
+    {anyNewLostHost,                reassignHostless},          <span class="cm live">// REPLACE</span>
+    {newHealthOpenPastDeadline,     emit(deployStalled)},       <span class="cm term">// PROG</span>
+    {newNotAllHealthyYet,           hold},                       <span class="cm">// HEALTH</span>
+    <span class="cm">// ── drain ALL outgoing FIRST, then wait for the lease to free ─</span>
+    {outgoingStillInActive,         drainOutgoing_setDraining}, <span class="cm drain">// RCDRAIN → draining</span>
+    {outgoingDrainWindowElapsed,    destroyDrained},            <span class="cm term">// RCWIN   → reaped</span>
+    {anyOutgoingNotReaped,          hold},                       <span class="cm">// lease still held → wait</span>
+    <span class="cm">// ── volume free → lift the new version ─────────────────────</span>
+    {belowDesired,                  createDeficitWithLease},    <span class="cm live">// RCCREATE</span>
+    {aboveDesired,                  drainExcess_releaseLease},  <span class="cm drain">// RCSHRINK</span>
+    {atDesired,                     setActive},                 <span class="cm serve">// RCDONE</span>
+}</pre>
+  <p>The engine picks the array by the <code>stateful</code> flag (the diagram's <code>SF</code> split) and walks it
+  first-match-wins — that's the entire decide step for one group:</p>
+  <pre class="code"><span class="kw">func</span> reconcileGroup(g <span class="ty">group</span>) []<span class="ty">Intent</span> {
+    cascade := rollingCascade
+    <span class="kw">if</span> g.stateful { cascade = recreateCascade }   <span class="cm">// SF</span>
+
+    <span class="kw">for</span> _, rl := <span class="kw">range</span> cascade {
+        <span class="kw">if</span> rl.when(g) { <span class="kw">return</span> rl.emit(g) }   <span class="cm">// first match wins → one branch / tick</span>
+    }
+    <span class="kw">return</span> <span class="kw">nil</span>                                  <span class="cm">// nothing matched ⇒ steady state, hold</span>
+}</pre>
+  <div class="callout">
+    <h4>↪ Why ordering is the whole design</h4>
+    <p style="margin:0;font-size:14px">Every "at desired / else" in the diagram is just <b>falling through</b> to the
+    next row: not-below and not-above means we're at desired, so the create/drain-excess rows miss and the retire rows
+    run. Move <code>newNotAllHealthyYet</code> below the count rows and you'd drain the old version before the new one is
+    healthy — an outage. The <b>precondition gates</b> (stale / frozen / cordoned) are <i>not</i> in this array; they're
+    the order-irrelevant AND-filter that runs before <code>reconcileGroup</code> is ever called.</p>
+  </div>
+
+  <h2 id="cas"><span class="e">⑨</span>Losing races safely — optimistic concurrency</h2>
+  <p>The decision reads run <i>outside</i> the write tx, so the placement is computed against a snapshot that may already
+  be stale by commit time. Three guards catch every stale write; any of them returns <code>ErrConflict</code>, which rolls
+  back the whole placement — the next tick recomputes from fresh state. <b>No lock-holding across decisions.</b></p>
+  <div class="races">
+    <div class="race">
+      <h4>Host filled up</h4>
+      <p>Bin-packing saw free capacity, but another placement grabbed it first.</p>
+      <p class="guard">CAS on host.revision</p>
+      <p><code>AssignReplicaHost</code> reserves iff <code>host.revision == expected</code>; moved → ErrConflict.</p>
+    </div>
+    <div class="race">
+      <h4>Sensor wrote first</h4>
+      <p>Scheduler decided a phase at rev 5, but the Sensor already advanced it to rev 6.</p>
+      <p class="guard">CAS on replica.revision</p>
+      <p><code>SetReplicaPhase</code> writes iff <code>revision == expected</code>; stale decision is dropped, not clobbered.</p>
+    </div>
+    <div class="race">
+      <h4>Lease contested</h4>
+      <p>Two replicas try to claim the same stateful volume.</p>
+      <p class="guard">PK on volume_id + upsert WHERE</p>
+      <p><code>AcquireVolumeLease</code> — only one wins; the other gets 0 rows → ErrConflict. <code>expires_at</code> fences the old writer.</p>
+    </div>
+  </div>
+  <div class="card">
+    <h3>ReconcileTx — the writes that must commit together</h3>
+    <p style="font-size:14px;margin:6px 0">Schedule + reserve (no orphan replica, no double-booked host) and the stateful
+    single-writer lease all land in one short tx. Any error — including a lost CAS — rolls the whole placement back.</p>
+    <p class="ref">internal/storage/reconcile.go:34-69 · CreateReplica · AssignReplicaHost · AcquireVolumeLease · SetReplicaPhase · SetReplicaDesiredStatus · ReleaseVolumeLease · DeleteReplica</p>
+  </div>
+
+  <h2 id="converge"><span class="e">⑩</span>Why it converges</h2>
+  <div class="grid2">
+    <div class="card">
+      <h3>Self-healing</h3>
+      <p style="font-size:14px">Delete a replica row by hand → next tick sees desired &gt; observed → recreates it. Nothing
+      remembers the old state; the gap <i>is</i> the instruction.</p>
+    </div>
+    <div class="card">
+      <h3>Restart-safe</h3>
+      <p style="font-size:14px">Control plane crashes mid-reconcile? Writes were CAS-guarded and atomic. Next tick
+      re-derives everything from the DB snapshot and re-converges. No journal to replay.</p>
+    </div>
+    <div class="card">
+      <h3>Idempotent intents</h3>
+      <p style="font-size:14px">Same intent applied twice is safe — same-phase writes no-op, the composite FK rejects
+      undeclared <code>(deployment, region)</code> targets, and lease upserts are guarded.</p>
+    </div>
+    <div class="card">
+      <h3>Bounded blast radius</h3>
+      <p style="font-size:14px">A lost race never corrupts state — it just drops one placement decision. The slowest
+      possible outcome is "try again in 2s," never divergence.</p>
+    </div>
+  </div>
+
+  <hr>
+  <p class="foot">
+    <b>Design source:</b> matched the project's own <code>docs/*.html</code> explainers (dark theme, <code>--accent #7c8cff</code> /
+    <code>--accent2 #5ad1b0</code>) rather than introducing a new system — option (2) in the Lavish priority order.
+    <br>Every claim verified against source: <code>internal/engine/{engine,scheduler}.go</code>,
+    <code>internal/storage/reconcile.go</code>, <code>internal/domain/{replica,deployment}.go</code>,
+    <code>docs/rollout-strategy.md</code>. The control-flow diagram reflects the <i>designed</i> gate machine; in code
+    <code>reconcileIntentsFor</code> is still a stub.
+  </p>
+</div>
+<script>
+  mermaid.initialize({
+    startOnLoad:true,
+    theme:'base',
+    themeVariables:{
+      background:'#0b0d11', primaryColor:'#171a21', primaryTextColor:'#e7ebf0',
+      primaryBorderColor:'#2a2f3a', lineColor:'#7c8cff', secondaryColor:'#1d212a',
+      tertiaryColor:'#13211c', fontFamily:'SF Mono, ui-monospace, Menlo, monospace',
+      fontSize:'16px'
+    },
+    flowchart:{ curve:'basis', nodeSpacing:48, rankSpacing:60, useMaxWidth:false }
+  });
+</script>
+</body>
+</html>
