@@ -14,7 +14,7 @@ import (
 )
 
 const listActiveReplicas = `-- name: ListActiveReplicas :many
-SELECT r.id, r.deployment_id, r.region, r.host_id, r.volume_id, r.cpu_millicores, r.mem_bytes, r.alloc_reason, r.desired_status, r.phase, r.healthy, r.restart_count, r.last_exit_reason, r.revision, r.created_at, r.updated_at, d.environment_service_id, es.service_id, d.version, d.is_current
+SELECT r.id, r.deployment_id, r.region, r.host_id, r.volume_id, r.cpu_millicores, r.mem_bytes, r.alloc_reason, r.desired_status, r.phase, r.healthy, r.restart_count, r.last_exit_reason, r.revision, r.created_at, r.updated_at, r.drained_at, r.health_checks_passed_at, d.environment_service_id, es.service_id, d.version, d.is_current, d.drain_seconds
 FROM replicas r
 JOIN deployments d           ON d.id = r.deployment_id
 JOIN environment_services es ON es.id = d.environment_service_id
@@ -43,10 +43,13 @@ type ListActiveReplicasRow struct {
 	Revision             int64          `json:"revision"`
 	CreatedAt            time.Time      `json:"created_at"`
 	UpdatedAt            time.Time      `json:"updated_at"`
+	DrainedAt            sql.NullTime   `json:"drained_at"`
+	HealthChecksPassedAt sql.NullTime   `json:"health_checks_passed_at"`
 	EnvironmentServiceID uuid.UUID      `json:"environment_service_id"`
 	ServiceID            uuid.UUID      `json:"service_id"`
 	Version              int32          `json:"version"`
 	IsCurrent            bool           `json:"is_current"`
+	DrainSeconds         int32          `json:"drain_seconds"`
 }
 
 // Observed fleet for every service that has a current deployment — INCLUDING
@@ -82,10 +85,13 @@ func (q *Queries) ListActiveReplicas(ctx context.Context) ([]ListActiveReplicasR
 			&i.Revision,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.DrainedAt,
+			&i.HealthChecksPassedAt,
 			&i.EnvironmentServiceID,
 			&i.ServiceID,
 			&i.Version,
 			&i.IsCurrent,
+			&i.DrainSeconds,
 		); err != nil {
 			return nil, err
 		}
@@ -198,6 +204,9 @@ SELECT
 	dr.replicas              AS desired_replicas,
 	d.cpu_millicores         AS cpu_millicores,
 	d.mem_bytes              AS mem_bytes,
+	d.restart_max            AS restart_max,
+	d.progress_deadline      AS progress_deadline,
+	d.status                 AS status,
 	svc.stateful             AS stateful
 FROM deployments d
 JOIN deployment_regions dr   ON dr.deployment_id = d.id
@@ -214,6 +223,9 @@ type SnapshotDesiredRow struct {
 	DesiredReplicas      int32     `json:"desired_replicas"`
 	CpuMillicores        int32     `json:"cpu_millicores"`
 	MemBytes             int64     `json:"mem_bytes"`
+	RestartMax           int32     `json:"restart_max"`
+	ProgressDeadline     int32     `json:"progress_deadline"`
+	Status               string    `json:"status"`
 	Stateful             bool      `json:"stateful"`
 }
 
@@ -244,6 +256,9 @@ func (q *Queries) SnapshotDesired(ctx context.Context) ([]SnapshotDesiredRow, er
 			&i.DesiredReplicas,
 			&i.CpuMillicores,
 			&i.MemBytes,
+			&i.RestartMax,
+			&i.ProgressDeadline,
+			&i.Status,
 			&i.Stateful,
 		); err != nil {
 			return nil, err

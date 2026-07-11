@@ -28,6 +28,7 @@ type Deployment struct {
 	CreatedBy            sql.NullString  `json:"created_by"`
 	Status               string          `json:"status"`
 	CreatedAt            time.Time       `json:"created_at"`
+	ProgressDeadline     int32           `json:"progress_deadline"`
 }
 
 type DeploymentRegion struct {
@@ -75,22 +76,31 @@ type Region struct {
 }
 
 type Replica struct {
-	ID             uuid.UUID      `json:"id"`
-	DeploymentID   uuid.UUID      `json:"deployment_id"`
-	Region         string         `json:"region"`
-	HostID         uuid.NullUUID  `json:"host_id"`
-	VolumeID       uuid.NullUUID  `json:"volume_id"`
-	CpuMillicores  int32          `json:"cpu_millicores"`
-	MemBytes       int64          `json:"mem_bytes"`
-	AllocReason    sql.NullString `json:"alloc_reason"`
-	DesiredStatus  string         `json:"desired_status"`
-	Phase          string         `json:"phase"`
-	Healthy        bool           `json:"healthy"`
-	RestartCount   int32          `json:"restart_count"`
-	LastExitReason sql.NullString `json:"last_exit_reason"`
-	Revision       int64          `json:"revision"`
-	CreatedAt      time.Time      `json:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
+	ID                   uuid.UUID      `json:"id"`
+	DeploymentID         uuid.UUID      `json:"deployment_id"`
+	Region               string         `json:"region"`
+	HostID               uuid.NullUUID  `json:"host_id"`
+	VolumeID             uuid.NullUUID  `json:"volume_id"`
+	CpuMillicores        int32          `json:"cpu_millicores"`
+	MemBytes             int64          `json:"mem_bytes"`
+	AllocReason          sql.NullString `json:"alloc_reason"`
+	DesiredStatus        string         `json:"desired_status"`
+	Phase                string         `json:"phase"`
+	Healthy              bool           `json:"healthy"`
+	RestartCount         int32          `json:"restart_count"`
+	LastExitReason       sql.NullString `json:"last_exit_reason"`
+	Revision             int64          `json:"revision"`
+	CreatedAt            time.Time      `json:"created_at"`
+	UpdatedAt            time.Time      `json:"updated_at"`
+	DrainedAt            sql.NullTime   `json:"drained_at"`
+	HealthChecksPassedAt sql.NullTime   `json:"health_checks_passed_at"`
+}
+
+type ServedRevision struct {
+	EnvironmentServiceID uuid.UUID `json:"environment_service_id"`
+	Region               string    `json:"region"`
+	DeploymentID         uuid.UUID `json:"deployment_id"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 type Service struct {

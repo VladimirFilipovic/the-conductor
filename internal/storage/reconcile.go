@@ -56,6 +56,11 @@ type ReconcileTx interface {
 
 	ReleaseVolumeLease(ctx context.Context, volumeID uuid.UUID) error
 	DeleteReplica(ctx context.Context, replicaID uuid.UUID) error
+
+	// SetServedRevision flips the slot's traffic switch to deploymentID. Must
+	// share the tx with the outgoing drain batch so the blue/green shift is
+	// atomic with retiring the old side.
+	SetServedRevision(ctx context.Context, environmentServiceID uuid.UUID, region string, deploymentID uuid.UUID) error
 }
 
 // The tx-scoped querier handed to WithReconcileTx callbacks is exactly this view.
@@ -160,6 +165,14 @@ func (q querier) ReleaseVolumeLease(ctx context.Context, volumeID uuid.UUID) err
 
 func (q querier) DeleteReplica(ctx context.Context, replicaID uuid.UUID) error {
 	return q.queries.DeleteReplica(ctx, replicaID)
+}
+
+func (q querier) SetServedRevision(ctx context.Context, environmentServiceID uuid.UUID, region string, deploymentID uuid.UUID) error {
+	return q.queries.SetServedRevision(ctx, db.SetServedRevisionParams{
+		EnvironmentServiceID: environmentServiceID,
+		Region:               region,
+		DeploymentID:         deploymentID,
+	})
 }
 
 // nullString maps "" to a NULL text column; engine reasons (alloc_reason) are
