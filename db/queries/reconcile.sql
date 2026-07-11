@@ -60,9 +60,27 @@ UPDATE replicas SET desired_status = $2 WHERE id = $1;
 -- against stale observed state (the Sensor moved it meanwhile) is dropped rather
 -- than clobbering. rows-affected = 0 signals the lost race.
 -- name: SetReplicaPhase :execrows
+-- Stamps drained_at when (and only when) entering draining, so the drain-window
+-- rule can reap at drained_at + drain_seconds; other transitions leave it intact.
 UPDATE replicas
-SET phase = $2, revision = revision + 1
+SET phase = $2,
+    drained_at = CASE WHEN $2 = 'draining' THEN now() ELSE drained_at END,
+    revision = revision + 1
 WHERE id = $1 AND revision = $3;
+
+-- Flip the slot's traffic switch to a new deployment. Runs in the same tx as
+-- the outgoing drain batch so the shift is atomic with retiring the old side.
+-- name: SetServedRevision :exec
+INSERT INTO served_revisions (environment_service_id, region, deployment_id)
+VALUES ($1, $2, $3)
+ON CONFLICT (environment_service_id, region) DO UPDATE
+	SET deployment_id = EXCLUDED.deployment_id,
+	    updated_at    = now();
+
+-- The deployment a slot's traffic currently points at (router / status reads).
+-- name: GetServedRevision :one
+SELECT * FROM served_revisions
+WHERE environment_service_id = $1 AND region = $2;
 
 -- Drop a lease so a freed volume is immediately re-leasable.
 -- name: ReleaseVolumeLease :exec

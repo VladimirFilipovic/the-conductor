@@ -18,6 +18,9 @@ SELECT
 	dr.replicas              AS desired_replicas,
 	d.cpu_millicores         AS cpu_millicores,
 	d.mem_bytes              AS mem_bytes,
+	d.restart_max            AS restart_max,
+	d.progress_deadline      AS progress_deadline,
+	d.status                 AS status,
 	svc.stateful             AS stateful
 FROM deployments d
 JOIN deployment_regions dr   ON dr.deployment_id = d.id
@@ -33,7 +36,7 @@ WHERE d.is_current;
 -- converge toward, the rest are the old revision to drain. Filtering on
 -- d.is_current here would hide the outgoing replicas and leak them as orphans
 -- nothing ever reaps. Reaped replicas are terminal and excluded.
-SELECT r.*, d.environment_service_id, es.service_id, d.version, d.is_current
+SELECT r.*, d.environment_service_id, es.service_id, d.version, d.is_current, d.drain_seconds
 FROM replicas r
 JOIN deployments d           ON d.id = r.deployment_id
 JOIN environment_services es ON es.id = d.environment_service_id

@@ -85,7 +85,7 @@ func (q *Queries) AssignVolumeHost(ctx context.Context, arg AssignVolumeHostPara
 const createReplica = `-- name: CreateReplica :one
 INSERT INTO replicas (deployment_id, region, cpu_millicores, mem_bytes, alloc_reason)
 VALUES ($1, $2, $3, $4, $5)
-RETURNING id, deployment_id, region, host_id, volume_id, cpu_millicores, mem_bytes, alloc_reason, desired_status, phase, healthy, restart_count, last_exit_reason, revision, created_at, updated_at
+RETURNING id, deployment_id, region, host_id, volume_id, cpu_millicores, mem_bytes, alloc_reason, desired_status, phase, healthy, restart_count, last_exit_reason, revision, created_at, updated_at, drained_at, health_checks_passed_at
 `
 
 type CreateReplicaParams struct {
@@ -124,6 +124,8 @@ func (q *Queries) CreateReplica(ctx context.Context, arg CreateReplicaParams) (R
 		&i.Revision,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.DrainedAt,
+		&i.HealthChecksPassedAt,
 	)
 	return i, err
 }
@@ -136,6 +138,29 @@ DELETE FROM replicas WHERE id = $1
 func (q *Queries) DeleteReplica(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.ExecContext(ctx, deleteReplica, id)
 	return err
+}
+
+const getServedRevision = `-- name: GetServedRevision :one
+SELECT environment_service_id, region, deployment_id, updated_at FROM served_revisions
+WHERE environment_service_id = $1 AND region = $2
+`
+
+type GetServedRevisionParams struct {
+	EnvironmentServiceID uuid.UUID `json:"environment_service_id"`
+	Region               string    `json:"region"`
+}
+
+// The deployment a slot's traffic currently points at (router / status reads).
+func (q *Queries) GetServedRevision(ctx context.Context, arg GetServedRevisionParams) (ServedRevision, error) {
+	row := q.db.QueryRowContext(ctx, getServedRevision, arg.EnvironmentServiceID, arg.Region)
+	var i ServedRevision
+	err := row.Scan(
+		&i.EnvironmentServiceID,
+		&i.Region,
+		&i.DeploymentID,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const releaseVolumeLease = `-- name: ReleaseVolumeLease :exec
@@ -196,7 +221,9 @@ func (q *Queries) SetReplicaDesiredStatus(ctx context.Context, arg SetReplicaDes
 
 const setReplicaPhase = `-- name: SetReplicaPhase :execrows
 UPDATE replicas
-SET phase = $2, revision = revision + 1
+SET phase = $2,
+    drained_at = CASE WHEN $2 = 'draining' THEN now() ELSE drained_at END,
+    revision = revision + 1
 WHERE id = $1 AND revision = $3
 `
 
@@ -210,10 +237,33 @@ type SetReplicaPhaseParams struct {
 // only lands if revision still matches what the loop read, so a phase decided
 // against stale observed state (the Sensor moved it meanwhile) is dropped rather
 // than clobbering. rows-affected = 0 signals the lost race.
+// Stamps drained_at when (and only when) entering draining, so the drain-window
+// rule can reap at drained_at + drain_seconds; other transitions leave it intact.
 func (q *Queries) SetReplicaPhase(ctx context.Context, arg SetReplicaPhaseParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, setReplicaPhase, arg.ID, arg.Phase, arg.Revision)
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const setServedRevision = `-- name: SetServedRevision :exec
+INSERT INTO served_revisions (environment_service_id, region, deployment_id)
+VALUES ($1, $2, $3)
+ON CONFLICT (environment_service_id, region) DO UPDATE
+	SET deployment_id = EXCLUDED.deployment_id,
+	    updated_at    = now()
+`
+
+type SetServedRevisionParams struct {
+	EnvironmentServiceID uuid.UUID `json:"environment_service_id"`
+	Region               string    `json:"region"`
+	DeploymentID         uuid.UUID `json:"deployment_id"`
+}
+
+// Flip the slot's traffic switch to a new deployment. Runs in the same tx as
+// the outgoing drain batch so the shift is atomic with retiring the old side.
+func (q *Queries) SetServedRevision(ctx context.Context, arg SetServedRevisionParams) error {
+	_, err := q.db.ExecContext(ctx, setServedRevision, arg.EnvironmentServiceID, arg.Region, arg.DeploymentID)
+	return err
 }

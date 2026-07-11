@@ -20,7 +20,7 @@ INSERT INTO deployments (
 	drain_seconds, restart_max, commit_message, created_by
 )
 VALUES ($1, $2, true, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-RETURNING id, environment_service_id, version, is_current, image_ref, cpu_millicores, mem_bytes, env, healthcheck, drain_seconds, restart_max, commit_message, created_by, status, created_at
+RETURNING id, environment_service_id, version, is_current, image_ref, cpu_millicores, mem_bytes, env, healthcheck, drain_seconds, restart_max, commit_message, created_by, status, created_at, progress_deadline
 `
 
 type CreateDeploymentParams struct {
@@ -68,6 +68,7 @@ func (q *Queries) CreateDeployment(ctx context.Context, arg CreateDeploymentPara
 		&i.CreatedBy,
 		&i.Status,
 		&i.CreatedAt,
+		&i.ProgressDeadline,
 	)
 	return i, err
 }
