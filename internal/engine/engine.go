@@ -27,16 +27,16 @@ type SnapshotStore interface {
 // Consumer-side views of the pass stages, so tests can fake either
 // independently of the concrete Reconciler/Actuator.
 type reconciler interface {
-	Reconcile(groups []replicaGroup) []Intent
+	Reconcile(snap stateSnapshot) []Intent
 }
 
 type actuator interface {
 	Apply(ctx context.Context, intents []Intent) error
 }
 
-// Engine drives the reconcile loop: it snapshots state, buckets replicas into
-// groups, asks the Reconciler what should change, and hands the resulting
-// intents to the Actuator to commit.
+// Engine drives the reconcile loop: it snapshots state, asks the Reconciler
+// what should change, and hands the resulting intents to the Actuator to
+// commit.
 type Engine struct {
 	store      SnapshotStore
 	reconciler reconciler
@@ -47,12 +47,7 @@ func New(store SnapshotStore, r reconciler, a actuator) *Engine {
 	return &Engine{store: store, reconciler: r, actuator: a}
 }
 
-// run drives reconcile passes until ctx is cancelled. One pass runs fully
-// before the next starts — passes never overlap. Blocking.
 func (e *Engine) run(ctx context.Context) error {
-	// Timer over Ticker: re-armed after each pass so the interval is a true
-	// idle gap — a pass slower than the interval can't stack a buffered tick
-	// and turn the loop into a busy spin.
 	timer := time.NewTimer(reconcileInterval)
 	defer timer.Stop()
 
@@ -90,55 +85,36 @@ func (e *Engine) reconcile(ctx context.Context) error {
 		return fmt.Errorf("engine: load snapshot: %w", err)
 	}
 
-	groups := buildReplicaGroups(snap)
-	intents := e.reconciler.Reconcile(groups)
+	intents := e.reconciler.Reconcile(snap)
 
 	if err := e.actuator.Apply(ctx, intents); err != nil {
 		return fmt.Errorf("engine: apply intents: %w", err)
 	}
 
-	slog.Debug("engine -> snapshot",
-		"desired", len(snap.desired), "replicas", len(snap.replicas),
-		"hosts", len(snap.hosts), "volumes", len(snap.volumes))
+	logPass(snap, intents)
 	return nil
 }
 
-func buildReplicaGroups(snap stateSnapshot) []replicaGroup {
-	type replicaBucket struct {
-		target   []replica
-		outgoing []replica
-	}
-	replicaIndex := make(map[replicaSlot]replicaBucket, len(snap.replicas))
-	for _, r := range snap.replicas {
-		b := replicaIndex[r.Slot]
-		if r.Current {
-			b.target = append(b.target, r)
-		} else {
-			b.outgoing = append(b.outgoing, r)
+// logPass is the one-line-per-tick summary. Skips are holds, not work, so a
+// pass that only holds stays at Debug — Info fires only when the pass actually
+// changed something, keeping a steady fleet's log silent.
+func logPass(snap stateSnapshot, intents []Intent) {
+	work := make(map[IntentKind]int)
+	holds := 0
+	for _, it := range intents {
+		if it.Kind == IntentSkip {
+			holds++
+			continue
 		}
-		replicaIndex[r.Slot] = b
+		work[it.Kind]++
 	}
-
-	groups := make([]replicaGroup, 0, len(snap.desired))
-	for _, d := range snap.desired {
-		b := replicaIndex[d.Slot]
-		delete(replicaIndex, d.Slot)
-		groups = append(groups, replicaGroup{
-			Desired:          d,
-			TargetReplicas:   b.target,
-			OutgoingReplicas: b.outgoing,
-		})
+	switch {
+	case len(work) > 0:
+		slog.Info("engine -> pass applied", "intents", work, "holds", holds)
+	case holds > 0:
+		slog.Debug("engine -> pass holding", "holds", holds)
 	}
-
-	// Leftover slots the current deployment no longer declares — a region
-	// dropped between versions. They still need a group, with a zero replica
-	// target, so the Reconciler drains them instead of leaking them forever.
-	for slot, b := range replicaIndex {
-		groups = append(groups, replicaGroup{
-			Desired:          desiredState{Slot: slot},
-			TargetReplicas:   b.target,
-			OutgoingReplicas: b.outgoing,
-		})
-	}
-	return groups
+	slog.Debug("engine -> snapshot",
+		"desired", len(snap.desired), "replicas", len(snap.replicas),
+		"hosts", len(snap.hosts), "volumes", len(snap.volumes))
 }

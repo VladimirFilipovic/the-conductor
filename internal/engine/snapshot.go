@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"time"
 
 	"conductor/internal/domain"
 	"conductor/internal/storage"
@@ -24,7 +25,16 @@ type desiredState struct {
 	Replicas      int32
 	CPUMillicores int32
 	MemBytes      int64
-	Stateful      bool
+	// RestartMax caps a replica's restart_count before the crash guard trips the
+	// deployment to failed; carried per group since it applies to the current deploy.
+	RestartMax int32
+	// ProgressDeadline (seconds) bounds how long the health gate may stay open
+	// before the rollout trips to failed (stalled).
+	ProgressDeadline int32
+	// Status lets the crash guard skip an already-failed deploy (the notFailed
+	// guard) so it holds instead of re-emitting deployFailed every tick.
+	Status   domain.DeploymentStatus
+	Stateful bool
 }
 
 type replica struct {
@@ -40,8 +50,21 @@ type replica struct {
 	Phase         domain.ReplicaPhase
 	Healthy       bool
 	RestartCount  int32
-	Revision      int64
-	Version       int32
+	// DrainSeconds is the replica's own deployment's graceful window; the
+	// drain-window rule reaps once DrainedAt + DrainSeconds < now. Per replica
+	// so an outgoing (superseded) replica keeps its deployment's policy.
+	DrainSeconds int32
+	// DrainedAt is when the orchestrator drained this replica; zero until then.
+	DrainedAt time.Time
+	// HealthChecksPassedAt is when this replica first passed its health probe;
+	// zero = never passed (the stalled-rollout signal for the progress-deadline
+	// gate). Stamped once by a DB trigger, so it survives a later crash.
+	HealthChecksPassedAt time.Time
+	// CreatedAt is when the replica row was minted — the start reference the
+	// progress-deadline gate measures against (observedAt − CreatedAt > deadline).
+	CreatedAt time.Time
+	Revision  int64
+	Version   int32
 	// Current mirrors the deployment's is_current: true for the revision to
 	// converge toward, false for an outgoing revision to drain.
 	Current bool
@@ -66,10 +89,11 @@ type volume struct {
 }
 
 type stateSnapshot struct {
-	desired  []desiredState
-	replicas []replica
-	hosts    []host
-	volumes  []volume
+	observedAt time.Time
+	desired    []desiredState
+	replicas   []replica
+	hosts      []host
+	volumes    []volume
 }
 
 func (e *Engine) loadSnapshot(ctx context.Context) (stateSnapshot, error) {
@@ -107,38 +131,46 @@ func newStateSnapshot(
 	volumes []db.Volume,
 ) stateSnapshot {
 	snap := stateSnapshot{
-		desired:  make([]desiredState, 0, len(desired)),
-		replicas: make([]replica, 0, len(replicas)),
-		hosts:    make([]host, 0, len(hosts)),
-		volumes:  make([]volume, 0, len(volumes)),
+		observedAt: time.Now(),
+		desired:    make([]desiredState, 0, len(desired)),
+		replicas:   make([]replica, 0, len(replicas)),
+		hosts:      make([]host, 0, len(hosts)),
+		volumes:    make([]volume, 0, len(volumes)),
 	}
 	for _, d := range desired {
 		snap.desired = append(snap.desired, desiredState{
-			Slot:          replicaSlot{d.EnvironmentServiceID, d.Region},
-			DeploymentID:  d.DeploymentID,
-			ServiceID:     d.ServiceID,
-			Replicas:      d.DesiredReplicas,
-			CPUMillicores: d.CpuMillicores,
-			MemBytes:      d.MemBytes,
-			Stateful:      d.Stateful,
+			Slot:             replicaSlot{d.EnvironmentServiceID, d.Region},
+			DeploymentID:     d.DeploymentID,
+			ServiceID:        d.ServiceID,
+			Replicas:         d.DesiredReplicas,
+			CPUMillicores:    d.CpuMillicores,
+			MemBytes:         d.MemBytes,
+			RestartMax:       d.RestartMax,
+			ProgressDeadline: d.ProgressDeadline,
+			Status:           domain.DeploymentStatus(d.Status),
+			Stateful:         d.Stateful,
 		})
 	}
 	for _, r := range replicas {
 		snap.replicas = append(snap.replicas, replica{
-			ID:            r.ID,
-			DeploymentID:  r.DeploymentID,
-			Slot:          replicaSlot{r.EnvironmentServiceID, r.Region},
-			HostID:        r.HostID.UUID,
-			VolumeID:      r.VolumeID.UUID,
-			CPUMillicores: r.CpuMillicores,
-			MemBytes:      r.MemBytes,
-			DesiredStatus: domain.ReplicaDesiredStatus(r.DesiredStatus),
-			Phase:         domain.ReplicaPhase(r.Phase),
-			Healthy:       r.Healthy,
-			RestartCount:  r.RestartCount,
-			Revision:      r.Revision,
-			Version:       r.Version,
-			Current:       r.IsCurrent,
+			ID:                   r.ID,
+			DeploymentID:         r.DeploymentID,
+			Slot:                 replicaSlot{r.EnvironmentServiceID, r.Region},
+			HostID:               r.HostID.UUID,
+			VolumeID:             r.VolumeID.UUID,
+			CPUMillicores:        r.CpuMillicores,
+			MemBytes:             r.MemBytes,
+			DesiredStatus:        domain.ReplicaDesiredStatus(r.DesiredStatus),
+			Phase:                domain.ReplicaPhase(r.Phase),
+			Healthy:              r.Healthy,
+			RestartCount:         r.RestartCount,
+			DrainSeconds:         r.DrainSeconds,
+			DrainedAt:            r.DrainedAt.Time,
+			HealthChecksPassedAt: r.HealthChecksPassedAt.Time,
+			CreatedAt:            r.CreatedAt,
+			Revision:             r.Revision,
+			Version:              r.Version,
+			Current:              r.IsCurrent,
 		})
 	}
 	for _, h := range hosts {
