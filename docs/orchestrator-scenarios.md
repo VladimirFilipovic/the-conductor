@@ -82,6 +82,22 @@ Each: **trigger → the gap → what the engine does → tables touched**. Tagge
 - **Note:** this is what proves the loop is level-triggered — delete a replica row
   and the next tick recreates it.
 
+### 6b. Manual replica restart `[next]`
+- **Trigger:** operator eksplicitno restartuje repliku koja je u `phase='failed'`
+  (udarila `restart_max`) ili bilo kojoj drugoj fazi.
+- **API:** `POST /replicas/{id}/restart` — resetuje `restart_count=0`, `phase='pending'`,
+  `last_exit_reason=NULL`; inkrementuje `revision` (CAS guard).
+- **Engine:** naredni tick vidi repliku u `pending` → tretira je kao novu, prolazi
+  kroz normalan `pending → scheduling → starting → health_check → healthy → active`.
+- **Zašto je korisno:** `failed` je zamrznuto stanje — bez ovoga operator mora da
+  pušta novi deploy ili rollback samo da bi probao ponovo. Ručni restart je lakši
+  za tranzijentne greške (OOM spike, flappy healthcheck, privremeni external dep).
+- **Ograničenje:** ne menja deployment row, ne menja `is_current` — samo resetuje
+  lifecycle te jedne replike. Ako je ceo deploy `failed` (rollout zamrznut), ručni
+  restart pojedinačnih replika ne otključava rollout automatski — to zahteva
+  posebnu logiku u orkestratoru (kad sve failed replike novog deploya budu resetovane
+  i postanu healthy → deployment status → `active`).
+
 ### 7. Host failure / unreachable → reschedule `[next]`
 - **Trigger:** `hosts.last_heartbeat` goes stale → mark `status='notready'`.
 - **Engine:** its replicas are presumed dead → reschedule them onto other hosts
