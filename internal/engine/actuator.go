@@ -22,6 +22,14 @@ func NewActuator(store ActuatorStore) *Actuator {
 }
 
 // TODO: commit each intent via store.WithReconcileTx.
+//
+// Blue/green traffic switch: when applying a drain batch that retires a slot's
+// outgoing side (the first IntentDrain set after the target set went fully
+// healthy — docs #4 "shift traffic → drain"), the same tx must also call
+// ReconcileTx.SetServedRevision(slot, newDeploymentID). One commit = pointer
+// flip + old side draining, so the router never observes neither or both
+// revisions serving. Scale-down drains of the served revision itself must NOT
+// touch the pointer.
 func (a *Actuator) Apply(ctx context.Context, intents []Intent) error {
 	return nil
 }
