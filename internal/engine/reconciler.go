@@ -184,9 +184,10 @@ var rollingCascade = []rule{
 	// rolling-specific: ramp/shrink to count, then retire outgoing
 	rollingRampUp,    // below desired → create (canary first, then batch)
 	rollingScaleDown, // above desired → drain excess target
-	rolloutComplete,  // at desired & all outgoing reaped → status active
-	drainOutgoing,    // outgoing still active → drain
-	reapDrained,      // outgoing drain window elapsed → destroy
+	rolloutComplete,   // at desired & all outgoing reaped → status active
+	drainOutgoing,     // outgoing still active → drain
+	reapDrained,       // outgoing drain window elapsed → destroy
+	reapFailedOutgoing, // outgoing crashed terminally → destroy, free the host
 }
 
 // recreate: stateful. Same gates, but retire-before-create — single-writer
@@ -199,7 +200,8 @@ var recreateCascade = []rule{
 	notAllHealthy,
 	drainOutgoing, // any outgoing != reaped is retired first
 	reapDrained,
-	recreateRampUp,    // outgoing empty & below → batch create
+	reapFailedOutgoing, // dead outgoing must clear before the lease is considered free
+	recreateRampUp,     // outgoing empty & below → batch create
 	recreateScaleDown, // above → drain excess target + release lease
 	recreateComplete,  // outgoing empty & at → status active
 }
@@ -207,13 +209,16 @@ var recreateCascade = []rule{
 // orphan groups have a zero desiredState (no deployment row), so deployment
 // rules like crashLooping must never see them — RestartMax=0 would trip on any
 // restart. Their only job is draining leftovers.
-var orphanCascade = []rule{drainOutgoing, reapDrained}
+var orphanCascade = []rule{drainOutgoing, reapDrained, reapFailedOutgoing}
 
 // deploymentFrozen: failed is terminal for the reconciler — hold the whole
 // group (no re-fail, no re-placement, no un-freeze via rolloutComplete) until
 // a rollback/redeploy re-points the deployment. Sitting at the top of the
 // cascade, it carries the "not failed" precondition for every rule below, so
-// none of them checks the status itself. Emits an explicit skip, same as
+// none of them checks the status itself. One exception to the hold: failed
+// target replicas are destroyed — a dead container only squats on its host
+// reservation, and frozen means no rule below can ever recreate what this
+// reaps. With nothing to sweep it emits an explicit skip, same as
 // notAllHealthy, so the held state stays legible downstream.
 var deploymentFrozen = rule{
 	name: "deploymentFrozen",
@@ -221,7 +226,16 @@ var deploymentFrozen = rule{
 		return rg.Desired.Status == domain.DeploymentFailed
 	},
 	then: func(rg replicaGroup) []Intent {
-		return []Intent{{Kind: IntentSkip, Group: rg.Desired.Slot}}
+		var intents []Intent
+		for _, r := range rg.TargetReplicas {
+			if failedPhase(r) {
+				intents = append(intents, Intent{Kind: IntentDestroy, ReplicaID: r.ID})
+			}
+		}
+		if len(intents) == 0 {
+			return []Intent{{Kind: IntentSkip, Group: rg.Desired.Slot}}
+		}
+		return intents
 	},
 }
 
@@ -418,6 +432,32 @@ var reapDrained = rule{
 		return intents
 	},
 }
+
+// reapFailedOutgoing: a failed outgoing replica is a dead container from a
+// superseded revision — it serves nothing, drains nothing, yet still holds its
+// host reservation and blocks the len(outgoing)==0 convergence checks
+// (rolloutComplete, recreate's lease-free gate). Destroy it directly: no drain
+// window, there is no traffic to bleed off a crashed container. Failed TARGET
+// replicas are not this rule's job — deploymentFrozen sweeps those, since a
+// failed target implies a failed (frozen) deployment and the cascade never
+// gets past its first rule.
+var reapFailedOutgoing = rule{
+	name: "reapFailedOutgoing",
+	when: func(rg replicaGroup) bool {
+		return slices.ContainsFunc(rg.OutgoingReplicas, failedPhase)
+	},
+	then: func(rg replicaGroup) []Intent {
+		var intents []Intent
+		for _, or := range rg.OutgoingReplicas {
+			if failedPhase(or) {
+				intents = append(intents, Intent{Kind: IntentDestroy, ReplicaID: or.ID})
+			}
+		}
+		return intents
+	},
+}
+
+func failedPhase(rp replica) bool { return rp.Phase == domain.ReplicaPhaseFailed }
 
 func drainWindowElapsed(rp replica, now time.Time) bool {
 	if rp.DrainedAt.IsZero() {
