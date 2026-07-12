@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"conductor/build"
+	"conductor/builder"
 	"conductor/internal/deployspec"
 	"conductor/internal/link"
 	"conductor/internal/project"
@@ -27,10 +27,10 @@ Flags:
   -f, --file PATH   build/deploy spec to read (default "config.toml")`
 
 // upBuilder is the source-to-image backend `up` uses for repo services. It
-// defaults to build.NoOp (a synthesized local ref, no real build); an embedder
+// defaults to builder.NoOp (a synthesized local ref, no real build); an embedder
 // wiring conductor into their own binary overrides it with a Builder that shells
 // out to nixpacks, a Dockerfile build, or their own pipeline.
-var upBuilder build.Builder = build.NoOp{}
+var upBuilder builder.Builder = builder.NoOp{}
 
 func cmdUp(args []string) error {
 	fs := newFlagSet("up", upUsage)
@@ -79,26 +79,26 @@ func cmdUp(args []string) error {
 	if err != nil {
 		return err
 	}
-	req := build.Request{
+	req := builder.Request{
 		Project:      t.Project,
 		Environment:  t.Environment,
 		Service:      t.Service,
 		Repo:         src.Source.Repo,
 		Root:         buildCfg.Root,
-		Strategy:     build.Strategy(buildCfg.Builder),
+		Strategy:     builder.Strategy(buildCfg.Builder),
 		Dockerfile:   buildCfg.Dockerfile,
 		BuildCommand: buildCfg.BuildCommand,
 	}
 	// A service with neither a recorded image nor repo builds from the linked
 	// working tree (the dir holding .conductor, else cwd) — the "source lives
 	// where you run up" contract (see project.Source). cwd is the build context
-	// only the CLI knows, so it is resolved here, not in build.Resolve.
+	// only the CLI knows, so it is resolved here, not in builder.Resolve.
 	if src.Source.Image == "" && req.Repo == "" {
 		if req.Repo, err = workingTree(); err != nil {
 			return err
 		}
 	}
-	image, err := build.Resolve(ctx, upBuilder, req, src.Source.Image)
+	image, err := builder.Resolve(ctx, upBuilder, req, src.Source.Image)
 	if err != nil {
 		return err
 	}

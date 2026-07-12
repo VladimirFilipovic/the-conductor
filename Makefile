@@ -4,7 +4,7 @@ PREFIX    ?= /usr/local
 VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS   := -X conductor/cmd.version=$(VERSION)
 
-.PHONY: build run install uninstall fmt vet lint test tidy clean migrate migrate-down migrate-status migrate-fresh sqlc db-up db-down seed
+.PHONY: build run install uninstall fmt vet lint test tidy clean migrate migrate-down migrate-status migrate-fresh sqlc db-up db-down seed stack-up stack-down stack-logs ui-dev
 
 GOLANGCI_LINT_VERSION ?= v2.11.4
 
@@ -94,3 +94,21 @@ tidy:
 
 clean:
 	rm -rf $(BUILD_DIR)
+
+# --- chaos-ui full stack (postgres + engine + chaos-ui) --------------------
+# The engine container migrates and seeds on startup (see docker/engine-
+# entrypoint.sh), so `stack-up` needs no separate `migrate`/`seed` step.
+
+stack-up:
+	docker compose --profile stack up --build -d
+
+stack-down:
+	docker compose --profile stack down
+
+stack-logs:
+	docker compose --profile stack logs -f engine chaos-ui
+
+# Run the Next.js dev server locally against the docker-compose Postgres. Reads
+# chaos-ui/.env.local if present; defaults target localhost:5432.
+ui-dev:
+	cd chaos-ui && npm install && npm run dev

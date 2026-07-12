@@ -1,0 +1,144 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0b0d0e;
+  --color-panel: #121517;
+  --color-panel-2: #16191b;
+  --color-border: #232829;
+  --color-border-soft: #1c2022;
+  --color-fg: #e7e9ea;
+  --color-muted: #8b9196;
+  --color-faint: #5c6367;
+  --color-accent: #853bce;
+  --color-accent-fg: #c39bec;
+
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  background-color: var(--color-bg);
+  color: var(--color-fg);
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Faint dotted backdrop, à la Railway's canvas. */
+body {
+  background-image: radial-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 0);
+  background-size: 22px 22px;
+}
+
+::selection {
+  background: rgba(133, 59, 206, 0.35);
+}
+
+/* Slim, dim scrollbars so dense panels stay calm. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2a2f31 transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #2a2f31;
+  border-radius: 8px;
+}
+
+@layer components {
+  .panel {
+    background-color: var(--color-panel);
+    border: 1px solid var(--color-border);
+    border-radius: 14px;
+  }
+  .panel-soft {
+    background-color: var(--color-panel-2);
+    border: 1px solid var(--color-border-soft);
+    border-radius: 10px;
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.08rem 0.5rem;
+    border-radius: 9999px;
+    border-width: 1px;
+    font-size: 0.7rem;
+    font-weight: 500;
+    line-height: 1.4;
+    white-space: nowrap;
+  }
+  .mono {
+    font-family: var(--font-mono);
+  }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    padding: 0.45rem 0.85rem;
+    border-radius: 9px;
+    border: 1px solid var(--color-border);
+    background-color: var(--color-panel-2);
+    color: var(--color-fg);
+    font-size: 0.82rem;
+    font-weight: 500;
+    transition: all 0.12s ease;
+    cursor: pointer;
+  }
+  .btn:hover {
+    border-color: #333a3c;
+    background-color: #1b1f21;
+  }
+  .btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .btn-accent {
+    background: linear-gradient(180deg, #9a4de0, #7a34bd);
+    border-color: #6d2ba8;
+    color: white;
+  }
+  .btn-accent:hover {
+    background: linear-gradient(180deg, #a760e6, #843dc7);
+    border-color: #7a34bd;
+  }
+  .btn-danger {
+    background-color: rgba(220, 38, 38, 0.12);
+    border-color: rgba(220, 38, 38, 0.35);
+    color: #f7a8a8;
+  }
+  .btn-danger:hover {
+    background-color: rgba(220, 38, 38, 0.2);
+    border-color: rgba(220, 38, 38, 0.5);
+  }
+  .input {
+    width: 100%;
+    padding: 0.45rem 0.65rem;
+    border-radius: 9px;
+    border: 1px solid var(--color-border);
+    background-color: #0e1112;
+    color: var(--color-fg);
+    font-size: 0.85rem;
+    outline: none;
+  }
+  .input:focus {
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 3px rgba(133, 59, 206, 0.18);
+  }
+  .label {
+    display: block;
+    font-size: 0.72rem;
+    font-weight: 500;
+    color: var(--color-muted);
+    margin-bottom: 0.3rem;
+    letter-spacing: 0.02em;
+  }
+}

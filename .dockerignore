@@ -1,0 +1,8 @@
+# Context for Dockerfile.engine (Go build only) — the UI has its own context
+# under chaos-ui/, and node_modules/.next would otherwise dominate this one.
+chaos-ui
+.git
+build
+docs
+.lavish
+*.md

@@ -16,5 +16,45 @@ services:
       timeout: 5s
       retries: 5
 
+  engine:
+    # Profiled so the plain `docker compose up` (make db-up / migrate-fresh) still
+    # starts only Postgres; the full stack comes up via `make stack-up`.
+    profiles: ["stack"]
+    build:
+      context: .
+      dockerfile: Dockerfile.engine
+    container_name: conductor-engine
+    environment:
+      CONDUCTOR_DATABASE_URL: postgres://conductor:conductor@postgres:5432/conductor?sslmode=disable
+      CONDUCTOR_LOG_FILE: /var/log/conductor/engine.log
+      LOG_LEVEL: DEBUG
+    volumes:
+      - conductor-logs:/var/log/conductor
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  chaos-ui:
+    profiles: ["stack"]
+    build:
+      context: ./chaos-ui
+      dockerfile: Dockerfile
+    container_name: conductor-chaos-ui
+    environment:
+      DATABASE_URL: postgres://conductor:conductor@postgres:5432/conductor
+      LOG_FILE: /var/log/conductor/engine.log
+    ports:
+      # Override when 3000 is taken locally: CHAOS_UI_PORT=3001 make stack-up
+      - "${CHAOS_UI_PORT:-3000}:3000"
+    volumes:
+      # Read-only: the UI only tails the engine's log, never writes it.
+      - conductor-logs:/var/log/conductor:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   conductor-pgdata:
+  conductor-logs:
