@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1
+# Builds the conductor engine and bundles goose so the container can migrate the
+# control plane before the reconcile loop starts.
+
+FROM golang:1.25-alpine AS builder
+WORKDIR /src
+
+RUN apk add --no-cache git
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/conductor .
+RUN CGO_ENABLED=0 go install github.com/pressly/goose/v3/cmd/goose@v3.24.1
+
+FROM alpine:3.20
+WORKDIR /app
+
+# psql applies the host seed (goose only owns schema migrations, not fixtures).
+RUN apk add --no-cache postgresql16-client ca-certificates
+
+COPY --from=builder /out/conductor /usr/local/bin/conductor
+COPY --from=builder /go/bin/goose /usr/local/bin/goose
+COPY db/migrations ./db/migrations
+COPY db/seeds ./db/seeds
+COPY docker/engine-entrypoint.sh /usr/local/bin/engine-entrypoint.sh
+RUN chmod +x /usr/local/bin/engine-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/engine-entrypoint.sh"]
