@@ -182,11 +182,11 @@ var rollingCascade = []rule{
 	newHealthOpenPastDeadline, // health gate open too long → fail (stalled)
 	notAllHealthy,             // newest not yet healthy, within deadline → hold
 	// rolling-specific: ramp/shrink to count, then retire outgoing
-	rollingRampUp,    // below desired → create (canary first, then batch)
-	rollingScaleDown, // above desired → drain excess target
-	rolloutComplete,   // at desired & all outgoing reaped → status active
-	drainOutgoing,     // outgoing still active → drain
-	reapDrained,       // outgoing drain window elapsed → destroy
+	rollingRampUp,      // below desired → create (canary first, then batch)
+	rollingScaleDown,   // above desired → drain excess target
+	rolloutComplete,    // at desired & all outgoing reaped → status active
+	drainOutgoing,      // outgoing still active → drain
+	reapDrained,        // outgoing drain window elapsed → destroy
 	reapFailedOutgoing, // outgoing crashed terminally → destroy, free the host
 }
 
@@ -202,8 +202,8 @@ var recreateCascade = []rule{
 	reapDrained,
 	reapFailedOutgoing, // dead outgoing must clear before the lease is considered free
 	recreateRampUp,     // outgoing empty & below → batch create
-	recreateScaleDown, // above → drain excess target + release lease
-	recreateComplete,  // outgoing empty & at → status active
+	recreateScaleDown,  // above → drain excess target (actuator frees the lease on reap)
+	recreateComplete,   // outgoing empty & at → status active
 }
 
 // orphan groups have a zero desiredState (no deployment row), so deployment
@@ -467,24 +467,33 @@ func drainWindowElapsed(rp replica, now time.Time) bool {
 }
 
 // recreateRampUp: all outgoing reaped (volume lease free) and below desired →
-// batch create the whole deficit. No surge: single-writer lease forbids overlap.
+// batch create the whole deficit. No canary unlike rollingRampUp: retire-before-
+// create already serialized the rollout, so there is nothing left to de-risk and
+// every tick of downtime costs availability — the whole deficit comes up at once.
 var recreateRampUp = rule{
 	name: "recreateRampUp",
-	when: func(rg replicaGroup) bool { return false },   // TODO
-	then: func(rg replicaGroup) []Intent { return nil }, // TODO
+	when: func(rg replicaGroup) bool {
+		return len(rg.OutgoingReplicas) == 0 && healthyTargets(rg) < rg.Desired.Replicas
+	},
+	then: func(rg replicaGroup) []Intent {
+		n := rg.Desired.Replicas - healthyTargets(rg)
+		intents := make([]Intent, n)
+		for i := range intents {
+			intents[i] = Intent{Kind: IntentCreate, Group: rg.Desired.Slot}
+		}
+		return intents
+	},
 }
 
-// recreateScaleDown: more target replicas than desired → drain the excess and
-// release its volume_lease so the freed volume can be re-leased.
-var recreateScaleDown = rule{
-	name: "recreateScaleDown",
-	when: func(rg replicaGroup) bool { return false },   // TODO
-	then: func(rg replicaGroup) []Intent { return nil }, // TODO
-}
+// recreateScaleDown reuses rollingScaleDown's when/then: draining the newest
+// excess is version-agnostic, and even for a stateful slot the volume lease is
+// released by the actuator when the drained replica reaps — the reconciler only
+// emits the drain, so there is nothing recreate-specific to add. Distinct name
+// so the reconcile log attributes the tick to the recreate cascade.
+var recreateScaleDown = rule{name: "recreateScaleDown", when: rollingScaleDown.when, then: rollingScaleDown.then}
 
-// recreateComplete: outgoing empty and count at desired → mark active.
-var recreateComplete = rule{
-	name: "recreateComplete",
-	when: func(rg replicaGroup) bool { return false },   // TODO
-	then: func(rg replicaGroup) []Intent { return nil }, // TODO
-}
+// recreateComplete reuses rolloutComplete's when/then: convergence reads the
+// same for both strategies (count at desired, every outgoing reaped so the lease
+// is free, and not already active). Distinct name so the reconcile log
+// attributes the tick to the recreate cascade.
+var recreateComplete = rule{name: "recreateComplete", when: rolloutComplete.when, then: rolloutComplete.then}
