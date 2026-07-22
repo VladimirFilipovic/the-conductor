@@ -2,10 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 
-// usePoll fetches `url` immediately then every `intervalMs`, exposing the latest
-// parsed JSON plus a first-load flag. It skips overlapping requests and ignores
-// responses that arrive after the url changed, so a fast selector switch never
-// paints stale data.
+// Skips overlapping requests and drops responses arriving after the url
+// changed, so a fast selector switch never paints stale data.
 export function usePoll<T>(url: string, intervalMs: number) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);

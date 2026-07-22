@@ -30,8 +30,7 @@ func newTestClient(t *testing.T) *PostgresClient {
 }
 
 // TestProjectTreeRoundTrip walks the projects → environments → services →
-// environment_services tree the domain creates, asserting each row links to its
-// parent.
+// environment_services tree, asserting each row links to its parent.
 func TestProjectTreeRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	c := newTestClient(t)

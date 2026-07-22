@@ -30,9 +30,8 @@ func Render(id target.Target) (string, error) {
 		b.WriteString("  link file:   - (run `conductor link` to create one)\n")
 	}
 
-	// The spec lives at config.toml in the current directory — the same place
-	// `up` reads it (no walk-up), so `config` previews exactly what `up` would act
-	// on from here.
+	// Same path `up` reads (current directory, no walk-up), so `config`
+	// previews exactly what `up` would act on from here.
 	path := deployspec.FileName
 	b.WriteString("\nSpec\n")
 	if _, err := os.Stat(path); err != nil {
@@ -44,8 +43,7 @@ func Render(id target.Target) (string, error) {
 		return "", err
 	}
 	fmt.Fprintf(&b, "  file: %s\n", path)
-	// Show the spec as it resolves for the active environment, so the reader sees
-	// exactly what `up` would commit (base merged with [environments.E] overrides).
+	// Resolve for the active environment so the reader sees what `up` would commit.
 	bld, dep := spec.Resolve(id.Environment)
 	writeBuild(&b, bld)
 	writeDeploy(&b, dep)

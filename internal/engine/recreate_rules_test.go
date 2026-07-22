@@ -16,11 +16,10 @@ import (
 
 // --- recreate cascade (stateful) ---
 //
-// The single-writer volume lease forbids surge, so recreateRampUp may only
-// create once the outgoing side is empty — every outgoing replica, failed ones
-// included, blocks the gate. Progress is guaranteed by reapFailedOutgoing
-// destroying dead outgoing (drainOutgoing skips terminal and reapDrained needs
-// DrainedAt, so without it a failed outgoing would deadlock the group).
+// The single-writer volume lease forbids surge: recreateRampUp may only create
+// once the outgoing side is empty — failed outgoing included. reapFailedOutgoing
+// guarantees progress (drainOutgoing skips terminal, reapDrained needs
+// DrainedAt; without it a failed outgoing would deadlock the group).
 
 func TestRecreateRampUpRule(t *testing.T) {
 	healthy := replica{ID: uuid.New(), Healthy: true}
@@ -215,8 +214,7 @@ func TestRecreateScaleDownDrainsNewestFirst(t *testing.T) {
 	}
 }
 
-// Excess of two out of three drains the two newest, newest-first, regardless of
-// input order — the oldest replica keeps its volume binding and history.
+// Excess of two drains the two newest, newest-first, regardless of input order.
 func TestRecreateScaleDownDrainsTwoNewest(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	oldest := replica{ID: uuid.New(), Healthy: true, CreatedAt: now.Add(-3 * time.Hour)}

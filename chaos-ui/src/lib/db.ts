@@ -1,8 +1,7 @@
 import { Pool, type PoolClient } from "pg";
 
-// Next dev recompiles modules on every edit; without stashing the pool on the
-// global it would leak a new Pool (and its sockets) per reload until Postgres
-// refuses connections.
+// Stash the pool on the global: Next dev recompiles modules per edit, leaking
+// a new Pool (and its sockets) per reload until Postgres refuses connections.
 const globalForPg = globalThis as unknown as { conductorPool?: Pool };
 
 const DEFAULT_DSN = "postgres://conductor:conductor@localhost:5432/conductor";
@@ -354,10 +353,8 @@ export interface DeployInput {
   regions: { region: string; replicas: number }[];
 }
 
-// createDeployment mirrors project.Service.Deploy / the `up` path: bump version,
-// supersede the prior current commit, insert the new one as current+pending, and
-// write its per-region replica targets — all in one tx so the one-current
-// partial unique index never trips mid-flight.
+// Mirrors project.Service.Deploy / the `up` path — all in one tx so the
+// one-current partial unique index never trips mid-flight.
 export async function createDeployment(in_: DeployInput) {
   return withTx(async (c) => {
     const { rows: vrows } = await c.query(
@@ -405,8 +402,7 @@ export async function createDeployment(in_: DeployInput) {
   });
 }
 
-// scaleDeployment upserts replica targets on the current deployment, matching
-// the CLI `scale` semantics (deployment_regions patch, engine converges).
+// Matches CLI `scale` semantics: patch deployment_regions, engine converges.
 export async function scaleDeployment(
   deploymentId: string,
   regions: { region: string; replicas: number }[],

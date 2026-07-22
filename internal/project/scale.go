@@ -40,10 +40,9 @@ type ScaleInput struct {
 	Replicas map[string]int32
 }
 
-// Scale upserts the desired replica count for each named region on the service's
-// active deployment, in one transaction so a multi-region patch is
-// all-or-nothing. The service must have been deployed (`up`); an undeployed
-// service surfaces as storage.ErrNotFound.
+// Scale upserts desired replica counts per region on the active deployment, in
+// one tx so a multi-region patch is all-or-nothing. An undeployed service
+// surfaces as storage.ErrNotFound (run `up` first).
 func (s *Service) Scale(ctx context.Context, in ScaleInput) error {
 	return s.store.WithTx(ctx, func(st storage.Store) error {
 		svc, err := st.GetService(ctx, in.Project, in.Service)
@@ -72,9 +71,8 @@ func (s *Service) Scale(ctx context.Context, in ScaleInput) error {
 	})
 }
 
-// Down scales every region of the service's current deployment to zero, stopping
-// compute while leaving the deployment (and its volumes) intact. Like Scale it
-// needs an active deployment.
+// Down zeroes every region of the current deployment — stops compute, leaves
+// the deployment (and its volumes) intact. Like Scale it needs an active deployment.
 func (s *Service) Down(ctx context.Context, t target.Target) error {
 	return s.store.WithTx(ctx, func(st storage.Store) error {
 		depID, err := st.CurrentDeploymentID(ctx, t.Project, t.Environment, t.Service)

@@ -28,9 +28,8 @@ func cmdService(args []string) error {
 	if err := fs.parse(args); err != nil {
 		return err
 	}
-	// At most one positional (the service name). stdlib flag stops at the first
-	// positional, so a flag typed after the name (`service web -e prod`) lands here
-	// as an extra arg — reject it loudly instead of silently dropping the flag.
+	// stdlib flag stops at the first positional, so a flag typed after the name
+	// lands here as an extra arg — reject loudly instead of silently dropping it.
 	if fs.NArg() > 1 {
 		return usageErr(serviceUsage, "unexpected argument "+fs.Arg(1)+" (flags must come before the service name)")
 	}
@@ -73,8 +72,8 @@ func listServicesCmd(ctx context.Context, proj *project.Service, t Target) error
 }
 
 func selectServiceCmd(ctx context.Context, proj *project.Service, t Target, name string) error {
-	// Validate before writing the pointer so a typo fails here rather than on the
-	// next command that resolves the link. Reuse t for project/environment.
+	// Validate before writing the pointer so a typo fails here, not on the next
+	// command that resolves the link.
 	t.Service = name
 	if err := proj.Verify(ctx, t.Target); err != nil {
 		return err
@@ -82,9 +81,8 @@ func selectServiceCmd(ctx context.Context, proj *project.Service, t Target, name
 
 	dir, err := link.SetService(name)
 	if errors.Is(err, link.ErrNotFound) {
-		// No link yet: create one from the resolved project/environment (flags or
-		// CONDUCTOR_PROJECT/CONDUCTOR_ENVIRONMENT), so `service NAME` bootstraps a
-		// link instead of demanding a separate `link` first.
+		// No link yet: bootstrap one from the resolved project/environment so
+		// `service NAME` doesn't demand a separate `link` first.
 		dir, err = os.Getwd()
 		if err != nil {
 			return err

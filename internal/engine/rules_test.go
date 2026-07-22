@@ -212,7 +212,6 @@ func TestAnyHostlessReplicasEmitsAssignHost(t *testing.T) {
 
 func TestNewHealthOpenPastDeadlineRule(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
-	// deadline 60s; born just past it vs comfortably within it.
 	born := func(ago time.Duration) time.Time { return now.Add(-ago) }
 
 	tests := []struct {

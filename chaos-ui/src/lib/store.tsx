@@ -161,7 +161,6 @@ export function useStore(): Store {
   return ctx;
 }
 
-// Build the topology query string from the active global selection.
 export function selectionQuery(s: Store): string {
   const p = new URLSearchParams();
   if (s.project !== "all") p.set("project", s.project);

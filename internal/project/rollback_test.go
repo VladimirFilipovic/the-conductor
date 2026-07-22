@@ -20,11 +20,11 @@ func TestParseVersion(t *testing.T) {
 		want    int32
 		wantErr bool
 	}{
-		{"", 0, false},      // empty ⇒ "previous version"
-		{"v2", 2, false},    // v-prefixed
-		{"3", 3, false},     // bare
-		{"  v4 ", 4, false}, // trimmed
-		{"v0", 0, true},     // non-positive
+		{"", 0, false}, // empty ⇒ "previous version"
+		{"v2", 2, false},
+		{"3", 3, false},
+		{"  v4 ", 4, false},
+		{"v0", 0, true}, // non-positive
 		{"-1", 0, true},
 		{"banana", 0, true},
 		{"v", 0, true},
@@ -47,10 +47,8 @@ func TestParseVersion(t *testing.T) {
 }
 
 // fakeStore implements storage.TxStore with only the methods Rollback touches;
-// every other Store method comes from the embedded nil interface and would panic
-// if called — which is exactly what we want a unit test to assert (Rollback
-// must not reach for anything else). WithTx runs the callback against the fake
-// itself, so the whole rollback runs in-memory.
+// anything else panics via the embedded nil Store, asserting Rollback reaches for
+// nothing more. WithTx runs the callback on the fake, so rollback is in-memory.
 type fakeStore struct {
 	storage.Store
 

@@ -7,9 +7,8 @@ import (
 	"conductor/internal/storage/db"
 )
 
-// ListEnvironments returns the project's environments, ordered by name. The
-// project is verified first so an unknown one surfaces as storage.ErrNotFound
-// rather than an empty list.
+// ListEnvironments returns the project's environments, ordered by name; the
+// project is verified first so an unknown one errs instead of an empty list.
 func (s *Service) ListEnvironments(ctx context.Context, projectName string) ([]db.Environment, error) {
 	if _, err := s.store.GetProject(ctx, projectName); err != nil {
 		return nil, err
@@ -25,10 +24,9 @@ type CreateEnvironmentResult struct {
 	ServicesCloned int64
 }
 
-// CreateEnvironment creates a new environment in the project and, when sourceEnv
-// is set, clones that environment's service bindings (and their per-environment
-// source) into the new one — all in one transaction so a half-populated
-// environment is never visible. A blank sourceEnv creates an empty environment.
+// CreateEnvironment creates the environment and, when sourceEnv is set, clones
+// its service bindings in one tx so a half-populated environment is never
+// visible. A blank sourceEnv creates an empty environment.
 func (s *Service) CreateEnvironment(ctx context.Context, projectName, sourceEnv, name string) (CreateEnvironmentResult, error) {
 	res := CreateEnvironmentResult{SourceEnv: sourceEnv}
 	err := s.store.WithTx(ctx, func(st storage.Store) error {

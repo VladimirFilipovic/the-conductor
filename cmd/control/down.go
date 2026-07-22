@@ -53,9 +53,8 @@ func cmdDown(args []string) error {
 	return nil
 }
 
-// confirm prints prompt and returns true only when the user answers y/yes. A
-// closed or empty stdin reads as "no", so a non-interactive `down` without --yes
-// safely aborts rather than tearing compute down unattended.
+// confirm returns true only on y/yes. A closed or empty stdin reads as "no", so
+// a non-interactive `down` without --yes aborts instead of tearing compute down.
 func confirm(prompt string) bool {
 	fmt.Print(prompt)
 	s := bufio.NewScanner(os.Stdin)

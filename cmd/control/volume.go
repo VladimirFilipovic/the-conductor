@@ -24,8 +24,7 @@ Subcommands:
   update --size GiB   Resize the volume at --mount PATH (live).
   rm --mount PATH     Detach and delete the volume at the mount path.`
 
-// gib is one gibibyte (2^30 bytes); volume sizes are entered in GiB on the CLI
-// and stored as bytes in the control plane.
+// Sizes are entered in GiB on the CLI, stored as bytes in the control plane.
 const gib = 1 << 30
 
 func cmdVolume(args []string) error {
@@ -43,9 +42,8 @@ func cmdVolume(args []string) error {
 		return err
 	}
 	resolve(&t, true)
-	// Volumes key off the service (volumes.service_id), and a service is a single
-	// project-scoped row shared across environments — so the environment pointer
-	// is irrelevant here; only project + service are required.
+	// Volumes key off the service, a single project-scoped row shared across
+	// environments — the environment pointer is irrelevant here.
 	if err := t.require(false, true); err != nil {
 		return usageErr(volumeUsage, err.Error())
 	}
@@ -127,8 +125,7 @@ func renderVolumes(w *os.File, vols []db.Volume) {
 	_ = tw.Flush()
 }
 
-// formatBytes renders a byte count in whole GiB (the unit the CLI accepts),
-// e.g. 1073741824 → "1GiB".
+// formatBytes renders whole GiB, the unit the CLI accepts.
 func formatBytes(b int64) string {
 	return fmt.Sprintf("%dGiB", b/gib)
 }

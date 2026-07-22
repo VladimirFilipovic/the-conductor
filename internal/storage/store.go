@@ -61,5 +61,4 @@ type TxStore interface {
 	WithTx(ctx context.Context, fn func(Store) error) error
 }
 
-// Compile-time proof that the concrete client satisfies the contract it now owns.
 var _ TxStore = (*PostgresClient)(nil)

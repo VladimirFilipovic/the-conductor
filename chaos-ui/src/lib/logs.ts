@@ -8,9 +8,8 @@ export interface LogLine {
   attrs: { key: string; value: string }[];
 }
 
-// slog TextHandler emits space-separated key=value with double-quoted values
-// that contain spaces/specials. This tokenizer respects those quotes so a
-// msg="reconcile pass done" is one token, not three.
+// slog TextHandler double-quotes values containing spaces/specials; respect
+// quotes so msg="reconcile pass done" is one token, not three.
 function tokenize(line: string): string[] {
   const tokens: string[] = [];
   let cur = "";
@@ -72,9 +71,8 @@ export interface TailResult {
   lines: LogLine[];
 }
 
-// tail reads either the whole file's last `maxLines` (since == null) or only the
-// bytes appended past `since`, returning the new end offset so the client can
-// poll incrementally without re-sending the whole file each tick.
+// Returns the new end offset so the client can poll incrementally (pass it back
+// as `since`) instead of re-reading the whole file each tick.
 export async function tail(
   path: string,
   maxLines: number,
@@ -90,9 +88,8 @@ export async function tail(
   const size = stat.size;
   // A truncated/rotated file (size shrank) resets the client to a fresh tail.
   const fresh = since == null || since > size;
-  // A fresh tail reads only a trailing window, not the whole file: a
-  // long-running DEBUG engine log grows unbounded and slurping it just to keep
-  // the last N lines would balloon per-request memory.
+  // Fresh tail reads only a trailing window: a long-running DEBUG engine log
+  // grows unbounded and slurping it whole would balloon per-request memory.
   const FRESH_TAIL_WINDOW = 1 << 20;
   const start = fresh ? Math.max(0, size - FRESH_TAIL_WINDOW) : (since as number);
 

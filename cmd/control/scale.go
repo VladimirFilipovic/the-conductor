@@ -18,10 +18,9 @@ the new counts onto the fleet. Requires project, environment, and service, and
 the service must already be deployed (run 'conductor up' first).`
 
 func cmdScale(args []string) error {
-	// region=count pairs are variadic positionals, but stdlib flag stops parsing
-	// at the first positional — so `scale us-east-1=3 -s web` would drop -s. Pull
-	// the pairs out first (a bare token containing '='; flag values here are
-	// names, never '='-bearing) so flags and pairs work in any order.
+	// stdlib flag stops parsing at the first positional, so `scale us-east-1=3
+	// -s web` would drop -s — pull the region=count pairs out first so flags
+	// and pairs work in any order.
 	pairs, flagArgs := partitionRegionCounts(args)
 
 	fs := newFlagSet("scale", scaleUsage)
@@ -61,10 +60,9 @@ func cmdScale(args []string) error {
 	return nil
 }
 
-// partitionRegionCounts splits argv into region=count pairs and everything else
-// (flags and their values). A token is a pair when it does not start with '-'
-// and contains '='; flag values in this command are project/env/service names,
-// which never contain '=', so they stay with the flags.
+// partitionRegionCounts splits argv into region=count pairs (bare '='-bearing
+// tokens) and flag args. Safe because flag values in this command are
+// project/env/service names, which never contain '='.
 func partitionRegionCounts(args []string) (pairs, flagArgs []string) {
 	for _, a := range args {
 		if !strings.HasPrefix(a, "-") && strings.Contains(a, "=") {
@@ -76,8 +74,7 @@ func partitionRegionCounts(args []string) (pairs, flagArgs []string) {
 	return pairs, flagArgs
 }
 
-// formatRegionCounts renders the patched counts in a stable (sorted) order so
-// the echoed line is deterministic regardless of map iteration order.
+// formatRegionCounts sorts so the echoed line is deterministic despite map order.
 func formatRegionCounts(replicas map[string]int32) string {
 	regions := make([]string, 0, len(replicas))
 	for r := range replicas {

@@ -11,11 +11,9 @@ import (
 	"conductor/internal/target"
 )
 
-// Store is the read side this package needs: resolve the project (and any
-// narrowing environment/service), then read its observed-vs-desired rows. The
-// existence checks run first so an unknown project/environment/service surfaces
-// as storage.ErrNotFound rather than an empty table that misreads as "exists but
-// nothing deployed".
+// Store is the read side this package needs. Existence checks run first so an
+// unknown project/environment/service surfaces as storage.ErrNotFound rather
+// than an empty table that misreads as "exists but nothing deployed".
 type Store interface {
 	GetProject(ctx context.Context, name string) (db.Project, error)
 	GetEnvironment(ctx context.Context, projectName, name string) (db.Environment, error)
@@ -31,11 +29,9 @@ func New(store Store) *Service {
 	return &Service{store: store}
 }
 
-// Fetch returns the observed-vs-desired rows for the project, optionally
-// narrowed to a single environment and/or service. The project — and, when set,
-// the environment and service — are checked to exist first, so `status -e prod`
-// against a typo reports "environment not found" instead of the misleading "no
-// services match".
+// Fetch returns the project's observed-vs-desired rows, optionally narrowed by
+// environment/service. Each named scope is existence-checked first, so a typo'd
+// -e reports "not found" instead of the misleading "no services match".
 func (s *Service) Fetch(ctx context.Context, t target.Target) ([]db.ProjectStatusRow, error) {
 	if _, err := s.store.GetProject(ctx, t.Project); err != nil {
 		return nil, err

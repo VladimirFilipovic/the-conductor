@@ -39,8 +39,6 @@ func cmdEnvironment(args []string) error {
 	}
 }
 
-// environmentTarget parses the project/environment target flags shared by the
-// read-only environment subcommands and applies the env/link fallback.
 func environmentTarget(args []string) (Target, error) {
 	fs := newFlagSet("environment", environmentsUsage)
 	var t Target
@@ -93,8 +91,7 @@ func listEnvironments(args []string) error {
 		fmt.Printf("no environments in project %q\n", t.Project)
 		return nil
 	}
-	// Mark the environment this directory currently resolves to (t.Environment),
-	// so `environment list` doubles as "which one am I on".
+	// Mark the resolved environment so list doubles as "which one am I on".
 	for _, e := range envs {
 		marker := "  "
 		if e.Name == t.Environment {
@@ -123,8 +120,8 @@ func createEnvironment(args []string) error {
 	if name == "" {
 		return usageErr(environmentsUsage, "create requires a name (-n NAME)")
 	}
-	// The resolved environment (link selection or -e) is the source to clone from;
-	// capture it before the new name takes its place in the target.
+	// The resolved environment (link or -e) is the clone source; capture it
+	// before the new name takes its place in the target.
 	sourceEnv := t.Environment
 
 	ctx := context.Background()

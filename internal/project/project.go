@@ -36,12 +36,10 @@ func (s *Service) Create(ctx context.Context, name, env string) (db.Project, err
 	return p, err
 }
 
-// Verify checks that every non-empty field of t names a row that can actually
-// be linked, so callers (e.g. `link`) fail loudly instead of writing a pointer
-// at a project/environment/service that isn't there. Project is always checked;
-// environment and service are checked only when set. Missing rows surface as
-// storage.ErrNotFound. Statefulness is NOT a link constraint — volumes are
-// orthogonal to identity, so any service (stateful or not) is a valid target.
+// Verify checks that every non-empty field of t names an existing row, so
+// callers (e.g. `link`) fail loudly instead of writing a dangling pointer.
+// Missing rows surface as storage.ErrNotFound. Statefulness is NOT checked —
+// volumes are orthogonal to identity, so any service is a valid target.
 func (s *Service) Verify(ctx context.Context, t target.Target) error {
 	if _, err := s.store.GetProject(ctx, t.Project); err != nil {
 		return err
@@ -59,10 +57,9 @@ func (s *Service) Verify(ctx context.Context, t target.Target) error {
 	return nil
 }
 
-// ListServices returns the services bound to t's environment, ordered by name.
-// The environment is verified first so an unknown project/environment surfaces
-// as storage.ErrNotFound rather than an empty list that looks like "no
-// services".
+// ListServices returns the environment's services, ordered by name. The
+// environment is verified first so an unknown one surfaces as
+// storage.ErrNotFound rather than an empty list that looks like "no services".
 func (s *Service) ListServices(ctx context.Context, t target.Target) ([]db.Service, error) {
 	if _, err := s.store.GetEnvironment(ctx, t.Project, t.Environment); err != nil {
 		return nil, err
@@ -78,17 +75,16 @@ type Source struct {
 	Image string `json:"image,omitempty"`
 }
 
-// AddServiceInput is the input for AddService. The embedded Target names the
-// project/environment the service is created in and the service's own name.
+// AddServiceInput's embedded Target names the project/environment the service
+// is created in and the service's own name.
 type AddServiceInput struct {
 	target.Target
 	Stateful bool
 	Source   Source
 }
 
-// AddService creates a service in the project and binds it to the named
-// environment in one transaction. The environment is looked up by name inside
-// the tx so the bind can't race a concurrent environment delete.
+// AddService creates the service and binds it to the environment in one tx;
+// the env is looked up inside the tx so the bind can't race an env delete.
 func (s *Service) AddService(ctx context.Context, in AddServiceInput) (db.Service, error) {
 	source, err := json.Marshal(in.Source)
 	if err != nil {
@@ -112,17 +108,15 @@ func (s *Service) AddService(ctx context.Context, in AddServiceInput) (db.Servic
 	return svc, err
 }
 
-// ServiceSource is a deploy target's recorded source plus whether it is
-// stateful. up reads this before building so it knows the repo to build (or the
-// prebuilt image to use). Missing fields mean the service has no source on file.
+// ServiceSource is a deploy target's recorded source plus statefulness; up
+// reads it before building. Missing fields mean no source on file.
 type ServiceSource struct {
 	Stateful bool
 	Source   Source
 }
 
-// ServiceSource looks up the source `add` recorded for the (project,
-// environment, service) target. An unknown target surfaces as
-// storage.ErrNotFound, so up can tell the user to `add` the service first.
+// ServiceSource returns the source `add` recorded for the target. An unknown
+// target surfaces as storage.ErrNotFound, so up can tell the user to `add` first.
 func (s *Service) ServiceSource(ctx context.Context, t target.Target) (ServiceSource, error) {
 	row, err := s.store.GetEnvironmentService(ctx, t.Project, t.Environment, t.Service)
 	if err != nil {
@@ -135,10 +129,8 @@ func (s *Service) ServiceSource(ctx context.Context, t target.Target) (ServiceSo
 	return ServiceSource{Stateful: row.Stateful, Source: src}, nil
 }
 
-// DeployInput is one service's resolved deploy commit: the target it lands on,
-// the concrete image to run, sizing/health/restart knobs, and the replica count
-// for its region. The image is already resolved (built or taken as-is) by the
-// caller — this layer just commits it.
+// DeployInput is one service's resolved deploy commit. The image is already
+// resolved (built or taken as-is) by the caller — this layer just commits it.
 type DeployInput struct {
 	target.Target
 	ImageRef      string
@@ -160,11 +152,9 @@ type DeployResult struct {
 	Replicas int32
 }
 
-// Deploy commits a new current deployment for an existing service in one
-// transaction: it resolves the service binding, bumps the version, supersedes
-// the prior current commit, inserts the new one, and sets its region's replica
-// count. The service must already exist (via `add`); an unknown target surfaces
-// as storage.ErrNotFound.
+// Deploy commits a new current deployment in one tx: bump version, supersede
+// the prior current commit, insert the new one, set its region's replicas. The
+// service must already exist (`add`); an unknown target ⇒ storage.ErrNotFound.
 func (s *Service) Deploy(ctx context.Context, in DeployInput) (DeployResult, error) {
 	var res DeployResult
 	err := s.store.WithTx(ctx, func(st storage.Store) error {
@@ -207,10 +197,9 @@ func (s *Service) Deploy(ctx context.Context, in DeployInput) (DeployResult, err
 	return res, err
 }
 
-// ParseVersion turns a `--to` argument into a deployment version. It accepts
-// "" (→ 0, meaning "the version before current"), "vN", or "N". A non-positive
-// or malformed value is an error. Lives here, not in the CLI, so the version
-// grammar is owned alongside the rollback logic it feeds.
+// ParseVersion parses a `--to` argument: "" (→ 0, "the version before
+// current"), "vN", or "N". Lives here, not in the CLI, so the version grammar
+// is owned alongside the rollback logic it feeds.
 func ParseVersion(s string) (int32, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -236,12 +225,10 @@ type RollbackResult struct {
 	To   int32
 }
 
-// Rollback re-points is_current to an EXISTING earlier deployment in one
-// transaction — no rebuild, no new row. The target's image_ref/env/sizing are
-// reused verbatim (it never consults config.toml); the engine then converges to
-// it like any current deployment. Errors: an unknown target or no current
-// deployment surface as storage.ErrNotFound; rolling back to the current version
-// or with no earlier version available is rejected.
+// Rollback re-points is_current to an EXISTING earlier deployment in one tx —
+// no rebuild, no new row; image_ref/env/sizing are reused verbatim (config.toml
+// is never consulted). Unknown target or no current deployment ⇒
+// storage.ErrNotFound; rolling back to the current version is rejected.
 func (s *Service) Rollback(ctx context.Context, in RollbackInput) (RollbackResult, error) {
 	var res RollbackResult
 	err := s.store.WithTx(ctx, func(st storage.Store) error {

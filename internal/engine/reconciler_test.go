@@ -94,13 +94,10 @@ func TestBuildReplicaGroupsBucketsDrainedTargetAsOutgoing(t *testing.T) {
 
 // --- planIntents dispatch mechanics ---
 //
-// Stub rules isolate the dispatch loop from domain logic: cascade selection by
-// group kind, first-match break, and concatenation across groups. The stubs
-// mint sentinel IntentKinds, so a failure here can only mean the loop or the
-// cascade switch is wrong — never a rule.
+// Stub rules mint sentinel IntentKinds, isolating dispatch from domain logic:
+// a failure here can only mean the loop or the cascade switch — never a rule.
 
-// matchAll always fires and tags its output with a sentinel kind, marking
-// which cascade dispatched the group.
+// matchAll always fires, tagging its output with which cascade dispatched the group.
 func matchAll(kind IntentKind) rule {
 	return rule{
 		name: string(kind),
@@ -256,12 +253,10 @@ func TestPlanIntentsDispatchesEachGroupIndependently(t *testing.T) {
 	}
 }
 
-// Frozen means frozen: whatever else is true of a failed group — a breached
-// restart budget (no re-fail), a hostless replica (no re-placement), or a
-// fully recovered target set (no un-freeze via rolloutComplete) — the cascade
-// must stop at deploymentFrozen and emit only the skip. (Failed-phase targets
-// are the sole exception: frozen sweeps those itself, covered in
-// rules_shared_test.go.)
+// Frozen means frozen: whatever else is true of a failed group — breached
+// restart budget, hostless replica, recovered target set — the cascade must
+// stop at deploymentFrozen and emit only the skip. (Sole exception:
+// failed-phase targets, which frozen sweeps itself.)
 func TestFailedGroupOnlySkipsThroughCascade(t *testing.T) {
 	slot := replicaSlot{uuid.New(), "eu-west"}
 	deploymentID := uuid.New()
@@ -304,10 +299,9 @@ func TestFailedGroupOnlySkipsThroughCascade(t *testing.T) {
 	}
 }
 
-// End-to-end through Reconcile: a scaled-down group with one healthy target
-// and one drained excess replica past its window must emit exactly the
-// destroy — proving the drained excess neither trips the health gate nor
-// deadlocks the cascade.
+// End-to-end through Reconcile: one healthy target plus one drained excess past
+// its window must emit exactly the destroy — the drained excess neither trips
+// the health gate nor deadlocks the cascade.
 func TestScaleDownExcessReapsThroughCascade(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	slot := replicaSlot{uuid.New(), "eu-west"}
