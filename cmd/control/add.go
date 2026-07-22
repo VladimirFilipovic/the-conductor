@@ -101,9 +101,8 @@ func cmdAdd(args []string) error {
 	return nil
 }
 
-// linkToService points the nearest link at the just-added service (t already
-// carries project/environment/service). The service is known to exist — it was
-// just created in the same invocation — so no extra validation is needed.
+// linkToService points the nearest link at the just-added service. No extra
+// validation — the service was created in this same invocation.
 func linkToService(t Target) error {
 	dir, err := os.Getwd()
 	if err != nil {

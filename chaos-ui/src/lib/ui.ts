@@ -1,5 +1,4 @@
-// Badge palettes shared across client views. Values are Tailwind utility
-// strings; unknown keys fall back to a neutral chip.
+// Badge palettes shared across client views; values are Tailwind utility strings.
 
 const NEUTRAL = "bg-white/5 text-zinc-400 border-white/10";
 

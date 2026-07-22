@@ -22,7 +22,7 @@ var ErrExists = errors.New("already exists")
 
 // maskDSN redacts the password component of a postgres DSN so it's safe to log.
 func maskDSN(dsn string) string {
-	// Best-effort: replace everything between :// and @ with user:***
+	// Best-effort: a DSN that doesn't match falls through unmasked.
 	if i := len("postgres://"); len(dsn) > i {
 		if at := findByte(dsn[i:], '@'); at >= 0 {
 			if colon := findByte(dsn[i:i+at], ':'); colon >= 0 {
@@ -62,10 +62,9 @@ type querier struct {
 	queries *db.Queries
 }
 
-// PostgresClient is a TxStore backed by a database/sql pool over the
-// pgx driver. SQL lives in db/queries and is compiled to type-safe Go by sqlc
-// (the db package); this type only marshals values and maps the generated
-// results onto the package's sentinel errors.
+// PostgresClient is a TxStore backed by a database/sql pool over the pgx
+// driver. SQL lives in db/queries, compiled by sqlc (the db package); this
+// type only marshals values and maps results onto the sentinel errors.
 type PostgresClient struct {
 	querier
 	pool *sql.DB
@@ -110,9 +109,8 @@ func (c *PostgresClient) WithReadTx(ctx context.Context, fn func(SnapshotReader)
 }
 
 // withTx is the shared begin/commit/rollback plumbing behind every With*Tx
-// entry point. opts is nil for the default read-write tx; read paths pass a
-// read-only snapshot isolation. Each public entry hands the tx-scoped querier to
-// its callback typed as the narrow view that callback is allowed to touch.
+// entry point; each hands the tx-scoped querier to its callback typed as the
+// narrow view that callback is allowed to touch.
 func (c *PostgresClient) withTx(ctx context.Context, opts *sql.TxOptions, fn func(querier) error) error {
 	tx, err := c.pool.BeginTx(ctx, opts)
 	if err != nil {

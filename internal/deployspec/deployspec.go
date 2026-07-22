@@ -1,13 +1,10 @@
-// Package deployspec parses config.toml: the committed, single-service build and
-// deploy spec `conductor up` reads. Its shape borrows from Railway's railway.toml
-// for the fields Railway actually exposes (numReplicas, region, healthcheck,
-// restart policy, start command); the cpu/memory sizing fields are a Kubernetes-
-// style addition — Railway itself has no per-service CPU/mem knob (it autoscales
-// to a plan cap and bills by usage). It holds build/deploy SETTINGS only — never
-// identity (which project/environment/service this deploys to comes from the
-// folder link or -p/-e/-s) and never the service's source (the repo/image is
-// recorded in the control plane by `add`). Per-environment overrides live in
-// [environments.NAME.*] blocks, merged over the base for the active environment.
+// Package deployspec parses config.toml: the committed, single-service build
+// and deploy spec `conductor up` reads. The shape borrows from Railway's
+// railway.toml; the cpu/memory sizing fields are a Kubernetes-style addition
+// (Railway has no per-service CPU/mem knob). It holds build/deploy SETTINGS
+// only — never identity (folder link or -p/-e/-s) and never the service's
+// source (recorded in the control plane by `add`). Per-environment overrides
+// live in [environments.NAME.*] blocks, merged over the base.
 package deployspec
 
 import (
@@ -218,7 +215,7 @@ func (d Deploy) merge(ov Deploy) Deploy {
 	return out
 }
 
-// Region returns the deploy's target region, or DefaultRegion when unset.
+// RegionOrDefault returns the deploy's target region, or DefaultRegion when unset.
 func (d Deploy) RegionOrDefault() string { return orStr(d.Region, DefaultRegion) }
 
 // ReplicasOrDefault returns the desired replica count, defaulting to
@@ -278,12 +275,10 @@ func parseCPU(raw string) (int32, error) {
 	return milli, nil
 }
 
-// coresToMillicores converts a decimal core count ("1", "1.5", "0.25") to
-// millicores with exact integer math. Floats are wrong here: 0.29*1000 is
-// 289.999…, which truncates to 289m, and sub-millicore values truncate to 0m —
-// both would slip past validation and only fail the DB's cpu_millicores > 0
-// CHECK at deploy. Precision finer than a millicore (a non-zero 4th fractional
-// digit) is rejected rather than silently dropped.
+// coresToMillicores converts a decimal core count ("1.5") to millicores with
+// exact integer math — floats truncate (0.29*1000 → 289m; sub-millicore → 0m)
+// and would only fail at the DB's cpu_millicores > 0 CHECK. Precision finer
+// than a millicore is rejected rather than silently dropped.
 func coresToMillicores(raw string) (millicores int32, ok bool) {
 	whole, frac, hasFrac := strings.Cut(raw, ".")
 	w := 0

@@ -11,10 +11,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// Engine-owned views of the snapshot rows. The sqlc row types stay confined to
-// this boundary so the Reconciler's inputs are plain values — trivially
-// constructable in tests, insulated from schema renames, and carrying domain
-// enums instead of bare strings.
+// Engine-owned views of the snapshot rows: sqlc row types stop at this boundary
+// so the Reconciler's inputs are plain values — testable, schema-rename-proof,
+// domain enums instead of bare strings.
 
 // desiredState is what the current deployment wants for one slot: the replica
 // target plus the spec needed to mint a replica.
@@ -50,15 +49,13 @@ type replica struct {
 	Phase         domain.ReplicaPhase
 	Healthy       bool
 	RestartCount  int32
-	// DrainSeconds is the replica's own deployment's graceful window; the
-	// drain-window rule reaps once DrainedAt + DrainSeconds < now. Per replica
-	// so an outgoing (superseded) replica keeps its deployment's policy.
+	// DrainSeconds: reap once DrainedAt + DrainSeconds < now. Carried per replica
+	// so an outgoing (superseded) replica keeps its own deployment's drain policy.
 	DrainSeconds int32
 	// DrainedAt is when the orchestrator drained this replica; zero until then.
 	DrainedAt time.Time
-	// HealthChecksPassedAt is when this replica first passed its health probe;
-	// zero = never passed (the stalled-rollout signal for the progress-deadline
-	// gate). Stamped once by a DB trigger, so it survives a later crash.
+	// HealthChecksPassedAt: zero = never passed a probe (the stalled-rollout
+	// signal). Stamped once by a DB trigger, so it survives a later crash.
 	HealthChecksPassedAt time.Time
 	// CreatedAt is when the replica row was minted — the start reference the
 	// progress-deadline gate measures against (observedAt − CreatedAt > deadline).

@@ -78,7 +78,6 @@ func (e *Engine) run(ctx context.Context) error {
 	}
 }
 
-// reconcile is one pass: read the snapshot, then close the desired/observed gap.
 func (e *Engine) reconcile(ctx context.Context) error {
 	snap, err := e.loadSnapshot(ctx)
 	if err != nil {

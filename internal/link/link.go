@@ -1,8 +1,7 @@
-// Package link manages the folder-link: a per-repo .conductor/config.json that
-// points a working tree at a project/environment/service in the control plane.
-// It holds identity pointers ONLY — never build/deploy settings (those live in
-// the committed config.toml, see internal/deployspec) and never replica counts or
-// secret values (the control-plane DB owns those).
+// Package link manages the folder-link: a per-repo .conductor/config.json
+// pointing a working tree at a project/environment/service. Identity pointers
+// ONLY — build/deploy settings live in config.toml (internal/deployspec),
+// replica counts and secrets in the control-plane DB.
 package link
 
 import (
@@ -89,8 +88,8 @@ func Remove() (dir string, err error) {
 	if err := os.Remove(Path(dir)); err != nil {
 		return "", err
 	}
-	// Tolerate leftovers (e.g. a stray config.json.tmp): removing the link file
-	// is the contract, not the dir.
+	// Tolerate leftovers (e.g. a stray .tmp): removing the link file is the
+	// contract, not the dir.
 	_ = os.Remove(filepath.Join(dir, DirName))
 	return dir, nil
 }

@@ -1,14 +1,9 @@
-// Package builder is conductor's source-to-image extension point. `conductor up`
-// commits desired state from a manifest; whenever a service ships a repo instead
-// of a prebuilt image, up asks a Builder to turn that source into an image
-// reference, and the returned ref becomes the deployment's image_ref.
-//
-// The library ships NoOp, which runs no build and synthesizes a deterministic
-// local ref — enough to exercise the control plane with no build pipeline wired.
-// Embedders implement Builder to shell out to nixpacks, a Dockerfile build,
-// buildpacks, or their own system. This package is intentionally public (not
-// under internal/) so it can be imported and implemented from outside the
-// module.
+// Package builder is conductor's source-to-image extension point: when a
+// service ships a repo instead of a prebuilt image, `up` asks a Builder for the
+// ref that becomes the deployment's image_ref. NoOp (the default) synthesizes a
+// local ref so the control plane works with no build pipeline wired.
+// Intentionally public (not internal/) so embedders can implement Builder from
+// outside the module.
 package builder
 
 import (
@@ -17,9 +12,9 @@ import (
 	"strings"
 )
 
-// Strategy names a build backend. It is a hint a Builder may honor or ignore;
-// the values mirror a Railway-style build config so an embedder can map a
-// Request straight onto railpack/nixpacks without a translation layer.
+// Strategy names a build backend — a hint a Builder may honor or ignore. The
+// values mirror a Railway-style build config so a Request maps straight onto
+// railpack/nixpacks without a translation layer.
 type Strategy string
 
 const (
@@ -32,12 +27,12 @@ const (
 // Request is everything a backend needs to turn source into an image. It stays
 // close to a Railway build config so implementations stay thin.
 type Request struct {
-	Project      string            // control-plane project the build belongs to
-	Environment  string            // target environment
-	Service      string            // service being built
-	Repo         string            // source repo URL or local path
-	Root         string            // sub-directory to build from (monorepos); "" = repo root
-	Strategy     Strategy          // backend hint
+	Project      string
+	Environment  string
+	Service      string
+	Repo         string // source repo URL or local path
+	Root         string // sub-directory to build from (monorepos); "" = repo root
+	Strategy     Strategy
 	Dockerfile   string            // path, when Strategy == StrategyDockerfile
 	BuildCommand string            // overrides the backend's default build command
 	Env          map[string]string // variables available at build time (build args)
@@ -59,12 +54,9 @@ type Builder interface {
 	Build(ctx context.Context, req Request) (Result, error)
 }
 
-// Resolve turns a service's source into the image ref to deploy. A prebuilt
-// image (a service shipping an image, or a database's managed image) is used
-// as-is; otherwise the repo in req is handed to b and the built ref is returned.
-// A service with neither, or a builder that yields an empty ref, is an error.
-// This is the build-vs-prebuilt decision lifted out of the CLI so `up` stays
-// pure wiring.
+// Resolve turns a service's source into the image ref to deploy: a prebuilt
+// image is used as-is, otherwise the repo in req is built via b. The
+// build-vs-prebuilt decision lives here, not the CLI, so `up` stays pure wiring.
 func Resolve(ctx context.Context, b Builder, req Request, prebuilt string) (string, error) {
 	if prebuilt != "" {
 		return prebuilt, nil
@@ -82,10 +74,9 @@ func Resolve(ctx context.Context, b Builder, req Request, prebuilt string) (stri
 	return res.ImageRef, nil
 }
 
-// NoOp is the default Builder: it performs no build and returns a deterministic,
-// obviously-local image ref derived from the project and service. It lets up
-// commit desired state for repo-based services before any real build pipeline
-// exists; the conductor.local/ prefix makes clear the artifact was never pushed.
+// NoOp is the default Builder: no build, just a deterministic local ref, so up
+// can commit repo-based services before a real build pipeline exists; the
+// conductor.local/ prefix makes clear the artifact was never pushed.
 type NoOp struct{}
 
 // Build returns a synthesized ref like "conductor.local/storefront/web:source".

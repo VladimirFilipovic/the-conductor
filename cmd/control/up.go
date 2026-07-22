@@ -26,18 +26,17 @@ first). See example/config.toml for an annotated spec.
 Flags:
   -f, --file PATH   build/deploy spec to read (default "config.toml")`
 
-// upBuilder is the source-to-image backend `up` uses for repo services. It
-// defaults to builder.NoOp (a synthesized local ref, no real build); an embedder
-// wiring conductor into their own binary overrides it with a Builder that shells
-// out to nixpacks, a Dockerfile build, or their own pipeline.
+// upBuilder is the source-to-image backend for repo services. Defaults to
+// builder.NoOp (synthesized local ref, no real build); embedders override it
+// with their own build pipeline.
 var upBuilder builder.Builder = builder.NoOp{}
 
 func cmdUp(args []string) error {
 	fs := newFlagSet("up", upUsage)
 	var t Target
 	addTargetFlags(fs, &t)
-	// Spec path is a flag, not a positional, so flags parse in any order (stdlib
-	// flag stops at the first positional, which would otherwise drop trailing flags).
+	// Spec path is a flag, not a positional — stdlib flag stops at the first
+	// positional, which would drop trailing flags.
 	var file string
 	fs.StringVar(&file, "f", deployspec.FileName, `build/deploy spec path`)
 	fs.StringVar(&file, "file", deployspec.FileName, `build/deploy spec path`)
@@ -72,9 +71,8 @@ func cmdUp(args []string) error {
 	defer func() { _ = store.Close() }()
 	proj := project.New(store)
 
-	// Source (repo/image) lives in the control plane, recorded by `add`; the spec
-	// never carries it. Resolve it to a concrete image before opening the deploy
-	// tx — a build must not run with a DB transaction held open.
+	// Source lives in the control plane (recorded by `add`), never the spec.
+	// Resolve it before the deploy tx — a build must not run with a tx held open.
 	src, err := proj.ServiceSource(ctx, t.Target)
 	if err != nil {
 		return err
@@ -89,10 +87,9 @@ func cmdUp(args []string) error {
 		Dockerfile:   buildCfg.Dockerfile,
 		BuildCommand: buildCfg.BuildCommand,
 	}
-	// A service with neither a recorded image nor repo builds from the linked
-	// working tree (the dir holding .conductor, else cwd) — the "source lives
-	// where you run up" contract (see project.Source). cwd is the build context
-	// only the CLI knows, so it is resolved here, not in builder.Resolve.
+	// No recorded image or repo ⇒ build from the linked working tree — the
+	// "source lives where you run up" contract (see project.Source). cwd is a
+	// build context only the CLI knows, so it's resolved here, not in builder.Resolve.
 	if src.Source.Image == "" && req.Repo == "" {
 		if req.Repo, err = workingTree(); err != nil {
 			return err
@@ -124,9 +121,8 @@ func cmdUp(args []string) error {
 	return nil
 }
 
-// workingTree is the directory `up` builds from when a service has no recorded
-// repo or image: the linked working tree (the dir containing .conductor) if
-// there is one, else the current directory.
+// workingTree is the fallback build dir: the linked working tree (dir
+// containing .conductor) if any, else cwd.
 func workingTree() (string, error) {
 	dir, ok, err := link.Find()
 	if err != nil {

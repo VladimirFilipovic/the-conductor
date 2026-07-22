@@ -13,15 +13,12 @@ import (
 	"conductor/internal/target"
 )
 
-// version is set by the linker (`-ldflags "-X conductor/cmd.version=..."`)
-// for release builds; otherwise it falls back to "dev".
+// Set by the linker (`-ldflags "-X conductor/cmd.version=..."`) for release builds.
 var version = "dev"
 
-// cfg is the process-wide environment, loaded once in Run before any command
-// dispatches. Commands read DSN / identity defaults from here, not os.Getenv.
+// Loaded once in Run; commands read DSN / identity defaults from here, not os.Getenv.
 var cfg config.Config
 
-// databaseURL is the control-plane DSN resolved at startup.
 func databaseURL() string { return cfg.DatabaseURL }
 
 const usage = `conductor — drive the orchestration engine
@@ -134,15 +131,14 @@ func exitCode(err error) int {
 	}
 }
 
-// flagSet wraps *flag.FlagSet with the command's usage text so parse failures
-// can be rendered uniformly (see parse).
+// flagSet carries the command's usage text so parse failures render uniformly.
 type flagSet struct {
 	*flag.FlagSet
 	usage string
 }
 
-// newFlagSet builds a flag set whose own error/usage output is silenced; parse
-// turns failures into a clear usageError instead of the flag package's dump.
+// newFlagSet silences the flag package's own error/usage dump; parse turns
+// failures into a clear usageError instead.
 func newFlagSet(name, usageText string) *flagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -150,9 +146,8 @@ func newFlagSet(name, usageText string) *flagSet {
 	return &flagSet{FlagSet: fs, usage: usageText}
 }
 
-// parse runs the underlying Parse, translating the flag package's terse
-// failures: an unknown flag becomes an explicit "unsupported flag" usageError
-// (exit 2), and -h/--help prints the usage and exits 0.
+// parse translates the flag package's terse failures: an unknown flag becomes
+// an "unsupported flag" usageError (exit 2); -h/--help prints usage, exits 0.
 func (fs *flagSet) parse(args []string) error {
 	switch err := fs.Parse(args); {
 	case err == nil:
@@ -169,9 +164,7 @@ func (fs *flagSet) parse(args []string) error {
 	}
 }
 
-// usageError marks a bad invocation. exitCode prints it (with the conductor
-// prefix) and returns 2. Flag-parse errors are not wrapped in it because the
-// flag package prints those itself.
+// usageError marks a bad invocation; exitCode prints it and returns 2.
 type usageError struct{ text string }
 
 func (e *usageError) Error() string { return e.text }
@@ -181,10 +174,9 @@ func usageErr(usageText, msg string) error {
 }
 
 // Target is the (project, environment, service) triple every command resolves
-// before talking to the orchestration engine. Identity comes, in precedence
-// order, from flags, then environment variables, then the folder-link file
-// (.conductor/config.json) discovered by walking up from cwd (see link.go).
-// The link file is the lowest tier so an explicit -e always overrides it.
+// before talking to the engine. Precedence: flags > env vars > folder-link file
+// (.conductor/config.json, found by walking up from cwd) — the link is the
+// lowest tier so an explicit -e always overrides it.
 type Target struct {
 	target.Target
 }
@@ -200,9 +192,8 @@ func dash(s string) string {
 	return s
 }
 
-// require checks that the target is present, returning an error listing
-// everything that is missing so the user learns the whole gap at once. Project
-// is always required; environment/service are gated by the flags.
+// require lists everything missing at once so the user learns the whole gap in
+// one shot. Project is always required; environment/service per the flags.
 func (c Target) require(environment, service bool) error {
 	var missing []string
 	if c.Project == "" {
@@ -220,11 +211,9 @@ func (c Target) require(environment, service bool) error {
 	return nil
 }
 
-// addTargetFlags registers the universal -p/-e/-s flags (and their long forms)
-// on a command's flag set, writing straight into t. It is split per field so
-// a command that overloads one of the names can opt out of just that flag —
-// `add --service NAME` means the service to create, not a target, so add
-// registers project+environment only.
+// addTargetFlags registers -p/-e/-s (and long forms). Split per field so a
+// command that overloads a name can opt out of just that flag — `add --service
+// NAME` means the service to create, so add registers project+environment only.
 func addTargetFlags(fs *flagSet, t *Target) {
 	addProjectFlag(fs, t)
 	addEnvironmentFlag(fs, t)
@@ -246,11 +235,9 @@ func addServiceFlag(fs *flagSet, t *Target) {
 	fs.StringVar(&t.Service, "service", "", "service name")
 }
 
-// resolve fills any Target field the flags left empty from the matching env
-// var, then — when useLink is true — from the folder-link file discovered by
-// walking up from cwd. Precedence is flag > env var > link file. `link` passes
-// useLink=false so an existing link's project can't silently satisfy a re-link
-// (the whole point of `link` is to (re)set it).
+// resolve fills empty Target fields: flag > env var > (when useLink) the
+// folder-link file. `link` passes useLink=false so an existing link can't
+// silently satisfy a re-link (the whole point of `link` is to (re)set it).
 func resolve(t *Target, useLink bool) {
 	t.Project = orDefault(t.Project, cfg.Project)
 	t.Environment = orDefault(t.Environment, cfg.Environment)
@@ -265,10 +252,9 @@ func resolve(t *Target, useLink bool) {
 	}
 }
 
-// resolveProject fills only the project field (flag > env var > link file),
-// leaving environment/service untouched. Commands that default to a whole-
-// project view (status) use this so the link's env/service can't silently
-// narrow the output — only an explicit -e/-s does.
+// resolveProject fills only the project (flag > env var > link). Whole-project
+// commands (status) use it so the link's env/service can't silently narrow the
+// output — only an explicit -e/-s does.
 func resolveProject(t *Target) {
 	if t.Project = orDefault(t.Project, cfg.Project); t.Project != "" {
 		return

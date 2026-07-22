@@ -34,8 +34,7 @@ func cmdLink(args []string) error {
 	if err := fs.parse(args); err != nil {
 		return err
 	}
-	// resolve with useLink=false: an existing link's project must not silently
-	// satisfy a re-link, since the point of `link` is to (re)set it.
+	// useLink=false: an existing link must not silently satisfy a re-link.
 	resolve(&t, false)
 	if t.Project == "" {
 		return usageErr(linkUsage, "link requires a project (--project/-p or "+config.VarProject+")")
@@ -51,8 +50,8 @@ func cmdLink(args []string) error {
 		l.Environment = t.Environment
 	}
 
-	// Validate against the control plane before persisting, so a typo'd pointer
-	// fails here rather than on the first command that resolves the link.
+	// Validate before persisting so a typo'd pointer fails here, not on the
+	// first command that resolves the link.
 	ctx := context.Background()
 	store, err := storage.NewPostgresClient(ctx, databaseURL())
 	if err != nil {
