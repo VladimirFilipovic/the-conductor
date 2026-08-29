@@ -15,7 +15,7 @@ const createVolume = `-- name: CreateVolume :one
 
 INSERT INTO volumes (service_id, name, region, mount_path, desired_size_bytes)
 VALUES ($1, $2, $3, $4, $5)
-RETURNING id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, revision, created_at
+RETURNING id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at
 `
 
 type CreateVolumeParams struct {
@@ -51,7 +51,6 @@ func (q *Queries) CreateVolume(ctx context.Context, arg CreateVolumeParams) (Vol
 		&i.DesiredSizeBytes,
 		&i.ObservedSizeBytes,
 		&i.Status,
-		&i.Revision,
 		&i.CreatedAt,
 	)
 	return i, err
@@ -60,7 +59,7 @@ func (q *Queries) CreateVolume(ctx context.Context, arg CreateVolumeParams) (Vol
 const deleteVolume = `-- name: DeleteVolume :one
 DELETE FROM volumes
 WHERE service_id = $1 AND mount_path = $2
-RETURNING id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, revision, created_at
+RETURNING id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at
 `
 
 type DeleteVolumeParams struct {
@@ -82,14 +81,13 @@ func (q *Queries) DeleteVolume(ctx context.Context, arg DeleteVolumeParams) (Vol
 		&i.DesiredSizeBytes,
 		&i.ObservedSizeBytes,
 		&i.Status,
-		&i.Revision,
 		&i.CreatedAt,
 	)
 	return i, err
 }
 
 const listVolumesByService = `-- name: ListVolumesByService :many
-SELECT v.id, v.service_id, v.name, v.mount_path, v.region, v.host_id, v.backing, v.desired_size_bytes, v.observed_size_bytes, v.status, v.revision, v.created_at FROM volumes v
+SELECT v.id, v.service_id, v.name, v.mount_path, v.region, v.host_id, v.backing, v.desired_size_bytes, v.observed_size_bytes, v.status, v.created_at FROM volumes v
 JOIN services s ON s.id = v.service_id
 WHERE s.project_name = $1 AND s.name = $2
 ORDER BY v.mount_path
@@ -120,7 +118,6 @@ func (q *Queries) ListVolumesByService(ctx context.Context, arg ListVolumesBySer
 			&i.DesiredSizeBytes,
 			&i.ObservedSizeBytes,
 			&i.Status,
-			&i.Revision,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -140,7 +137,7 @@ const updateVolumeSize = `-- name: UpdateVolumeSize :one
 UPDATE volumes
 SET desired_size_bytes = $1
 WHERE service_id = $2 AND mount_path = $3
-RETURNING id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, revision, created_at
+RETURNING id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at
 `
 
 type UpdateVolumeSizeParams struct {
@@ -166,7 +163,6 @@ func (q *Queries) UpdateVolumeSize(ctx context.Context, arg UpdateVolumeSizePara
 		&i.DesiredSizeBytes,
 		&i.ObservedSizeBytes,
 		&i.Status,
-		&i.Revision,
 		&i.CreatedAt,
 	)
 	return i, err

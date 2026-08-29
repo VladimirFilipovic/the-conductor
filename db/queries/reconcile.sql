@@ -15,26 +15,35 @@ INSERT INTO replicas (deployment_id, region, cpu_millicores, mem_bytes, alloc_re
 VALUES ($1, $2, $3, $4, $5)
 RETURNING *;
 
--- Reserve a replica onto a host under optimistic concurrency: the host's
--- revision must still equal what the scheduler read while bin-packing, or the
--- host filled up under us and the whole placement must roll back. The CTE bumps
--- the host revision (the CAS) and the replica update only lands if that bump
--- matched — so rows-affected = 0 signals a lost race.
+-- Reserve a replica onto a host. Interim shape: unguarded, pending predicated
+-- reservation. The old guard was a CAS on hosts.revision, but a version proxy
+-- aborts on ANY occupancy change — two same-pass placements onto one
+-- half-empty host conflicted even when both fit. The plan is to carry the real
+-- invariant in this UPDATE's WHERE instead:
+--
+--   AND EXISTS (
+--     SELECT 1 FROM hosts h
+--     WHERE h.id = $2 AND h.status = 'ready'
+--       AND (SELECT coalesce(sum(r.cpu_millicores), 0) FROM replicas r
+--            WHERE r.host_id = h.id AND r.phase NOT IN ('reaped', 'failed'))
+--           + <demand cpu> <= h.cpu_millicores
+--       AND (... same for mem_bytes ...)
+--   )
+--
+-- Summing live replicas makes the check drift-proof (no reserved counter to
+-- desync) and Postgres's row lock makes check-and-write atomic, so
+-- rows-affected = 0 will mean "genuinely doesn't fit / host not ready" — never
+-- a false abort. Until then rows-affected = 0 only means the replica row
+-- vanished since the snapshot.
 -- name: ReserveReplicaOnHost :execrows
-WITH bump AS (
-	UPDATE hosts SET revision = hosts.revision + 1
-	WHERE hosts.id = $2 AND hosts.revision = $3
-	RETURNING hosts.id
-)
 UPDATE replicas
 SET host_id = $2, phase = 'scheduling'
-WHERE replicas.id = $1 AND EXISTS (SELECT 1 FROM bump);
+WHERE replicas.id = $1;
 
--- Bind a volume to the host its replica landed on. Bumps revision so a stale
--- reader detects the move.
+-- Bind a volume to the host its replica landed on.
 -- name: AssignVolumeHost :exec
 UPDATE volumes
-SET host_id = $2, status = 'attached', revision = revision + 1
+SET host_id = $2, status = 'attached'
 WHERE id = $1;
 
 -- Take (or renew) the single-writer lease. The PK on volume_id is the invariant;

@@ -73,7 +73,6 @@ type host struct {
 	CPUMillicores int32
 	MemBytes      int64
 	DiskBytes     int64
-	Revision      int64
 }
 
 type volume struct {
@@ -82,7 +81,6 @@ type volume struct {
 	Region           string
 	HostID           uuid.UUID
 	DesiredSizeBytes int64
-	Revision         int64
 }
 
 type stateSnapshot struct {
@@ -177,7 +175,6 @@ func newStateSnapshot(
 			CPUMillicores: h.CpuMillicores,
 			MemBytes:      h.MemBytes,
 			DiskBytes:     h.DiskBytes,
-			Revision:      h.Revision,
 		})
 	}
 	for _, v := range volumes {
@@ -187,7 +184,6 @@ func newStateSnapshot(
 			Region:           v.Region,
 			HostID:           v.HostID.UUID,
 			DesiredSizeBytes: v.DesiredSizeBytes,
-			Revision:         v.Revision,
 		})
 	}
 	return snap

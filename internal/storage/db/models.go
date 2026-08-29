@@ -61,7 +61,6 @@ type Host struct {
 	Labels        json.RawMessage `json:"labels"`
 	Status        string          `json:"status"`
 	LastHeartbeat sql.NullTime    `json:"last_heartbeat"`
-	Revision      int64           `json:"revision"`
 	CreatedAt     time.Time       `json:"created_at"`
 }
 
@@ -122,7 +121,6 @@ type Volume struct {
 	DesiredSizeBytes  int64         `json:"desired_size_bytes"`
 	ObservedSizeBytes sql.NullInt64 `json:"observed_size_bytes"`
 	Status            string        `json:"status"`
-	Revision          int64         `json:"revision"`
 	CreatedAt         time.Time     `json:"created_at"`
 }
 

@@ -14,10 +14,11 @@ import (
 	"github.com/google/uuid"
 )
 
-// ErrConflict is returned when an optimistic-concurrency write loses its race:
-// a host's revision moved between bin-packing and reservation, or a live lease
-// is already held by another replica. The caller should abandon this reconcile
-// decision — the next tick recomputes from fresh state.
+// ErrConflict is returned when a reconcile write loses its race: the row it
+// targets moved between snapshot and commit (the Sensor advanced a replica, a
+// live lease is held by another replica, a replica vanished). The caller
+// should abandon this reconcile decision — the next tick recomputes from
+// fresh state.
 var ErrConflict = errors.New("conflict")
 
 // ReplicaSpec is the desired shape of a replica the Reconciler places for a
@@ -41,9 +42,12 @@ type ReconcileTx interface {
 	ActiveVolumeLease(ctx context.Context, volumeID uuid.UUID) (db.VolumeLease, error)
 
 	CreateReplica(ctx context.Context, spec ReplicaSpec) (db.Replica, error)
-	// AssignReplicaHost reserves the replica onto the host iff the host's revision
-	// still matches expectHostRevision; a moved revision returns ErrConflict.
-	AssignReplicaHost(ctx context.Context, replicaID, hostID uuid.UUID, expectHostRevision int64) error
+	// AssignReplicaHost reserves the replica onto the host. Interim: unguarded
+	// (single placement writer). Will become predicated reservation — the
+	// UPDATE's WHERE carrying "capacity still sufficient" so only genuinely
+	// infeasible placements return ErrConflict; see ReserveReplicaOnHost in
+	// queries/reconcile.sql for the full sketch.
+	AssignReplicaHost(ctx context.Context, replicaID, hostID uuid.UUID) error
 
 	AssignVolumeHost(ctx context.Context, volumeID, hostID uuid.UUID) error
 	// AcquireVolumeLease takes (or renews) the single-writer lease; a live lease
@@ -97,17 +101,18 @@ func (q querier) CreateReplica(ctx context.Context, spec ReplicaSpec) (db.Replic
 	return r, err
 }
 
-func (q querier) AssignReplicaHost(ctx context.Context, replicaID, hostID uuid.UUID, expectHostRevision int64) error {
+func (q querier) AssignReplicaHost(ctx context.Context, replicaID, hostID uuid.UUID) error {
 	n, err := q.queries.ReserveReplicaOnHost(ctx, db.ReserveReplicaOnHostParams{
-		ID:       replicaID,
-		HostID:   uuid.NullUUID{UUID: hostID, Valid: true},
-		Revision: expectHostRevision,
+		ID:     replicaID,
+		HostID: uuid.NullUUID{UUID: hostID, Valid: true},
 	})
 	if err != nil {
 		return err
 	}
+	// Zero rows = the replica vanished since the snapshot: still a stale
+	// decision, same next-tick self-heal as a lost CAS.
 	if n == 0 {
-		slog.Debug("reconcile: host revision moved, dropping placement", "replica", replicaID, "host", hostID)
+		slog.Debug("reconcile: replica gone, dropping placement", "replica", replicaID, "host", hostID)
 		return ErrConflict
 	}
 	return nil

@@ -66,7 +66,7 @@ func (q *Queries) ActiveVolumeLease(ctx context.Context, volumeID uuid.UUID) (Vo
 
 const assignVolumeHost = `-- name: AssignVolumeHost :exec
 UPDATE volumes
-SET host_id = $2, status = 'attached', revision = revision + 1
+SET host_id = $2, status = 'attached'
 WHERE id = $1
 `
 
@@ -75,8 +75,7 @@ type AssignVolumeHostParams struct {
 	HostID uuid.NullUUID `json:"host_id"`
 }
 
-// Bind a volume to the host its replica landed on. Bumps revision so a stale
-// reader detects the move.
+// Bind a volume to the host its replica landed on.
 func (q *Queries) AssignVolumeHost(ctx context.Context, arg AssignVolumeHostParams) error {
 	_, err := q.db.ExecContext(ctx, assignVolumeHost, arg.ID, arg.HostID)
 	return err
@@ -174,29 +173,38 @@ func (q *Queries) ReleaseVolumeLease(ctx context.Context, volumeID uuid.UUID) er
 }
 
 const reserveReplicaOnHost = `-- name: ReserveReplicaOnHost :execrows
-WITH bump AS (
-	UPDATE hosts SET revision = hosts.revision + 1
-	WHERE hosts.id = $2 AND hosts.revision = $3
-	RETURNING hosts.id
-)
 UPDATE replicas
 SET host_id = $2, phase = 'scheduling'
-WHERE replicas.id = $1 AND EXISTS (SELECT 1 FROM bump)
+WHERE replicas.id = $1
 `
 
 type ReserveReplicaOnHostParams struct {
-	ID       uuid.UUID     `json:"id"`
-	HostID   uuid.NullUUID `json:"host_id"`
-	Revision int64         `json:"revision"`
+	ID     uuid.UUID     `json:"id"`
+	HostID uuid.NullUUID `json:"host_id"`
 }
 
-// Reserve a replica onto a host under optimistic concurrency: the host's
-// revision must still equal what the scheduler read while bin-packing, or the
-// host filled up under us and the whole placement must roll back. The CTE bumps
-// the host revision (the CAS) and the replica update only lands if that bump
-// matched — so rows-affected = 0 signals a lost race.
+// Reserve a replica onto a host. Interim shape: unguarded, pending predicated
+// reservation. The old guard was a CAS on hosts.revision, but a version proxy
+// aborts on ANY occupancy change — two same-pass placements onto one
+// half-empty host conflicted even when both fit. The plan is to carry the real
+// invariant in this UPDATE's WHERE instead:
+//
+//	AND EXISTS (
+//	  SELECT 1 FROM hosts h
+//	  WHERE h.id = $2 AND h.status = 'ready'
+//	    AND (SELECT coalesce(sum(r.cpu_millicores), 0) FROM replicas r
+//	         WHERE r.host_id = h.id AND r.phase NOT IN ('reaped', 'failed'))
+//	        + <demand cpu> <= h.cpu_millicores
+//	    AND (... same for mem_bytes ...)
+//	)
+//
+// Summing live replicas makes the check drift-proof (no reserved counter to
+// desync) and Postgres's row lock makes check-and-write atomic, so
+// rows-affected = 0 will mean "genuinely doesn't fit / host not ready" — never
+// a false abort. Until then rows-affected = 0 only means the replica row
+// vanished since the snapshot.
 func (q *Queries) ReserveReplicaOnHost(ctx context.Context, arg ReserveReplicaOnHostParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, reserveReplicaOnHost, arg.ID, arg.HostID, arg.Revision)
+	result, err := q.db.ExecContext(ctx, reserveReplicaOnHost, arg.ID, arg.HostID)
 	if err != nil {
 		return 0, err
 	}

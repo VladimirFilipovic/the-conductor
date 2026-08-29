@@ -107,7 +107,7 @@ func (q *Queries) ListActiveReplicas(ctx context.Context) ([]ListActiveReplicasR
 }
 
 const listActiveVolumes = `-- name: ListActiveVolumes :many
-SELECT DISTINCT v.id, v.service_id, v.name, v.mount_path, v.region, v.host_id, v.backing, v.desired_size_bytes, v.observed_size_bytes, v.status, v.revision, v.created_at FROM volumes v
+SELECT DISTINCT v.id, v.service_id, v.name, v.mount_path, v.region, v.host_id, v.backing, v.desired_size_bytes, v.observed_size_bytes, v.status, v.created_at FROM volumes v
 JOIN environment_services es ON es.service_id = v.service_id
 JOIN deployments d           ON d.environment_service_id = es.id
 WHERE d.is_current
@@ -137,7 +137,6 @@ func (q *Queries) ListActiveVolumes(ctx context.Context) ([]Volume, error) {
 			&i.DesiredSizeBytes,
 			&i.ObservedSizeBytes,
 			&i.Status,
-			&i.Revision,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -154,7 +153,7 @@ func (q *Queries) ListActiveVolumes(ctx context.Context) ([]Volume, error) {
 }
 
 const listSchedulableHosts = `-- name: ListSchedulableHosts :many
-SELECT id, region, hostname, cpu_millicores, mem_bytes, disk_bytes, labels, status, last_heartbeat, revision, created_at FROM hosts WHERE status = 'ready'
+SELECT id, region, hostname, cpu_millicores, mem_bytes, disk_bytes, labels, status, last_heartbeat, created_at FROM hosts WHERE status = 'ready'
 `
 
 // Hosts eligible to receive placements this pass: 'ready' only (notready,
@@ -178,7 +177,6 @@ func (q *Queries) ListSchedulableHosts(ctx context.Context) ([]Host, error) {
 			&i.Labels,
 			&i.Status,
 			&i.LastHeartbeat,
-			&i.Revision,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err
