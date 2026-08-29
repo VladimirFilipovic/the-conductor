@@ -38,6 +38,24 @@ type ReplicaSpec struct {
 // invariants intact: schedule+reserve (no orphan replica, no double-booked host)
 // and the stateful single-writer lease. The reads that feed a placement decision
 // run outside the tx, so this stays a short lock-holding window.
+//
+// Every write decided against a snapshot needs a guard matched to what can
+// invalidate it, and each guard failure surfaces as ErrConflict (drop, next
+// tick re-decides):
+//
+//   - Revision CAS (SetReplicaPhase): the Sensor and the Reconciler write the
+//     same replica row concurrently, and the decision (drain) depends on the
+//     whole row — "revision unchanged" is the only check that catches ANY
+//     interleaved write, including ABA (crash + restart lands back on the same
+//     phase, but not the same revision).
+//   - Commit-time predicate (AssignReplicaHost, AcquireVolumeLease): the
+//     question isn't "did the row change" but "is the placement still
+//     feasible" — capacity, host readiness, lease liveness are re-checked in
+//     the UPDATE's WHERE, so concurrent placements that all fit don't abort
+//     each other the way a version proxy would.
+//   - Unguarded (create, destroy, status flips): create mints a fresh row,
+//     destroy targets an already-terminal one, and deployment status has a
+//     single writer — nothing can invalidate these between snapshot and commit.
 type ReconcileTx interface {
 	// ActiveVolumeLease re-checks the lease inside the tx to close the TOCTOU gap
 	// before acquiring. ErrNotFound means the volume is free.
