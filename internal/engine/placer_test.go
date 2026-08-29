@@ -191,7 +191,7 @@ func TestReserveBlocksCreateNotReplacement(t *testing.T) {
 		placed bool
 	}{
 		{"pending create is blocked by the reserve", domain.ReplicaPhasePending, false},
-		{"replacement skips the reserve", domain.ReplicaPhaseStarting, true},
+		{"replacement skips the reserve", domain.ReplicaPhaseReplacing, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

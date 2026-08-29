@@ -145,7 +145,8 @@ CREATE TABLE replicas (
 	                 CHECK (desired_status IN ('running','stopped')),
 	phase            text        NOT NULL DEFAULT 'pending'
 	                 CHECK (phase IN ('pending','scheduling','starting','health_check',
-	                                  'healthy','shifting','active','draining','reaped','failed')),  -- §7
+	                                  'healthy','shifting','active','draining','reaped','failed',
+	                                  'replacing')),  -- §7
 	healthy          boolean     NOT NULL DEFAULT false,
 	restart_count    int         NOT NULL DEFAULT 0,        -- §8 backoff cap
 	last_exit_reason text,

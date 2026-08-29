@@ -418,11 +418,10 @@ func (p *placer) placeHostless(snap stateSnapshot, intents []Intent) []Intent {
 	return out
 }
 
-// isReplacement reads a hostless replica's history off its phase: still
-// pending means never placed — a new create. Any other phase means it had a
-// host and lost it (host death frees replicas as non-pending) — a replacement,
-// which jumps the packing queue and skips the headroom reserve.
-func isReplacement(r replica) bool { return r.Phase != domain.ReplicaPhasePending }
+// isReplacement: MarkHostDown frees a dead host's replicas as replacing, so
+// the phase says outright "had a host, lost it" — a replacement jumps the
+// packing queue and skips the headroom reserve (the reserve exists for it).
+func isReplacement(r replica) bool { return r.Phase == domain.ReplicaPhaseReplacing }
 
 // placeVolumes turns each hostless volume in the snapshot into a
 // place_volume intent (fires once per volume — placement is permanent). Disk

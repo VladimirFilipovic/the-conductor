@@ -208,14 +208,15 @@ func (s *sim) crashPastBudget(slot replicaSlot) {
 func (s *sim) advance(d time.Duration) { s.now = s.now.Add(d) }
 
 // loseHost is the chaos event for a died/drained host: the replica's container
-// is gone with it, so it is unplaced AND back to booting. Its health high-water
-// mark survives (it did pass probes once), so the progress-deadline gate does
-// not mistake a re-placed veteran for a stalled rollout.
+// is gone with it, so it drops to hostless replacing — what MarkHostDown
+// writes. Its health high-water mark survives (it did pass probes once), so
+// the progress-deadline gate does not mistake a re-placed veteran for a
+// stalled rollout.
 func (s *sim) loseHost(id uuid.UUID) {
 	r := s.replicaByID(id)
 	r.HostID = uuid.Nil
 	r.Healthy = false
-	r.Phase = domain.ReplicaPhaseStarting
+	r.Phase = domain.ReplicaPhaseReplacing
 }
 
 // vanish is the chaos event for a replica wiped without a trace (host

@@ -19,6 +19,11 @@ const (
 	ReplicaPhaseDraining    ReplicaPhase = "draining"     // graceful shutdown in progress
 	ReplicaPhaseReaped      ReplicaPhase = "reaped"       // terminal: gone, excluded from snapshots
 	ReplicaPhaseFailed      ReplicaPhase = "failed"       // terminal: crashed past restart_max
+	// ReplicaPhaseReplacing: lost its host (host death) and awaits re-placement.
+	// Orchestrator-owned like draining — set by MarkHostDown, exited only by the
+	// reconcile path (AssignReplicaHost → scheduling), never by an agent report:
+	// a partitioned-but-alive agent must not resurrect a freed replica.
+	ReplicaPhaseReplacing ReplicaPhase = "replacing"
 )
 
 // Valid reports whether p is a known phase — guard before writing one back.
@@ -26,7 +31,8 @@ func (p ReplicaPhase) Valid() bool {
 	switch p {
 	case ReplicaPhasePending, ReplicaPhaseScheduling, ReplicaPhaseStarting,
 		ReplicaPhaseHealthCheck, ReplicaPhaseHealthy, ReplicaPhaseShifting,
-		ReplicaPhaseActive, ReplicaPhaseDraining, ReplicaPhaseReaped, ReplicaPhaseFailed:
+		ReplicaPhaseActive, ReplicaPhaseDraining, ReplicaPhaseReaped, ReplicaPhaseFailed,
+		ReplicaPhaseReplacing:
 		return true
 	}
 	return false
