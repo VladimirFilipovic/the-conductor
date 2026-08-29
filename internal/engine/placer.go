@@ -363,15 +363,12 @@ func (p *placer) placeHostless(snap stateSnapshot, intents []Intent) []Intent {
 			continue
 		}
 		items = append(items, packItem{
-			id:     r.ID,
-			slot:   r.Slot,
-			region: r.Slot.Region,
-			cpu:    int64(r.CPUMillicores),
-			mem:    r.MemBytes,
-			// A hostless replica still in pending has never been placed — a
-			// new create. Any other phase means it had a host and lost it: a
-			// replacement, which jumps the queue and skips the reserve.
-			replacement: r.Phase != domain.ReplicaPhasePending,
+			id:          r.ID,
+			slot:        r.Slot,
+			region:      r.Slot.Region,
+			cpu:         int64(r.CPUMillicores),
+			mem:         r.MemBytes,
+			replacement: isReplacement(r),
 			spread:      p.cfg.AntiAffinity,
 		})
 	}
@@ -420,6 +417,12 @@ func (p *placer) placeHostless(snap stateSnapshot, intents []Intent) []Intent {
 	}
 	return out
 }
+
+// isReplacement reads a hostless replica's history off its phase: still
+// pending means never placed — a new create. Any other phase means it had a
+// host and lost it (host death frees replicas as non-pending) — a replacement,
+// which jumps the packing queue and skips the headroom reserve.
+func isReplacement(r replica) bool { return r.Phase != domain.ReplicaPhasePending }
 
 // placeVolumes turns each hostless volume in the snapshot into a
 // place_volume intent (fires once per volume — placement is permanent). Disk
