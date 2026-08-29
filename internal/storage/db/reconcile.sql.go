@@ -82,8 +82,8 @@ func (q *Queries) AssignVolumeHost(ctx context.Context, arg AssignVolumeHostPara
 }
 
 const createReplica = `-- name: CreateReplica :one
-INSERT INTO replicas (deployment_id, region, cpu_millicores, mem_bytes, alloc_reason)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO replicas (deployment_id, region, cpu_millicores, mem_bytes, alloc_reason, volume_id)
+VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING id, deployment_id, region, host_id, volume_id, cpu_millicores, mem_bytes, alloc_reason, desired_status, phase, healthy, restart_count, last_exit_reason, revision, created_at, updated_at, drained_at, health_checks_passed_at
 `
 
@@ -93,10 +93,13 @@ type CreateReplicaParams struct {
 	CpuMillicores int32          `json:"cpu_millicores"`
 	MemBytes      int64          `json:"mem_bytes"`
 	AllocReason   sql.NullString `json:"alloc_reason"`
+	VolumeID      uuid.NullUUID  `json:"volume_id"`
 }
 
-// Schedule a replica for a (deployment, region). Host/volume are bound after
-// placement is decided; phase/desired_status take their column defaults.
+// Schedule a replica for a (deployment, region). The host is bound after
+// placement is decided; phase/desired_status take their column defaults. A
+// stateful replica binds its volume here at mint time — placement then pins it
+// to the volume's host and the lease acquires against it.
 func (q *Queries) CreateReplica(ctx context.Context, arg CreateReplicaParams) (Replica, error) {
 	row := q.db.QueryRowContext(ctx, createReplica,
 		arg.DeploymentID,
@@ -104,6 +107,7 @@ func (q *Queries) CreateReplica(ctx context.Context, arg CreateReplicaParams) (R
 		arg.CpuMillicores,
 		arg.MemBytes,
 		arg.AllocReason,
+		arg.VolumeID,
 	)
 	var i Replica
 	err := row.Scan(
@@ -176,6 +180,17 @@ const reserveReplicaOnHost = `-- name: ReserveReplicaOnHost :execrows
 UPDATE replicas
 SET host_id = $2, phase = 'scheduling'
 WHERE replicas.id = $1
+  AND EXISTS (
+    SELECT 1 FROM hosts h
+    WHERE h.id = $2
+      AND h.status = 'ready'
+      AND (SELECT coalesce(sum(r.cpu_millicores), 0) FROM replicas r
+           WHERE r.host_id = h.id AND r.phase NOT IN ('reaped', 'failed'))
+          + replicas.cpu_millicores <= h.cpu_millicores
+      AND (SELECT coalesce(sum(r.mem_bytes), 0) FROM replicas r
+           WHERE r.host_id = h.id AND r.phase NOT IN ('reaped', 'failed'))
+          + replicas.mem_bytes <= h.mem_bytes
+  )
 `
 
 type ReserveReplicaOnHostParams struct {
@@ -183,32 +198,48 @@ type ReserveReplicaOnHostParams struct {
 	HostID uuid.NullUUID `json:"host_id"`
 }
 
-// Reserve a replica onto a host. Interim shape: unguarded, pending predicated
-// reservation. The old guard was a CAS on hosts.revision, but a version proxy
-// aborts on ANY occupancy change — two same-pass placements onto one
-// half-empty host conflicted even when both fit. The plan is to carry the real
-// invariant in this UPDATE's WHERE instead:
+// Reserve a replica onto a host — the predicated reservation. The WHERE
+// carries the real invariant (host ready, capacity still sufficient in every
+// dimension) instead of a version proxy: the old hosts.revision CAS aborted on
+// ANY occupancy change, so two same-pass placements onto one half-empty host
+// conflicted even when both fit. Summing live replicas makes the check
+// drift-proof — there is no reserved counter to desync; the rows ARE the
+// ledger. The replica's own row supplies the demand.
 //
-//	AND EXISTS (
-//	  SELECT 1 FROM hosts h
-//	  WHERE h.id = $2 AND h.status = 'ready'
-//	    AND (SELECT coalesce(sum(r.cpu_millicores), 0) FROM replicas r
-//	         WHERE r.host_id = h.id AND r.phase NOT IN ('reaped', 'failed'))
-//	        + <demand cpu> <= h.cpu_millicores
-//	    AND (... same for mem_bytes ...)
-//	)
+// Failed replicas are excluded from the sum: a crashed container consumes
+// nothing, and reapFailedOutgoing deletes the row on its own clock — counting
+// it would block a re-place exactly when one is needed. (The in-memory placer
+// counts them anyway; being more conservative than the belt is safe.)
 //
-// Summing live replicas makes the check drift-proof (no reserved counter to
-// desync) and Postgres's row lock makes check-and-write atomic, so
-// rows-affected = 0 will mean "genuinely doesn't fit / host not ready" — never
-// a false abort. Until then rows-affected = 0 only means the replica row
-// vanished since the snapshot.
+// rows-affected = 0 means the replica vanished, the host stopped being ready,
+// or the demand genuinely no longer fits — all the same answer: drop the
+// placement, next tick recomputes. Concurrency note: the check-and-write is
+// atomic against writers of THIS replica row; placement itself stays
+// single-writer (one engine), which is what makes the uncounted gap between
+// two concurrent reservations onto one host a non-case.
 func (q *Queries) ReserveReplicaOnHost(ctx context.Context, arg ReserveReplicaOnHostParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, reserveReplicaOnHost, arg.ID, arg.HostID)
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const setDeploymentStatus = `-- name: SetDeploymentStatus :exec
+UPDATE deployments SET status = $2 WHERE id = $1
+`
+
+type SetDeploymentStatusParams struct {
+	ID     uuid.UUID `json:"id"`
+	Status string    `json:"status"`
+}
+
+// Flip a deployment's lifecycle status (failed on crash-loop/stall, active on
+// rollout completion). Unconditional: the Reconciler is the only status writer
+// on the reconcile path, and re-asserting the same status is harmless.
+func (q *Queries) SetDeploymentStatus(ctx context.Context, arg SetDeploymentStatusParams) error {
+	_, err := q.db.ExecContext(ctx, setDeploymentStatus, arg.ID, arg.Status)
+	return err
 }
 
 const setReplicaDesiredStatus = `-- name: SetReplicaDesiredStatus :exec

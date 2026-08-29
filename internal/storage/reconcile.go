@@ -22,14 +22,16 @@ import (
 var ErrConflict = errors.New("conflict")
 
 // ReplicaSpec is the desired shape of a replica the Reconciler places for a
-// deployment in a region. Host and volume are bound afterwards, once placement
-// is decided.
+// deployment in a region. The host is bound afterwards, once placement is
+// decided; a stateful replica's volume binds at mint time (VolumeID zero for
+// stateless).
 type ReplicaSpec struct {
 	DeploymentID  uuid.UUID
 	Region        string
 	CPUMillicores int32
 	MemBytes      int64
 	AllocReason   string
+	VolumeID      uuid.UUID
 }
 
 // ReconcileTx is the set of writes that must commit together to keep the fleet's
@@ -42,11 +44,10 @@ type ReconcileTx interface {
 	ActiveVolumeLease(ctx context.Context, volumeID uuid.UUID) (db.VolumeLease, error)
 
 	CreateReplica(ctx context.Context, spec ReplicaSpec) (db.Replica, error)
-	// AssignReplicaHost reserves the replica onto the host. Interim: unguarded
-	// (single placement writer). Will become predicated reservation — the
-	// UPDATE's WHERE carrying "capacity still sufficient" so only genuinely
-	// infeasible placements return ErrConflict; see ReserveReplicaOnHost in
-	// queries/reconcile.sql for the full sketch.
+	// AssignReplicaHost reserves the replica onto the host via predicated
+	// reservation: the UPDATE's WHERE re-checks "host ready, capacity still
+	// sufficient" at commit time, so ErrConflict means the placement is
+	// genuinely infeasible (or the replica vanished) — never a false abort.
 	AssignReplicaHost(ctx context.Context, replicaID, hostID uuid.UUID) error
 
 	AssignVolumeHost(ctx context.Context, volumeID, hostID uuid.UUID) error
@@ -60,6 +61,11 @@ type ReconcileTx interface {
 
 	ReleaseVolumeLease(ctx context.Context, volumeID uuid.UUID) error
 	DeleteReplica(ctx context.Context, replicaID uuid.UUID) error
+
+	// SetDeploymentStatus flips a deployment's lifecycle status (failed on
+	// crash-loop/stall, active on completion). Unconditional — the reconcile
+	// path is the only status writer, so there is no race to guard.
+	SetDeploymentStatus(ctx context.Context, deploymentID uuid.UUID, status domain.DeploymentStatus) error
 
 	// SetServedRevision flips the slot's traffic switch to deploymentID. Must
 	// share the tx with the outgoing drain batch so the blue/green shift is
@@ -92,6 +98,7 @@ func (q querier) CreateReplica(ctx context.Context, spec ReplicaSpec) (db.Replic
 		CpuMillicores: spec.CPUMillicores,
 		MemBytes:      spec.MemBytes,
 		AllocReason:   nullString(spec.AllocReason),
+		VolumeID:      uuid.NullUUID{UUID: spec.VolumeID, Valid: spec.VolumeID != uuid.Nil},
 	})
 	// The composite FK to deployment_regions rejects a (deployment, region) the
 	// user never declared — surface it as a missing target, not a driver error.
@@ -109,10 +116,11 @@ func (q querier) AssignReplicaHost(ctx context.Context, replicaID, hostID uuid.U
 	if err != nil {
 		return err
 	}
-	// Zero rows = the replica vanished since the snapshot: still a stale
-	// decision, same next-tick self-heal as a lost CAS.
+	// Zero rows = the predicate rejected the reservation: the replica vanished,
+	// the host left ready, or the capacity the placer saw is gone. Same
+	// next-tick self-heal as a lost CAS.
 	if n == 0 {
-		slog.Debug("reconcile: replica gone, dropping placement", "replica", replicaID, "host", hostID)
+		slog.Debug("reconcile: reservation rejected, dropping placement", "replica", replicaID, "host", hostID)
 		return ErrConflict
 	}
 	return nil
@@ -170,6 +178,13 @@ func (q querier) ReleaseVolumeLease(ctx context.Context, volumeID uuid.UUID) err
 
 func (q querier) DeleteReplica(ctx context.Context, replicaID uuid.UUID) error {
 	return q.queries.DeleteReplica(ctx, replicaID)
+}
+
+func (q querier) SetDeploymentStatus(ctx context.Context, deploymentID uuid.UUID, status domain.DeploymentStatus) error {
+	return q.queries.SetDeploymentStatus(ctx, db.SetDeploymentStatusParams{
+		ID:     deploymentID,
+		Status: string(status),
+	})
 }
 
 func (q querier) SetServedRevision(ctx context.Context, environmentServiceID uuid.UUID, region string, deploymentID uuid.UUID) error {
