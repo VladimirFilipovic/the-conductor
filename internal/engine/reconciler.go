@@ -28,27 +28,22 @@ type Intent struct {
 	ReplicaID uuid.UUID
 }
 
-// replicaSlot is the reconcile grouping key; comparable, so it indexes maps
-// directly
 type replicaSlot struct {
 	EnvironmentServiceID uuid.UUID
 	Region               string
 }
 
 type replicaGroup struct {
-	// Desired is zero apart from Slot when the current deployment no longer
-	// declares this slot — the group then only exists to drain its replicas.
 	Desired          desiredState
 	TargetReplicas   []replica
 	OutgoingReplicas []replica
-	// ObservedAt is the snapshot's frozen "now", so time-based rules stay pure
-	// functions of their input instead of reaching for a live clock.
+	// ObservedAt is the snapshot's frozen "now", copied onto every group so
+	// time-based rules (progress deadline, drain window) stay pure functions of
+	// their input instead of reaching for a live clock.
 	ObservedAt time.Time
 }
 
 type rule struct {
-	// name feeds the reconcile log: which rule decided a group's tick is the
-	// most useful debugging fact the engine can emit.
 	name string
 	when func(rg replicaGroup) bool
 	then func(rg replicaGroup) []Intent
@@ -56,10 +51,9 @@ type rule struct {
 
 // Reconciler buckets the snapshot into replica groups, diffs desired vs
 // observed per group, and decides what should change. Pure: no storage
-// access, so strategies stay unit-testable.
+// access just returns Intents which represent action that need to be taken
+// to get the wanted deployment state
 type Reconciler struct {
-	// Fields so tests can inject stub rules and exercise dispatch mechanics
-	// (cascade selection, first-match break) in isolation.
 	rolling  []rule // stateless replicas
 	recreate []rule // stateful replicas
 	orphan   []rule // slots the current deployment no longer declares: drain-only
@@ -88,8 +82,8 @@ func buildReplicaGroups(snap stateSnapshot) []replicaGroup {
 	for _, r := range snap.replicas {
 		b := replicaIndex[r.Slot]
 		// A drained current replica (scale-down excess) is retiring, not
-		// converging: bucket as outgoing so it flows through drain/reap instead
-		// of holding the health gate forever.
+		// converging: bucket it as outgoing so it flows through drain/reap like a
+		// superseded one, instead of holding the health gate forever.
 		if r.Current && r.DrainedAt.IsZero() {
 			b.target = append(b.target, r)
 		} else {
@@ -110,8 +104,9 @@ func buildReplicaGroups(snap stateSnapshot) []replicaGroup {
 		})
 	}
 
-	// Leftover slots the current deployment no longer declares (a region dropped
-	// between versions) still need a group so they drain instead of leaking.
+	// Leftover slots the current deployment no longer declares — a region
+	// dropped between versions. They still need a group, with a zero replica
+	// target, so the Reconciler drains them instead of leaking them forever.
 	for slot, b := range replicaIndex {
 		groups = append(groups, replicaGroup{
 			Desired:          desiredState{Slot: slot},
@@ -171,15 +166,12 @@ func logRuleFired(rg replicaGroup, ruleName string, out []Intent) {
 // Cascades list rules in tick-priority order; planIntents runs the first whose
 // `when` matches and stops (one active rule per group per tick).
 
-// rolling: stateless. Shared gates → create-before-retire (surge), then retire.
 var rollingCascade = []rule{
-	// shared gates (both strategies)
 	deploymentFrozen,          // status failed → hold everything until unlock
 	crashLooping,              // restart_count > restart_max → fail, freeze
 	anyHostlessReplicas,       // target lost its host → re-place
 	newHealthOpenPastDeadline, // health gate open too long → fail (stalled)
 	notAllHealthy,             // newest not yet healthy, within deadline → hold
-	// rolling-specific: ramp/shrink to count, then retire outgoing
 	rollingRampUp,      // below desired → create (canary first, then batch)
 	rollingScaleDown,   // above desired → drain excess target
 	rolloutComplete,    // at desired & all outgoing reaped → status active
@@ -209,12 +201,11 @@ var recreateCascade = []rule{
 // restart. Their only job is draining leftovers.
 var orphanCascade = []rule{drainOutgoing, reapDrained, reapFailedOutgoing}
 
-// deploymentFrozen: failed is terminal — hold the whole group until a
-// rollback/redeploy re-points the deployment. Sitting first, it carries the
-// "not failed" precondition for every rule below. One exception: failed target
-// replicas are destroyed, since a dead container only squats on its host
-// reservation. With nothing to sweep it emits an explicit skip so the held
-// state stays legible downstream.
+// deploymentFrozen: failed is terminal for the reconciler — hold the whole
+// group (no re-fail, no re-placement, no un-freeze via rolloutComplete) until
+// a rollback/redeploy re-points the deployment. Sitting at the top of the
+// cascade, it carries the "not failed" precondition for every rule below, so
+// none of them checks the status itself.
 var deploymentFrozen = rule{
 	name: "deploymentFrozen",
 	when: func(rg replicaGroup) bool {
@@ -234,8 +225,6 @@ var deploymentFrozen = rule{
 	},
 }
 
-// crashLooping trips the deployment to failed once any new replica exceeds its
-// restart_max. deploymentFrozen ahead of it stops the re-emit on later ticks.
 var crashLooping = rule{
 	name: "crashLooping",
 	when: func(rg replicaGroup) bool {
@@ -272,10 +261,6 @@ var anyHostlessReplicas = rule{
 	},
 }
 
-// newHealthOpenPastDeadline: a target alive past progress_deadline that never
-// passed its health probe → fail (stalled), else it blocks the rollout forever.
-// HealthChecksPassedAt is a once-only high-water mark, so healthy-then-crashed
-// is NOT stalled.
 var newHealthOpenPastDeadline = rule{
 	name: "newHealthOpenPastDeadline",
 	when: func(rg replicaGroup) bool {
@@ -292,9 +277,11 @@ var newHealthOpenPastDeadline = rule{
 	},
 }
 
-// notAllHealthy gates ramp-up/scale-down/complete while any target replica is
-// not yet healthy (within deadline). Explicit skip keeps the held state legible
-// downstream instead of an ambiguous empty result.
+// notAllHealthy: holds the group while any current-revision target replica is
+// not yet healthy (and within progress_deadline — past it, newHealthOpenPastDeadline
+// has already failed the deploy). Gates ramp-up/scale-down/complete until the
+// whole target set is healthy. Emits an explicit skip so the group's held state
+// is legible downstream instead of an ambiguous empty result.
 var notAllHealthy = rule{
 	name: "notAllHealthy",
 	when: func(rg replicaGroup) bool {
@@ -303,18 +290,20 @@ var notAllHealthy = rule{
 	then: func(rg replicaGroup) []Intent { return []Intent{{Kind: IntentSkip, Group: rg.Desired.Slot}} },
 }
 
-// rollingRampUp: below desired → canary-then-batch. The first replica of a
-// revision carries the whole validation risk (a DOA version costs one zombie,
-// not N); once any target proves healthy the rest of the deficit comes up in
-// one batch.
+// rollingRampUp: fewer healthy target replicas than desired → canary-then-batch.
+// The first replica of a revision carries the whole validation risk: a DOA
+// version costs one zombie, not N. Once any target proves healthy the version
+// is validated — later replicas failing is environmental (host, capacity) and
+// other rules own that — so the rest of the deficit comes up in one batch.
 var rollingRampUp = rule{
 	name: "rollingRampUp",
 	when: func(rg replicaGroup) bool {
 		return healthyTargets(rg) < rg.Desired.Replicas
 	},
 	then: func(rg replicaGroup) []Intent {
-		// notAllHealthy above guarantees zero healthy means zero targets:
-		// unproven revision → canary.
+		// notAllHealthy rule above guarantees every existing target is healthy here,
+		// so zero healthy means zero targets it is indicator to us 
+		// that this revision is unproven → canary.
 		n := rg.Desired.Replicas - healthyTargets(rg)
 		if healthyTargets(rg) == 0 {
 			n = 1
@@ -337,7 +326,6 @@ func healthyTargets(rg replicaGroup) int32 {
 	return n
 }
 
-// rollingScaleDown: more target replicas than desired → drain the excess to reap.
 var rollingScaleDown = rule{
 	name: "rollingScaleDown",
 	when: func(rg replicaGroup) bool {
@@ -358,13 +346,12 @@ var rollingScaleDown = rule{
 	},
 }
 
-// rolloutComplete: count at desired and every outgoing replica reaped — the
-// rollout has fully converged → mark the deployment active.
 var rolloutComplete = rule{
 	name: "rolloutComplete",
 	when: func(rg replicaGroup) bool {
-		// Already active → converged on an earlier tick; don't re-emit complete
-		// forever. (The failed case is deploymentFrozen's job.)
+		// Cross-tick idempotency ordering can't carry: already active → converged
+		// on some earlier tick, don't re-emit complete forever. (The failed case is
+		// deploymentFrozen's job at the top of the cascade.)
 		if rg.Desired.Status == domain.DeploymentActive {
 			return false
 		}
@@ -373,10 +360,6 @@ var rolloutComplete = rule{
 	then: func(rg replicaGroup) []Intent { return []Intent{{Kind: IntentComplete, Group: rg.Desired.Slot}} },
 }
 
-// drainOutgoing: retirable outgoing replicas drain in one batch — nothing
-// routes traffic to them, and recreate's lease wait depends on the old side
-// going down promptly. Shared by all cascades; terminal replicas are never
-// drained.
 var drainOutgoing = rule{
 	name: "drainOutgoing",
 	when: func(rg replicaGroup) bool {
@@ -397,9 +380,6 @@ func drainable(rp replica) bool {
 	return rp.Phase != domain.ReplicaPhaseDraining && !rp.Phase.Terminal()
 }
 
-// reapDrained: drain window elapsed → destroy. The single terminal transition
-// for both rollout and scale-down drains. DrainSeconds is read per replica: an
-// outgoing keeps its own deployment's graceful window, not the target's.
 var reapDrained = rule{
 	name: "reapDrained",
 	when: func(rg replicaGroup) bool {
@@ -418,10 +398,11 @@ var reapDrained = rule{
 	},
 }
 
-// reapFailedOutgoing: a failed outgoing serves nothing yet holds its host
-// reservation and blocks the len(outgoing)==0 convergence checks → destroy
-// directly, no drain window (no traffic to bleed off a crashed container).
-// Failed TARGET replicas are deploymentFrozen's job.
+// reapFailedOutgoing: a failed outgoing replica is a dead container from a
+// superseded revision — it serves nothing, drains nothing, yet still holds its
+// host reservation and blocks the len(outgoing)==0 convergence checks
+// (rolloutComplete, recreate's lease-free gate). Destroy it directly: no drain
+// window, there is no traffic to bleed off a crashed container.
 var reapFailedOutgoing = rule{
 	name: "reapFailedOutgoing",
 	when: func(rg replicaGroup) bool {
@@ -447,9 +428,7 @@ func drainWindowElapsed(rp replica, now time.Time) bool {
 	return now.Sub(rp.DrainedAt) > time.Duration(rp.DrainSeconds)*time.Second
 }
 
-// recreateRampUp: lease free (all outgoing reaped) and below desired → create
-// the whole deficit. No canary: retire-before-create already serialized the
-// rollout, and every tick of downtime costs availability.
+// no canary, previous version already destroyed, no risk in creating new version
 var recreateRampUp = rule{
 	name: "recreateRampUp",
 	when: func(rg replicaGroup) bool {
@@ -465,11 +444,6 @@ var recreateRampUp = rule{
 	},
 }
 
-// recreateScaleDown reuses rollingScaleDown: draining the newest excess is
-// version-agnostic — the actuator frees the volume lease on reap. Distinct name
-// so the reconcile log attributes the tick to the recreate cascade.
 var recreateScaleDown = rule{name: "recreateScaleDown", when: rollingScaleDown.when, then: rollingScaleDown.then}
 
-// recreateComplete reuses rolloutComplete: convergence reads the same for both
-// strategies. Distinct name for reconcile log attribution.
 var recreateComplete = rule{name: "recreateComplete", when: rolloutComplete.when, then: rolloutComplete.then}
