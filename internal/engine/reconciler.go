@@ -5,6 +5,7 @@ import (
 	"slices"
 	"time"
 
+	"conductor/internal/config"
 	"conductor/internal/domain"
 
 	"github.com/google/uuid"
@@ -20,12 +21,42 @@ const (
 	IntentAssignHost IntentKind = "assign_host"
 	IntentSkip       IntentKind = "skip"
 	IntentComplete   IntentKind = "complete"
+	// IntentPlaceVolume binds a hostless volume to a host. Emitted only by the
+	// placer — the rules cascade knows lifecycle, not geometry.
+	IntentPlaceVolume IntentKind = "place_volume"
 )
 
+// Intent is the complete decision record handed to the Actuator: everything a
+// commit needs rides on the intent, so the Actuator maps kinds to tx calls
+// without re-reading state (it commits, it never decides).
 type Intent struct {
 	Kind      IntentKind
 	Group     replicaSlot
 	ReplicaID uuid.UUID
+	// HostID is set only by the placer, on assign_host and place_volume
+	// intents; zero everywhere else.
+	HostID uuid.UUID
+	// VolumeID is the volume a place_volume intent binds, the lease to acquire
+	// on a stateful assign_host, and the lease to release on destroy.
+	VolumeID uuid.UUID
+	// DeploymentID targets deployment-level writes: the parent for create, the
+	// status flip for fail/complete, and the revision traffic switches to on a
+	// SwitchTraffic drain or a complete.
+	DeploymentID uuid.UUID
+	// Revision is the replica's snapshot revision — the CAS guard on phase
+	// writes (drain), so a decision made against a row the Sensor has since
+	// moved is dropped instead of clobbering.
+	Revision int64
+	// CPUMillicores/MemBytes carry the create spec so the Actuator mints the
+	// replica row from the intent alone.
+	CPUMillicores int32
+	MemBytes      int64
+	// SwitchTraffic marks a drain that retires a superseded revision: the
+	// Actuator commits the slot's whole drain batch plus the served-revision
+	// flip to DeploymentID in ONE tx, so traffic leaves the old side atomically
+	// with draining it. Scale-down drains never set it — excess replicas of the
+	// serving revision retire without moving the pointer.
+	SwitchTraffic bool
 }
 
 type replicaSlot struct {
@@ -34,7 +65,12 @@ type replicaSlot struct {
 }
 
 type replicaGroup struct {
-	Desired          desiredState
+	Desired desiredState
+	// Volume is the service's volume in this slot's region; zero when none.
+	// Stateful creates bind it onto the replica row, which is what lets the
+	// placer pin the replica to the volume's host and the actuator acquire the
+	// single-writer lease.
+	Volume           volume
 	TargetReplicas   []replica
 	OutgoingReplicas []replica
 	// ObservedAt is the snapshot's frozen "now", copied onto every group so
@@ -57,20 +93,23 @@ type Reconciler struct {
 	rolling  []rule // stateless replicas
 	recreate []rule // stateful replicas
 	orphan   []rule // slots the current deployment no longer declares: drain-only
+	placer   placer // WHERE: fills HostID on assign_host, places hostless volumes
 }
 
-func NewReconciler() *Reconciler {
+func NewReconciler(placement config.Placement) *Reconciler {
 	return &Reconciler{
 		rolling:  rollingCascade,
 		recreate: recreateCascade,
 		orphan:   orphanCascade,
+		placer:   placer{cfg: placement},
 	}
 }
 
-// TODO: feed each group to the rollout orchestrator to produce intents,
-// bin-pack creates onto hosts. See docs/rollout-strategy.md.
 func (r *Reconciler) Reconcile(snap stateSnapshot) []Intent {
-	return r.planIntents(buildReplicaGroups(snap))
+	intents := r.planIntents(buildReplicaGroups(snap))
+	intents = r.placer.placeHostless(snap, intents)
+	intents = append(intents, r.placer.placeVolumes(snap)...)
+	return intents
 }
 
 func buildReplicaGroups(snap stateSnapshot) []replicaGroup {
@@ -92,12 +131,22 @@ func buildReplicaGroups(snap stateSnapshot) []replicaGroup {
 		replicaIndex[r.Slot] = b
 	}
 
+	type volumeKey struct {
+		serviceID uuid.UUID
+		region    string
+	}
+	volumeIndex := make(map[volumeKey]volume, len(snap.volumes))
+	for _, v := range snap.volumes {
+		volumeIndex[volumeKey{v.ServiceID, v.Region}] = v
+	}
+
 	groups := make([]replicaGroup, 0, len(snap.desired))
 	for _, d := range snap.desired {
 		b := replicaIndex[d.Slot]
 		delete(replicaIndex, d.Slot)
 		groups = append(groups, replicaGroup{
 			Desired:          d,
+			Volume:           volumeIndex[volumeKey{d.ServiceID, d.Slot.Region}],
 			TargetReplicas:   b.target,
 			OutgoingReplicas: b.outgoing,
 			ObservedAt:       snap.observedAt,
@@ -215,7 +264,7 @@ var deploymentFrozen = rule{
 		var intents []Intent
 		for _, r := range rg.TargetReplicas {
 			if failedPhase(r) {
-				intents = append(intents, Intent{Kind: IntentDestroy, ReplicaID: r.ID})
+				intents = append(intents, Intent{Kind: IntentDestroy, ReplicaID: r.ID, VolumeID: r.VolumeID})
 			}
 		}
 		if len(intents) == 0 {
@@ -236,25 +285,22 @@ var crashLooping = rule{
 		return false
 	},
 	then: func(rg replicaGroup) []Intent {
-		return []Intent{{Kind: IntentFail, Group: rg.Desired.Slot}}
+		return []Intent{{Kind: IntentFail, Group: rg.Desired.Slot, DeploymentID: rg.Desired.DeploymentID}}
 	},
 }
 
 var anyHostlessReplicas = rule{
 	name: "anyHostlessReplicas",
 	when: func(rg replicaGroup) bool {
-		for _, rp := range rg.TargetReplicas {
-			if rp.HostID == uuid.Nil {
-				return true
-			}
-		}
-		return false
+		return slices.ContainsFunc(rg.TargetReplicas, hostless)
 	},
 	then: func(rg replicaGroup) []Intent {
 		intents := []Intent{}
 		for _, rp := range rg.TargetReplicas {
-			if rp.HostID == uuid.Nil {
-				intents = append(intents, Intent{Kind: IntentAssignHost, ReplicaID: rp.ID})
+			if hostless(rp) {
+				// VolumeID rides along so the actuator (re-)acquires the
+				// single-writer lease in the same tx that binds the host.
+				intents = append(intents, Intent{Kind: IntentAssignHost, ReplicaID: rp.ID, VolumeID: rp.VolumeID})
 			}
 		}
 		return intents
@@ -273,7 +319,7 @@ var newHealthOpenPastDeadline = rule{
 		return false
 	},
 	then: func(rg replicaGroup) []Intent {
-		return []Intent{{Kind: IntentFail, Group: rg.Desired.Slot}}
+		return []Intent{{Kind: IntentFail, Group: rg.Desired.Slot, DeploymentID: rg.Desired.DeploymentID}}
 	},
 }
 
@@ -301,16 +347,23 @@ var rollingRampUp = rule{
 		return healthyTargets(rg) < rg.Desired.Replicas
 	},
 	then: func(rg replicaGroup) []Intent {
-		// notAllHealthy rule above guarantees every existing target is healthy here,
-		// so zero healthy means zero targets it is indicator to us 
-		// that this revision is unproven → canary.
+		// notAllHealthy above guarantees every existing target is healthy here,
+		// so zero healthy means zero targets: the revision is unproven → canary.
 		n := rg.Desired.Replicas - healthyTargets(rg)
 		if healthyTargets(rg) == 0 {
 			n = 1
 		}
 		intents := make([]Intent, n)
 		for i := range intents {
-			intents[i] = Intent{Kind: IntentCreate, Group: rg.Desired.Slot}
+			// Full replica spec rides the intent so the actuator mints the row
+			// alone (hostless — the placer binds a host next tick).
+			intents[i] = Intent{
+				Kind:          IntentCreate,
+				Group:         rg.Desired.Slot,
+				DeploymentID:  rg.Desired.DeploymentID,
+				CPUMillicores: rg.Desired.CPUMillicores,
+				MemBytes:      rg.Desired.MemBytes,
+			}
 		}
 		return intents
 	},
@@ -340,7 +393,7 @@ var rollingScaleDown = rule{
 			return b.CreatedAt.Compare(a.CreatedAt)
 		})
 		for i := range intents {
-			intents[i] = Intent{Kind: IntentDrain, ReplicaID: sortedReplicas[i].ID}
+			intents[i] = Intent{Kind: IntentDrain, ReplicaID: sortedReplicas[i].ID, Revision: sortedReplicas[i].Revision}
 		}
 		return intents
 	},
@@ -357,7 +410,9 @@ var rolloutComplete = rule{
 		}
 		return healthyTargets(rg) == rg.Desired.Replicas && len(rg.OutgoingReplicas) == 0
 	},
-	then: func(rg replicaGroup) []Intent { return []Intent{{Kind: IntentComplete, Group: rg.Desired.Slot}} },
+	then: func(rg replicaGroup) []Intent {
+		return []Intent{{Kind: IntentComplete, Group: rg.Desired.Slot, DeploymentID: rg.Desired.DeploymentID}}
+	},
 }
 
 var drainOutgoing = rule{
@@ -366,10 +421,22 @@ var drainOutgoing = rule{
 		return slices.ContainsFunc(rg.OutgoingReplicas, drainable)
 	},
 	then: func(rg replicaGroup) []Intent {
+		// Retiring a superseded revision is the blue/green traffic-switch
+		// moment: the batch carries the current deployment so the actuator
+		// flips served_revisions in the same tx. Orphan slots have no current
+		// deployment — nothing to switch to, plain drain.
+		switchTraffic := rg.Desired.DeploymentID != uuid.Nil
 		var intents []Intent
 		for _, or := range rg.OutgoingReplicas {
 			if drainable(or) {
-				intents = append(intents, Intent{Kind: IntentDrain, ReplicaID: or.ID})
+				intents = append(intents, Intent{
+					Kind:          IntentDrain,
+					Group:         rg.Desired.Slot,
+					ReplicaID:     or.ID,
+					Revision:      or.Revision,
+					DeploymentID:  rg.Desired.DeploymentID,
+					SwitchTraffic: switchTraffic,
+				})
 			}
 		}
 		return intents
@@ -391,7 +458,7 @@ var reapDrained = rule{
 		var intents []Intent
 		for _, or := range rg.OutgoingReplicas {
 			if drainWindowElapsed(or, rg.ObservedAt) {
-				intents = append(intents, Intent{Kind: IntentDestroy, ReplicaID: or.ID})
+				intents = append(intents, Intent{Kind: IntentDestroy, ReplicaID: or.ID, VolumeID: or.VolumeID})
 			}
 		}
 		return intents
@@ -412,7 +479,7 @@ var reapFailedOutgoing = rule{
 		var intents []Intent
 		for _, or := range rg.OutgoingReplicas {
 			if failedPhase(or) {
-				intents = append(intents, Intent{Kind: IntentDestroy, ReplicaID: or.ID})
+				intents = append(intents, Intent{Kind: IntentDestroy, ReplicaID: or.ID, VolumeID: or.VolumeID})
 			}
 		}
 		return intents
@@ -420,6 +487,8 @@ var reapFailedOutgoing = rule{
 }
 
 func failedPhase(rp replica) bool { return rp.Phase == domain.ReplicaPhaseFailed }
+
+func hostless(rp replica) bool { return rp.HostID == uuid.Nil }
 
 func drainWindowElapsed(rp replica, now time.Time) bool {
 	if rp.DrainedAt.IsZero() {
@@ -438,7 +507,17 @@ var recreateRampUp = rule{
 		n := rg.Desired.Replicas - healthyTargets(rg)
 		intents := make([]Intent, n)
 		for i := range intents {
-			intents[i] = Intent{Kind: IntentCreate, Group: rg.Desired.Slot}
+			// Stateful create binds the slot's volume onto the replica row,
+			// pinning every downstream decision to it: placement to the
+			// volume's host, the single-writer lease.
+			intents[i] = Intent{
+				Kind:          IntentCreate,
+				Group:         rg.Desired.Slot,
+				DeploymentID:  rg.Desired.DeploymentID,
+				CPUMillicores: rg.Desired.CPUMillicores,
+				MemBytes:      rg.Desired.MemBytes,
+				VolumeID:      rg.Volume.ID,
+			}
 		}
 		return intents
 	},

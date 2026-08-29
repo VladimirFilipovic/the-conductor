@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,7 +15,13 @@ import (
 	"conductor/internal/storage"
 )
 
-func Run(_ []string) int {
+func Run(args []string) int {
+	fs := flag.NewFlagSet("engine", flag.ContinueOnError)
+	placement := config.PlacementFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "engine: %v\n", err)
@@ -50,7 +57,7 @@ func Run(_ []string) int {
 	// Sensor still wires a zero store — its SensorStore methods aren't on the
 	// Postgres client yet; it gets a real store once those land.
 	sensor := engine.Sensor{}
-	eng := engine.New(client, engine.NewReconciler(), engine.NewActuator(client))
+	eng := engine.New(client, engine.NewReconciler(*placement), engine.NewActuator(client))
 
 	if err := engine.Run(ctx, eng, &sensor); err != nil {
 		fmt.Fprintln(os.Stderr, err)

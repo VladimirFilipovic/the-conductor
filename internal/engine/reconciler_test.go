@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"conductor/internal/config"
 	"conductor/internal/domain"
 
 	"github.com/google/uuid"
@@ -281,7 +282,7 @@ func TestFailedGroupOnlySkipsThroughCascade(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := NewReconciler().planIntents([]replicaGroup{{
+			got := NewReconciler(config.DefaultPlacement()).planIntents([]replicaGroup{{
 				Desired: desiredState{
 					Slot:         slot,
 					DeploymentID: deploymentID,
@@ -333,7 +334,7 @@ func TestScaleDownExcessReapsThroughCascade(t *testing.T) {
 		},
 	}
 
-	got := NewReconciler().Reconcile(snap)
+	got := NewReconciler(config.DefaultPlacement()).Reconcile(snap)
 	want := []Intent{{Kind: IntentDestroy, ReplicaID: excess.ID}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Reconcile() = %v, want %v", got, want)

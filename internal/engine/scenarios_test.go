@@ -1,25 +1,32 @@
 package engine
 
-// Multi-tick rollout scenarios: the Reconciler is a pure single-tick function,
-// so a small simulator applies each tick's intents back onto the snapshot the
-// way the actuator would; sensor events and the clock advance explicitly, so a
+// Multi-tick rollout scenarios through Reconcile. The Reconciler is a pure
+// single-tick function, so these tests drive it with a small simulator: each
+// tick reconciles the current snapshot and applies the resulting intents back
+// onto it the way the actuator would (create → new booting replica, drain →
+// DrainedAt stamp, destroy → gone from the snapshot). Sensor events (health
+// probes, crashes) and the clock are advanced explicitly between ticks, so a
 // scenario reads as a timeline.
 //
-// TODO: once the Actuator exists, promote these to end-to-end tests (stubbed
-// store, real sensor → reconciler → actuator tick); apply() below is the
-// contract those tests will hold the real actuator to.
+// These stay decision-level on purpose: they assert the intent stream, with a
+// fake clock, so timing rules (drain windows, progress deadlines) are testable
+// without waiting. The real end-to-end coverage — actual engine tick over a
+// stub store, sensor → snapshot → reconciler → actuator, asserting committed
+// state — lives in e2e_test.go.
 
 import (
 	"slices"
 	"testing"
 	"time"
 
+	"conductor/internal/config"
 	"conductor/internal/domain"
 
 	"github.com/google/uuid"
 )
 
-// Graceful window every sim replica carries; scenarios advance past it to reap.
+// simDrainSeconds is the graceful window every sim replica carries; scenarios
+// advance past it with advance(simDrainSeconds*time.Second + ...).
 const simDrainSeconds = 30
 
 type sim struct {
@@ -28,13 +35,15 @@ type sim struct {
 	now      time.Time
 	desired  []desiredState
 	replicas []replica
+	hosts    []host
 }
 
 func newSim(t *testing.T) *sim {
-	return &sim{t: t, r: NewReconciler(), now: time.Unix(1_000_000, 0)}
+	return &sim{t: t, r: NewReconciler(config.DefaultPlacement()), now: time.Unix(1_000_000, 0)}
 }
 
 func (s *sim) declare(slot replicaSlot, deploymentID uuid.UUID, n int32, stateful bool, status domain.DeploymentStatus) {
+	s.ensureHost(slot.Region)
 	s.desired = append(s.desired, desiredState{
 		Slot:             slot,
 		DeploymentID:     deploymentID,
@@ -46,8 +55,9 @@ func (s *sim) declare(slot replicaSlot, deploymentID uuid.UUID, n int32, statefu
 	})
 }
 
-// seedHealthy plants n established, serving replicas; CreatedAt staggers
-// ascending so newest-first ordering is deterministic (last ID is newest).
+// seedHealthy plants n established, serving replicas for deploymentID.
+// CreatedAt is staggered ascending so "newest first" ordering is
+// deterministic: the last returned ID is the newest.
 func (s *sim) seedHealthy(slot replicaSlot, deploymentID uuid.UUID, n int) []uuid.UUID {
 	ids := make([]uuid.UUID, n)
 	for i := range ids {
@@ -86,12 +96,32 @@ func (s *sim) seedOutgoing(slot replicaSlot) uuid.UUID {
 	return id
 }
 
+// ensureHost gives the region one huge host so the placer has somewhere to
+// put re-placed replicas — geometry stays out of lifecycle scenarios.
+func (s *sim) ensureHost(region string) {
+	for _, h := range s.hosts {
+		if h.Region == region {
+			return
+		}
+	}
+	s.hosts = append(s.hosts, host{
+		ID:            uuid.New(),
+		Region:        region,
+		CPUMillicores: 1 << 20,
+		MemBytes:      1 << 40,
+		DiskBytes:     1 << 40,
+	})
+}
+
+// tick reconciles the current snapshot and applies the intents, mimicking one
+// engine pass.
 func (s *sim) tick() []Intent {
 	s.t.Helper()
 	intents := s.r.Reconcile(stateSnapshot{
 		observedAt: s.now,
 		desired:    s.desired,
 		replicas:   s.replicas,
+		hosts:      s.hosts,
 	})
 	s.apply(intents)
 	return intents
@@ -113,8 +143,9 @@ func (s *sim) tickExpect(want ...IntentKind) []Intent {
 	return got
 }
 
-// apply is the sim's actuator model. Placement is instant — scheduling is the
-// real actuator's concern; modelling it would pad scenarios with assign_host ticks.
+// apply is the sim's actuator model. Placement is instant (created replicas
+// get a host immediately) — scheduling is the real actuator's concern, and
+// modelling it here would just pad every scenario with assign_host ticks.
 func (s *sim) apply(intents []Intent) {
 	s.t.Helper()
 	for _, it := range intents {
@@ -142,7 +173,7 @@ func (s *sim) apply(intents []Intent) {
 		case IntentComplete:
 			s.slotDesired(it.Group).Status = domain.DeploymentActive
 		case IntentAssignHost:
-			s.replicaByID(it.ReplicaID).HostID = uuid.New()
+			s.replicaByID(it.ReplicaID).HostID = it.HostID
 		case IntentSkip:
 		}
 	}
@@ -176,9 +207,10 @@ func (s *sim) crashPastBudget(slot replicaSlot) {
 
 func (s *sim) advance(d time.Duration) { s.now = s.now.Add(d) }
 
-// loseHost: the host dies and takes the container — unplaced AND back to
-// booting. The health high-water mark survives (it passed probes once), so the
-// progress-deadline gate doesn't mistake a re-placed veteran for a stalled rollout.
+// loseHost is the chaos event for a died/drained host: the replica's container
+// is gone with it, so it is unplaced AND back to booting. Its health high-water
+// mark survives (it did pass probes once), so the progress-deadline gate does
+// not mistake a re-placed veteran for a stalled rollout.
 func (s *sim) loseHost(id uuid.UUID) {
 	r := s.replicaByID(id)
 	r.HostID = uuid.Nil
@@ -192,6 +224,7 @@ func (s *sim) vanish(id uuid.UUID) {
 	s.replicas = slices.DeleteFunc(s.replicas, func(r replica) bool { return r.ID == id })
 }
 
+// markUnhealthy is the sensor event for a failing probe on a live replica.
 func (s *sim) markUnhealthy(id uuid.UUID) {
 	s.replicaByID(id).Healthy = false
 }
@@ -274,7 +307,8 @@ func (s *sim) assertStatus(slot replicaSlot, want domain.DeploymentStatus) {
 	}
 }
 
-// The invariant every converged scenario must end on: no replica left hostless.
+// assertAllPlaced: the invariant every converged scenario must end on — no
+// replica left without a host.
 func (s *sim) assertAllPlaced(slot replicaSlot) {
 	s.t.Helper()
 	for _, r := range s.replicas {
@@ -532,10 +566,12 @@ func TestScenarioHostLossDuringRollout(t *testing.T) {
 	s.tickExpect() // steady state
 }
 
-// Two of three replicas vanish without a trace: the survivor keeps the version
-// proven, so the WHOLE deficit heals in one tick — no canary re-proof, no
-// re-complete (already active). Deficit of two because a single create couldn't
-// tell batch from canary.
+// Two of three replicas vanish without a trace (host disk gone, sensor reaped
+// the rows): the fleet self-heals with the WHOLE deficit in one tick — one
+// survivor keeps the version proven, so no canary re-proof (which would emit a
+// single create and wait). No re-complete either: the deployment is already
+// active. A deficit of one couldn't tell batch from canary — both emit one
+// create — hence two.
 func TestScenarioReplicaVanishesSelfHeals(t *testing.T) {
 	s := newSim(t)
 	slot := replicaSlot{uuid.New(), "eu-west"}
@@ -580,20 +616,24 @@ func TestScenarioMixedSnapshot(t *testing.T) {
 	orphanSlot := replicaSlot{uuid.New(), "us-east"}
 
 	// Stateless service cold-starting.
-	s.declare(statelessSlot, uuid.New(), 2, false, domain.DeploymentPending)
+	statelessV := uuid.New()
+	s.declare(statelessSlot, statelessV, 2, false, domain.DeploymentPending)
 	// Stateful service mid-update: healthy target, old revision still up.
 	statefulV := uuid.New()
 	s.declare(statefulSlot, statefulV, 1, true, domain.DeploymentDraining)
 	s.seedHealthy(statefulSlot, statefulV, 1)
-	outgoingID := s.seedOutgoing(statefulSlot)
+	outgoing := s.seedOutgoing(statefulSlot)
 	// Region nobody declares anymore.
-	orphanID := s.seedOutgoing(orphanSlot)
+	orphan := s.seedOutgoing(orphanSlot)
 
 	got := s.tick()
 	want := []Intent{
-		{Kind: IntentCreate, Group: statelessSlot}, // canary for the cold start
-		{Kind: IntentDrain, ReplicaID: outgoingID}, // stateful retires its old side
-		{Kind: IntentDrain, ReplicaID: orphanID},   // orphan slot drains its leftovers
+		// canary for the cold start
+		{Kind: IntentCreate, Group: statelessSlot, DeploymentID: statelessV},
+		// stateful retires its old side — the traffic-switch moment
+		{Kind: IntentDrain, Group: statefulSlot, ReplicaID: outgoing, DeploymentID: statefulV, SwitchTraffic: true},
+		// orphan slot drains its leftovers; no current deployment, no switch
+		{Kind: IntentDrain, Group: orphanSlot, ReplicaID: orphan},
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("tick intents = %v, want %v", got, want)
