@@ -1,8 +1,19 @@
 "use client";
 
+import { useState } from "react";
 import { useStore, selectionQuery } from "@/lib/store";
 import { usePoll } from "@/lib/hooks";
+import { postJson } from "@/lib/api";
 import { Badge } from "@/components/Badge";
+import { ActivityLog } from "@/components/ActivityLog";
+import { ActionMenu, type MenuItem } from "@/components/ActionMenu";
+import {
+  CreateMenu,
+  CreateForm,
+  DeployForm,
+  ScaleForm,
+  type CreateKind,
+} from "@/components/DesiredForms";
 import {
   phaseClass,
   deployStatusClass,
@@ -12,179 +23,355 @@ import {
 } from "@/lib/ui";
 import type { Topology, ServiceNode, HostRow, ServedRow } from "@/lib/db";
 
-export default function DashboardPage() {
+interface Act {
+  key: string;
+  label: string;
+  hint: string;
+  danger?: boolean;
+}
+
+type ChaosFn = (act: Act, id: string, target: string) => Promise<void>;
+
+// Agent-observable chaos goes through agentsim (the agent lies or goes silent
+// over the real gRPC transport); only operator desired state and synthetic row
+// accidents touch the database directly.
+const REPLICA_ACTS: Act[] = [
+  {
+    key: "replica_crash",
+    label: "Crash",
+    danger: true,
+    hint: "Agent reports the container dead; reconciler reaps and replaces.",
+  },
+  {
+    key: "replica_crashloop",
+    label: "Crash loop",
+    danger: true,
+    hint: "Dies and restarts every tick until the crash-loop rule fails it.",
+  },
+  {
+    key: "replica_stall_health",
+    label: "Stall health check",
+    hint: "Up but never passes probes; feeds the progress-deadline path.",
+  },
+  {
+    key: "replica_heal",
+    label: "Heal",
+    hint: "Clears chaos mode; container resumes its normal lifecycle.",
+  },
+  {
+    key: "delete_replica",
+    label: "Orphan (delete row)",
+    danger: true,
+    hint: "Deletes the replica row so the engine never learns it was lost.",
+  },
+];
+
+const DEPLOYMENT_ACTS: Act[] = [
+  {
+    key: "crash_deployment",
+    label: "Crash all replicas",
+    danger: true,
+    hint: "Every live replica dies at once, like a bad image taking out the fleet.",
+  },
+  {
+    key: "stall_rollout",
+    label: "Stall rollout",
+    hint: "All live replicas stay up but never healthy.",
+  },
+];
+
+const HOST_ACTS: Act[] = [
+  {
+    key: "host_kill",
+    label: "Kill",
+    danger: true,
+    hint: "Agent goes silent. ~30s out of scheduling, ~2min declared dead.",
+  },
+  {
+    key: "host_recover",
+    label: "Recover",
+    hint: "Agent resumes heartbeating; host returns to ready.",
+  },
+  {
+    key: "cordon_host",
+    label: "Cordon",
+    hint: "Existing replicas stay; nothing new is placed here.",
+  },
+  {
+    key: "drain_host",
+    label: "Drain",
+    hint: "Engine evacuates replicas off this host.",
+  },
+];
+
+function toItems(acts: Act[], fire: (a: Act) => void): MenuItem[] {
+  return acts.map((a) => ({
+    key: a.key,
+    label: a.label,
+    hint: a.hint,
+    danger: a.danger,
+    onSelect: () => fire(a),
+  }));
+}
+
+export default function ConsolePage() {
   const s = useStore();
   const { data, error, loading } = usePoll<Topology>(
     `/api/topology${selectionQuery(s)}`,
     2000,
   );
+  const [creating, setCreating] = useState<CreateKind | null>(null);
+
+  const chaos: ChaosFn = async (act, id, target) => {
+    const { ok, data: res } = await postJson("/api/chaos", {
+      action: act.key,
+      id,
+    });
+    s.logChaos(
+      act.key,
+      ok
+        ? `${act.label} → ${target}`
+        : `${act.label} on ${target} failed: ${res.error ?? "unknown"}`,
+      ok,
+    );
+  };
+
+  const servedFor = (esId: string): ServedRow[] =>
+    (data?.served ?? []).filter((sr) => sr.environment_service_id === esId);
 
   return (
-    <div className="grid grid-cols-1 gap-5 lg:grid-cols-[1fr_360px]">
+    <div className="grid grid-cols-1 gap-5 lg:grid-cols-[1fr_300px]">
       <section className="space-y-4">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
           <h1 className="text-lg font-semibold">Topology</h1>
           <LiveDot loading={loading} error={error} />
+          <span className="ml-auto">
+            <CreateMenu onPick={setCreating} />
+          </span>
         </div>
         {error && <ErrorCard error={error} />}
+        {creating && (
+          <CreateForm kind={creating} onDone={() => setCreating(null)} />
+        )}
+
         {data?.tree.length === 0 && (
           <div className="panel px-5 py-10 text-center text-sm text-[var(--color-muted)]">
-            No projects match the current selection. Create one on the{" "}
-            <span className="text-[var(--color-accent-fg)]">Desired</span> tab.
+            Nothing here yet. Start with{" "}
+            <span className="text-[var(--color-accent-fg)]">+ New</span>.
           </div>
         )}
-        {data?.tree.map((p) => (
-          <div key={p.project} className="space-y-3">
-            <div className="flex items-center gap-2">
-              <h2 className="mono text-[0.95rem] font-semibold text-[var(--color-fg)]">
-                {p.project}
-              </h2>
-              <span className="text-xs text-[var(--color-faint)]">
-                {p.environments.length} env
-              </span>
-            </div>
-            {p.environments.map((env) => (
-              <div key={env.id} className="panel overflow-hidden">
-                <div className="flex items-center gap-2 border-b border-[var(--color-border-soft)] bg-[var(--color-panel-2)] px-4 py-2">
-                  <span className="text-[0.7rem] uppercase tracking-wide text-[var(--color-faint)]">
-                    environment
-                  </span>
-                  <span className="mono text-sm font-medium">{env.name}</span>
-                </div>
-                {env.services.length === 0 ? (
-                  <div className="px-4 py-5 text-xs text-[var(--color-faint)]">
-                    no services bound
-                  </div>
-                ) : (
-                  <div className="divide-y divide-[var(--color-border-soft)]">
-                    {env.services.map((svc) => (
-                      <ServiceRow key={svc.es_id} svc={svc} />
-                    ))}
-                  </div>
-                )}
+        {data?.tree.map((p) =>
+          p.environments.map((env) => (
+            <div key={env.id} className="panel overflow-hidden">
+              <div className="mono flex items-baseline gap-1.5 border-b border-[var(--color-border-soft)] px-4 py-2.5 text-sm">
+                <span className="text-[var(--color-faint)]">{p.project} /</span>
+                <span className="font-semibold">{env.name}</span>
               </div>
-            ))}
-          </div>
-        ))}
+              {env.services.length === 0 ? (
+                <div className="px-4 py-5 text-xs text-[var(--color-faint)]">
+                  no services bound
+                </div>
+              ) : (
+                <div className="divide-y divide-[var(--color-border-soft)]">
+                  {env.services.map((svc) => (
+                    <ServiceRow
+                      key={svc.es_id}
+                      svc={svc}
+                      served={servedFor(svc.es_id)}
+                      path={`${p.project}/${env.name}/${svc.service}`}
+                      chaos={chaos}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          )),
+        )}
       </section>
 
       <aside className="space-y-5">
-        <HostsPanel hosts={data?.hosts ?? []} />
-        <ServedPanel served={data?.served ?? []} />
+        <HostsPanel hosts={data?.hosts ?? []} chaos={chaos} />
+        <ActivityLog />
       </aside>
     </div>
   );
 }
 
-function ServiceRow({ svc }: { svc: ServiceNode }) {
+function ServiceRow({
+  svc,
+  served,
+  path,
+  chaos,
+}: {
+  svc: ServiceNode;
+  served: ServedRow[];
+  path: string;
+  chaos: ChaosFn;
+}) {
   const d = svc.deployment;
+  const [form, setForm] = useState<"deploy" | "scale" | null>(null);
+  const toggle = (f: "deploy" | "scale") => setForm(form === f ? null : f);
+
+  const desired = svc.regions.reduce((n, r) => n + r.desired, 0);
+  const healthy = svc.regions.reduce((n, r) => n + r.healthy, 0);
+  const converged = desired > 0 && healthy >= desired;
+
+  // Traffic pointing at a version other than the current deployment is the
+  // interesting case (mid-rollout or rolled back); otherwise it's just noise.
+  const servedVersions = [...new Set(served.map((sr) => sr.dep_version))];
+  const trafficLagging =
+    d && servedVersions.some((v) => v != null && v !== d.version);
+
+  const menu: MenuItem[] = [
+    {
+      key: "deploy",
+      label: "Deploy new version",
+      hint: "Commit a pending version; engine converges on next tick.",
+      onSelect: () => toggle("deploy"),
+    },
+    ...(d
+      ? [
+          {
+            key: "scale",
+            label: "Scale",
+            hint: "Patch per-region replica counts.",
+            onSelect: () => toggle("scale"),
+          },
+        ]
+      : []),
+    ...(d && svc.replicas.length > 0
+      ? toItems(DEPLOYMENT_ACTS, (a) => chaos(a, d.id, `${path} v${d.version}`))
+      : []),
+  ];
+
   return (
-    <div className="px-4 py-3.5">
+    <div className="px-4 py-3">
       <div className="flex flex-wrap items-center gap-2.5">
         <span className="text-sm font-medium">{svc.service}</span>
         {svc.stateful && (
-          <Badge className="border-violet-500/30 bg-violet-500/10 text-violet-300">
+          <span className="text-[0.68rem] text-[var(--color-faint)]">
             stateful
-          </Badge>
+          </span>
         )}
         {d ? (
           <>
-            <span className="mono text-xs text-[var(--color-muted)]">
-              v{d.version}
-            </span>
-            <Badge className={deployStatusClass(d.status)}>{d.status}</Badge>
+            <Badge className={deployStatusClass(d.status)}>
+              v{d.version} · {d.status}
+            </Badge>
             <span
               className="mono truncate text-xs text-[var(--color-faint)]"
               title={d.image_ref}
             >
               {d.image_ref}
             </span>
+            {trafficLagging && (
+              <Badge
+                className="border-amber-400/40 bg-amber-500/10 text-amber-700"
+                title="Traffic pointer per region"
+              >
+                serving{" "}
+                {served
+                  .map((sr) => `${sr.region} v${sr.dep_version ?? "?"}`)
+                  .join(", ")}
+              </Badge>
+            )}
           </>
         ) : (
-          <span className="text-xs text-[var(--color-faint)]">no deployment</span>
+          <span className="text-xs text-[var(--color-faint)]">
+            no deployment
+          </span>
         )}
+
+        <span className="ml-auto flex items-center gap-3">
+          {desired > 0 && (
+            <span
+              className={`text-xs ${converged ? "text-emerald-700" : "text-amber-700"}`}
+              title={svc.regions
+                .map((r) => `${r.region}: ${r.healthy}/${r.desired} healthy, ${r.observed} live`)
+                .join("\n")}
+            >
+              {healthy}/{desired} healthy
+              {svc.regions.length > 1 && (
+                <span className="text-[var(--color-faint)]">
+                  {" "}
+                  · {svc.regions.length} regions
+                </span>
+              )}
+            </span>
+          )}
+          <ActionMenu items={menu} />
+        </span>
       </div>
 
-      {svc.regions.length > 0 && (
-        <div className="mt-2.5 flex flex-wrap gap-1.5">
-          {svc.regions.map((r) => {
-            const ok = r.healthy >= r.desired && r.desired > 0;
-            return (
-              <span
-                key={r.region}
-                className="badge border-[var(--color-border)] bg-[var(--color-panel-2)]"
-              >
-                <span className="mono text-[var(--color-muted)]">{r.region}</span>
-                <span
-                  className={ok ? "text-emerald-300" : "text-amber-300"}
-                >
-                  {r.healthy}/{r.desired} healthy
-                </span>
-                {r.observed !== r.desired && (
-                  <span className="text-[var(--color-faint)]">
-                    ({r.observed} live)
-                  </span>
-                )}
-              </span>
-            );
-          })}
-        </div>
+      {form === "deploy" && (
+        <DeployForm
+          esId={svc.es_id}
+          label={path}
+          defaultImage={d?.image_ref}
+          current={svc.regions}
+          onDone={() => setForm(null)}
+        />
+      )}
+      {form === "scale" && d && (
+        <ScaleForm
+          deploymentId={d.id}
+          label={path}
+          current={svc.regions}
+          onDone={() => setForm(null)}
+        />
       )}
 
-      {svc.replicas.length > 0 && <ReplicaTable svc={svc} />}
+      {svc.replicas.length > 0 && <ReplicaTable svc={svc} chaos={chaos} />}
     </div>
   );
 }
 
-function ReplicaTable({ svc }: { svc: ServiceNode }) {
+function ReplicaTable({ svc, chaos }: { svc: ServiceNode; chaos: ChaosFn }) {
+  const multiRegion = svc.regions.length > 1;
   return (
-    <div className="mt-3 overflow-x-auto">
+    <div className="mt-2.5 overflow-x-auto">
       <table className="w-full border-collapse text-left text-xs">
-        <thead>
-          <tr className="text-[0.65rem] uppercase tracking-wide text-[var(--color-faint)]">
-            <th className="py-1 pr-3 font-medium">replica</th>
-            <th className="py-1 pr-3 font-medium">rev</th>
-            <th className="py-1 pr-3 font-medium">region</th>
-            <th className="py-1 pr-3 font-medium">host</th>
-            <th className="py-1 pr-3 font-medium">phase</th>
-            <th className="py-1 pr-3 font-medium">healthy</th>
-            <th className="py-1 pr-3 font-medium">restarts</th>
-            <th className="py-1 pr-3 font-medium">last exit</th>
-            <th className="py-1 font-medium">updated</th>
-          </tr>
-        </thead>
         <tbody className="text-[var(--color-muted)]">
           {svc.replicas.map((r) => (
             <tr key={r.id} className="border-t border-[var(--color-border-soft)]">
-              <td className="mono py-1.5 pr-3 text-[var(--color-fg)]">
+              <td className="mono w-24 py-1.5 pr-3 text-[var(--color-fg)]">
                 {shortId(r.id)}
               </td>
               <td className="mono py-1.5 pr-3">
-                v{r.dep_version}
-                {!r.is_current && (
-                  <span className="ml-1 text-[var(--color-faint)]">old</span>
+                {r.hostname ?? "unplaced"}
+                {multiRegion && (
+                  <span className="text-[var(--color-faint)]"> · {r.region}</span>
                 )}
               </td>
-              <td className="mono py-1.5 pr-3">{r.region}</td>
-              <td className="mono py-1.5 pr-3">{r.hostname ?? "—"}</td>
               <td className="py-1.5 pr-3">
-                <Badge className={phaseClass(r.phase)}>{r.phase}</Badge>
-              </td>
-              <td className="py-1.5 pr-3">
-                <span
-                  className={
-                    r.healthy ? "text-emerald-300" : "text-[var(--color-faint)]"
-                  }
-                >
-                  {r.healthy ? "yes" : "no"}
+                <span className="flex items-center gap-1.5">
+                  <Badge
+                    className={phaseClass(r.phase)}
+                    title={r.last_exit_reason ?? undefined}
+                  >
+                    {r.phase}
+                  </Badge>
+                  {!r.is_current && (
+                    <span className="text-[var(--color-faint)]">
+                      v{r.dep_version}
+                    </span>
+                  )}
+                  {r.restart_count > 0 && (
+                    <span className="text-amber-700">
+                      {r.restart_count} restarts
+                    </span>
+                  )}
                 </span>
               </td>
-              <td className="mono py-1.5 pr-3">{r.restart_count}</td>
-              <td className="py-1.5 pr-3 text-[var(--color-faint)]">
-                {r.last_exit_reason ?? "—"}
-              </td>
-              <td className="py-1.5 whitespace-nowrap text-[var(--color-faint)]">
+              <td className="py-1.5 pr-3 whitespace-nowrap text-right text-[var(--color-faint)]">
                 {relativeTime(r.updated_at)}
+              </td>
+              <td className="w-8 py-1 text-right">
+                <ActionMenu
+                  items={toItems(REPLICA_ACTS, (a) =>
+                    chaos(a, r.id, `${shortId(r.id)} · ${r.region}`),
+                  )}
+                />
               </td>
             </tr>
           ))}
@@ -194,7 +381,7 @@ function ReplicaTable({ svc }: { svc: ServiceNode }) {
   );
 }
 
-function HostsPanel({ hosts }: { hosts: HostRow[] }) {
+function HostsPanel({ hosts, chaos }: { hosts: HostRow[]; chaos: ChaosFn }) {
   return (
     <div className="panel overflow-hidden">
       <PanelHead title="Hosts" count={hosts.length} />
@@ -205,50 +392,17 @@ function HostsPanel({ hosts }: { hosts: HostRow[] }) {
           </div>
         )}
         {hosts.map((h) => (
-          <div
-            key={h.id}
-            className="flex items-center justify-between px-4 py-2.5"
-          >
-            <div>
-              <div className="mono text-sm">{h.hostname}</div>
+          <div key={h.id} className="flex items-center gap-2 px-4 py-2.5">
+            <div className="min-w-0 flex-1">
+              <div className="mono truncate text-sm">{h.hostname}</div>
               <div className="mono text-[0.68rem] text-[var(--color-faint)]">
                 {h.region} · hb {relativeTime(h.last_heartbeat)}
               </div>
             </div>
             <Badge className={hostStatusClass(h.status)}>{h.status}</Badge>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ServedPanel({ served }: { served: ServedRow[] }) {
-  return (
-    <div className="panel overflow-hidden">
-      <PanelHead title="Served revisions" count={served.length} />
-      <div className="divide-y divide-[var(--color-border-soft)]">
-        {served.length === 0 && (
-          <div className="px-4 py-4 text-xs text-[var(--color-faint)]">
-            no traffic pointers yet
-          </div>
-        )}
-        {served.map((sr) => (
-          <div
-            key={`${sr.environment_service_id}-${sr.region}`}
-            className="flex items-center justify-between px-4 py-2.5"
-          >
-            <div>
-              <div className="text-sm">
-                {sr.environment}/{sr.service}
-              </div>
-              <div className="mono text-[0.68rem] text-[var(--color-faint)]">
-                {sr.region} · {relativeTime(sr.updated_at)}
-              </div>
-            </div>
-            <Badge className="border-[var(--color-accent)]/40 bg-[rgba(133,59,206,0.12)] text-[var(--color-accent-fg)]">
-              v{sr.dep_version ?? "?"}
-            </Badge>
+            <ActionMenu
+              items={toItems(HOST_ACTS, (a) => chaos(a, h.id, h.hostname))}
+            />
           </div>
         ))}
       </div>
@@ -258,26 +412,34 @@ function ServedPanel({ served }: { served: ServedRow[] }) {
 
 function PanelHead({ title, count }: { title: string; count: number }) {
   return (
-    <div className="flex items-center justify-between border-b border-[var(--color-border-soft)] bg-[var(--color-panel-2)] px-4 py-2.5">
+    <div className="flex items-center justify-between border-b border-[var(--color-border-soft)] px-4 py-2.5">
       <h3 className="text-sm font-semibold">{title}</h3>
       <span className="mono text-xs text-[var(--color-faint)]">{count}</span>
     </div>
   );
 }
 
-function LiveDot({ loading, error }: { loading: boolean; error: string | null }) {
-  const color = error ? "bg-red-400" : "bg-emerald-400";
+function LiveDot({
+  loading,
+  error,
+}: {
+  loading: boolean;
+  error: string | null;
+}) {
+  const color = error ? "bg-red-500" : "bg-emerald-500";
   return (
     <span className="flex items-center gap-1.5 text-xs text-[var(--color-muted)]">
-      <span className={`h-2 w-2 rounded-full ${color} ${!error && "animate-pulse"}`} />
-      {error ? "error" : loading ? "syncing" : "live · 2s"}
+      <span
+        className={`h-2 w-2 rounded-full ${color} ${!error && "animate-pulse"}`}
+      />
+      {error ? "error" : loading ? "syncing" : "live"}
     </span>
   );
 }
 
 function ErrorCard({ error }: { error: string }) {
   return (
-    <div className="panel border-red-500/30 bg-red-500/5 px-4 py-3 text-sm text-red-300">
+    <div className="panel border-red-400/40 bg-red-500/5 px-4 py-3 text-sm text-red-700">
       {error}
     </div>
   );

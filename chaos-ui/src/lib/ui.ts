@@ -1,51 +1,51 @@
 // Badge palettes shared across client views; values are Tailwind utility strings.
 
-const NEUTRAL = "bg-white/5 text-zinc-400 border-white/10";
+const NEUTRAL = "bg-zinc-500/10 text-zinc-600 border-zinc-400/40";
 
 export function phaseClass(phase: string): string {
   const map: Record<string, string> = {
-    pending: "bg-zinc-500/15 text-zinc-300 border-zinc-500/30",
-    scheduling: "bg-blue-500/15 text-blue-300 border-blue-500/30",
-    starting: "bg-cyan-500/15 text-cyan-300 border-cyan-500/30",
-    health_check: "bg-amber-500/15 text-amber-300 border-amber-500/30",
-    healthy: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
-    shifting: "bg-violet-500/15 text-violet-300 border-violet-500/30",
-    active: "bg-green-500/15 text-green-300 border-green-500/30",
-    draining: "bg-orange-500/15 text-orange-300 border-orange-500/30",
-    reaped: "bg-zinc-700/30 text-zinc-500 border-zinc-700/40",
-    failed: "bg-red-500/15 text-red-300 border-red-500/30",
+    pending: "bg-zinc-500/10 text-zinc-600 border-zinc-400/40",
+    scheduling: "bg-blue-500/10 text-blue-700 border-blue-400/40",
+    starting: "bg-cyan-500/10 text-cyan-700 border-cyan-400/40",
+    health_check: "bg-amber-500/10 text-amber-700 border-amber-400/40",
+    healthy: "bg-emerald-500/10 text-emerald-700 border-emerald-400/40",
+    shifting: "bg-violet-500/10 text-violet-700 border-violet-400/40",
+    active: "bg-green-500/10 text-green-700 border-green-400/40",
+    draining: "bg-orange-500/10 text-orange-700 border-orange-400/40",
+    reaped: "bg-zinc-400/10 text-zinc-400 border-zinc-300/60",
+    failed: "bg-red-500/10 text-red-700 border-red-400/40",
   };
   return map[phase] ?? NEUTRAL;
 }
 
 export function deployStatusClass(status: string): string {
   const map: Record<string, string> = {
-    pending: "bg-zinc-500/15 text-zinc-300 border-zinc-500/30",
-    active: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
-    draining: "bg-orange-500/15 text-orange-300 border-orange-500/30",
-    failed: "bg-red-500/15 text-red-300 border-red-500/30",
-    rolledback: "bg-amber-500/15 text-amber-300 border-amber-500/30",
-    superseded: "bg-zinc-700/30 text-zinc-500 border-zinc-700/40",
+    pending: "bg-zinc-500/10 text-zinc-600 border-zinc-400/40",
+    active: "bg-emerald-500/10 text-emerald-700 border-emerald-400/40",
+    draining: "bg-orange-500/10 text-orange-700 border-orange-400/40",
+    failed: "bg-red-500/10 text-red-700 border-red-400/40",
+    rolledback: "bg-amber-500/10 text-amber-700 border-amber-400/40",
+    superseded: "bg-zinc-400/10 text-zinc-400 border-zinc-300/60",
   };
   return map[status] ?? NEUTRAL;
 }
 
 export function hostStatusClass(status: string): string {
   const map: Record<string, string> = {
-    ready: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
-    notready: "bg-red-500/15 text-red-300 border-red-500/30",
-    draining: "bg-orange-500/15 text-orange-300 border-orange-500/30",
-    cordoned: "bg-zinc-500/15 text-zinc-400 border-zinc-500/30",
+    ready: "bg-emerald-500/10 text-emerald-700 border-emerald-400/40",
+    notready: "bg-red-500/10 text-red-700 border-red-400/40",
+    draining: "bg-orange-500/10 text-orange-700 border-orange-400/40",
+    cordoned: "bg-zinc-500/10 text-zinc-600 border-zinc-400/40",
   };
   return map[status] ?? NEUTRAL;
 }
 
 export function levelClass(level: string): string {
   const map: Record<string, string> = {
-    DEBUG: "bg-zinc-500/15 text-zinc-400 border-zinc-500/30",
-    INFO: "bg-blue-500/15 text-blue-300 border-blue-500/30",
-    WARN: "bg-amber-500/15 text-amber-300 border-amber-500/30",
-    ERROR: "bg-red-500/15 text-red-300 border-red-500/30",
+    DEBUG: "bg-zinc-500/10 text-zinc-500 border-zinc-400/40",
+    INFO: "bg-blue-500/10 text-blue-700 border-blue-400/40",
+    WARN: "bg-amber-500/10 text-amber-700 border-amber-400/40",
+    ERROR: "bg-red-500/10 text-red-700 border-red-400/40",
   };
   return map[level?.toUpperCase()] ?? NEUTRAL;
 }

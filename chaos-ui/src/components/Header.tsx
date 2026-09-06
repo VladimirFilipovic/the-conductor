@@ -5,9 +5,7 @@ import { usePathname } from "next/navigation";
 import { useStore } from "@/lib/store";
 
 const NAV = [
-  { href: "/", label: "Topology" },
-  { href: "/desired", label: "Desired" },
-  { href: "/chaos", label: "Chaos" },
+  { href: "/", label: "Console" },
   { href: "/logs", label: "Logs" },
 ];
 
@@ -21,7 +19,7 @@ export function Header() {
   const uniqueEnvs = [...new Set(envs)];
 
   return (
-    <header className="sticky top-0 z-20 border-b border-[var(--color-border)] bg-[rgba(11,13,14,0.82)] backdrop-blur-md">
+    <header className="sticky top-0 z-20 border-b border-[var(--color-border)] bg-[rgba(246,247,249,0.85)] backdrop-blur-md">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center gap-x-6 gap-y-3 px-5 py-3">
         <div className="flex items-center gap-2.5">
           <span

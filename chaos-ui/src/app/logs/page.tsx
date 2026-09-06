@@ -113,7 +113,7 @@ export default function LogsPage() {
       </div>
 
       {!exists && (
-        <div className="panel border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-300">
+        <div className="panel border-amber-400/40 bg-amber-500/5 px-4 py-3 text-sm text-amber-700">
           Log file not found yet. It appears once the engine starts writing to{" "}
           <span className="mono">{path}</span>.
         </div>
@@ -138,7 +138,7 @@ export default function LogsPage() {
 function LogRow({ line }: { line: LogLine }) {
   const level = (line.level ?? "INFO").toUpperCase();
   return (
-    <div className="flex items-start gap-2.5 border-b border-[var(--color-border-soft)]/60 px-2 py-1 hover:bg-white/[0.02]">
+    <div className="flex items-start gap-2.5 border-b border-[var(--color-border-soft)]/60 px-2 py-1 hover:bg-black/[0.03]">
       <span
         className="w-16 shrink-0 pt-0.5 text-right text-[0.65rem] text-[var(--color-faint)]"
         title={line.time ?? ""}
@@ -153,7 +153,7 @@ function LogRow({ line }: { line: LogLine }) {
             {line.attrs.map((a, i) => (
               <span
                 key={i}
-                className="rounded bg-white/5 px-1.5 py-0.5 text-[0.68rem] text-[var(--color-muted)]"
+                className="rounded bg-black/5 px-1.5 py-0.5 text-[0.68rem] text-[var(--color-muted)]"
               >
                 <span className="text-[var(--color-faint)]">{a.key}=</span>
                 {a.value}
