@@ -427,40 +427,11 @@ export async function listServices(project: string) {
 }
 
 // --- Write: chaos mutations -------------------------------------------------
-
-export async function killReplica(id: string) {
-  await query(
-    `UPDATE replicas
-     SET healthy = false, phase = 'failed', last_exit_reason = 'chaos: killed',
-         restart_count = restart_count + 1
-     WHERE id = $1`,
-    [id],
-  );
-}
-
-export async function crashDeployment(deploymentId: string) {
-  await query(
-    `UPDATE replicas
-     SET healthy = false, phase = 'failed', last_exit_reason = 'chaos: crashed',
-         restart_count = restart_count + 1
-     WHERE deployment_id = $1 AND phase <> 'reaped'`,
-    [deploymentId],
-  );
-}
-
-export async function hostDown(id: string) {
-  await query(
-    "UPDATE hosts SET status = 'notready', last_heartbeat = now() - interval '10 minutes' WHERE id = $1",
-    [id],
-  );
-}
-
-export async function hostRecover(id: string) {
-  await query(
-    "UPDATE hosts SET status = 'ready', last_heartbeat = now() WHERE id = $1",
-    [id],
-  );
-}
+// Only operator desired state (cordon/drain) and synthetic row-level accidents
+// (orphan delete) touch the database. Everything an agent could observe —
+// crashes, stalled probes, silent hosts — goes through the agentsim control
+// API instead, so a live agent's next report can't overwrite the chaos and the
+// failure travels the real transport: agent lies → gateway → sensor → SQL guards.
 
 export async function cordonHost(id: string) {
   await query("UPDATE hosts SET status = 'cordoned' WHERE id = $1", [id]);
@@ -470,21 +441,16 @@ export async function drainHost(id: string) {
   await query("UPDATE hosts SET status = 'draining' WHERE id = $1", [id]);
 }
 
-export async function flapHealth(id: string) {
-  // Health drops but the phase is left intact — simulates a flapping probe the
-  // reconciler must notice without a hard crash.
-  await query("UPDATE replicas SET healthy = false WHERE id = $1", [id]);
-}
-
-export async function stallRollout(deploymentId: string) {
-  // Wipe the health high-water mark so the progress_deadline rule sees "up but
-  // never healthy" — the stalled-rollout signal.
-  await query(
-    "UPDATE replicas SET healthy = false, health_checks_passed_at = NULL WHERE deployment_id = $1 AND phase <> 'reaped'",
-    [deploymentId],
-  );
-}
-
 export async function deleteReplica(id: string) {
   await query("DELETE FROM replicas WHERE id = $1", [id]);
+}
+
+// Live replica ids of a deployment — fan-out targets for deployment-wide
+// agent chaos (crash all, stall all).
+export async function deploymentReplicaIds(deploymentId: string): Promise<string[]> {
+  const rows = await query<{ id: string }>(
+    "SELECT id FROM replicas WHERE deployment_id = $1 AND phase NOT IN ('reaped', 'failed')",
+    [deploymentId],
+  );
+  return rows.map((r) => r.id);
 }
