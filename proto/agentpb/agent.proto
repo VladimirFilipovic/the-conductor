@@ -1,0 +1,80 @@
+// Agent <-> control-plane contract. One bidi Session stream per host: uplink
+// carries what the agent OBSERVES (heartbeats, replica states), downlink
+// carries what the host SHOULD look like — always the full host state, never
+// a delta, so any single message is sufficient and a lost one is healed by the
+// next (level-triggered; see todo.md "agent transport").
+syntax = "proto3";
+
+package conductor.agent.v1;
+
+option go_package = "conductor/proto/agentpb";
+
+service AgentGateway {
+  // Session is the agent's whole protocol. First uplink message must be Hello;
+  // after it the server pushes HostState on every relevant change plus a
+  // periodic resync, and ingests heartbeats/observations through the Sensor.
+  // The stream being open is NOT liveness — only heartbeats are (the sensor
+  // sweep works off their server-side timestamps).
+  rpc Session(stream AgentMessage) returns (stream ServerMessage);
+
+  // ListHosts exposes the schedulable fleet so the agent simulator can spawn
+  // one agent per host without its own database connection.
+  rpc ListHosts(ListHostsRequest) returns (ListHostsResponse);
+}
+
+message AgentMessage {
+  oneof msg {
+    Hello hello = 1;
+    Heartbeat heartbeat = 2;
+    ReplicaObservation observation = 3;
+  }
+}
+
+// Hello binds the stream to a host. Exactly one, first.
+message Hello {
+  string host_id = 1;
+}
+
+// Heartbeat is the liveness ping; the server stamps its own observation time
+// (an agent's skewed clock must not keep a dead host alive).
+message Heartbeat {
+  string status = 1; // "ready" | "notready"
+}
+
+// ReplicaObservation mirrors storage.ReplicaObservation.
+message ReplicaObservation {
+  string replica_id = 1;
+  string phase = 2;
+  bool healthy = 3;
+  int32 restart_count = 4;
+  string last_exit_reason = 5;
+}
+
+message ServerMessage {
+  HostState state = 1;
+}
+
+// HostState is the FULL set of replicas bound to the host. A replica present
+// in phase scheduling is the signal to start it; draining to stop it; absent
+// means gone (reaped or moved) — the agent removes anything it runs that the
+// state no longer lists.
+message HostState {
+  repeated Replica replicas = 1;
+}
+
+message Replica {
+  string id = 1;
+  string phase = 2;
+}
+
+message ListHostsRequest {}
+
+message ListHostsResponse {
+  repeated Host hosts = 1;
+}
+
+message Host {
+  string id = 1;
+  string region = 2;
+  string hostname = 3;
+}
