@@ -13,11 +13,14 @@ import (
 	"conductor/internal/config"
 	"conductor/internal/engine"
 	"conductor/internal/storage"
+
+	"github.com/google/uuid"
 )
 
 func Run(args []string) int {
 	fs := flag.NewFlagSet("engine", flag.ContinueOnError)
 	placement := config.PlacementFlags(fs)
+	grpcAddr := fs.String("grpc.addr", ":7443", "agent gateway gRPC listen address")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -54,12 +57,16 @@ func Run(args []string) int {
 	}
 	defer client.Close()
 
-	// Sensor still wires a zero store — its SensorStore methods aren't on the
-	// Postgres client yet; it gets a real store once those land.
-	sensor := engine.Sensor{}
+	sensor := engine.NewSensor(client)
 	eng := engine.New(client, engine.NewReconciler(*placement), engine.NewActuator(client))
+	// The gateway's LISTEN needs its own session-scoped connection, so it
+	// dials the DSN directly instead of borrowing the pooled client.
+	listen := func(ctx context.Context, onChange func(uuid.UUID), onReconnect func()) error {
+		return storage.ListenReplicaChanges(ctx, cfg.DatabaseURL, onChange, onReconnect)
+	}
+	gateway := engine.NewGateway(*grpcAddr, sensor, client, listen)
 
-	if err := engine.Run(ctx, eng, &sensor); err != nil {
+	if err := engine.Run(ctx, eng, sensor, gateway); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
