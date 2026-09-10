@@ -53,6 +53,9 @@ Target resolution (flags win over env vars):
   --environment, -e   environment name     (env: CONDUCTOR_ENVIRONMENT)
   --service,     -s   service name         (env: CONDUCTOR_SERVICE)
 
+Simulation:
+  chaos [sub]              Drive the simulated agent fleet (kill-host, crashloop, ...)
+
 Other:
   --help, -h           Show this message
   --version, -v        Print the version
@@ -108,6 +111,8 @@ func Run(args []string) int {
 		err = cmdVolume(cmdArgs)
 	case "status":
 		err = cmdStatus(cmdArgs)
+	case "chaos":
+		err = cmdChaos(cmdArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "conductor: unknown command %q\n\n%s", args[0], usage)
 		return 2

@@ -1,0 +1,20 @@
+# syntax=docker/dockerfile:1
+# Builds the conductor binary and runs it as the simulated host-agent fleet:
+# one agent per host, chaos control API on :7780. No DB access — agents talk
+# only to the engine's gRPC gateway, exactly like real agents would.
+
+FROM golang:1.25-alpine AS builder
+WORKDIR /src
+
+RUN apk add --no-cache git
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/conductor .
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /out/conductor /usr/local/bin/conductor
+
+ENTRYPOINT ["conductor", "agentsim"]
+CMD ["--gateway.addr", "engine:7443", "--control.addr", ":7780"]

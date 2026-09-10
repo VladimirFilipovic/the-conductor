@@ -28,11 +28,27 @@ services:
       CONDUCTOR_DATABASE_URL: postgres://conductor:conductor@postgres:5432/conductor?sslmode=disable
       CONDUCTOR_LOG_FILE: /var/log/conductor/engine.log
       LOG_LEVEL: DEBUG
+    ports:
+      # Agent gateway gRPC — agentsim runs on the host and dials in.
+      - "7443:7443"
     volumes:
       - conductor-logs:/var/log/conductor
     depends_on:
       postgres:
         condition: service_healthy
+    restart: unless-stopped
+
+  agentsim:
+    profiles: ["stack"]
+    build:
+      context: .
+      dockerfile: Dockerfile.agentsim
+    container_name: conductor-agentsim
+    ports:
+      # Chaos control API — `conductor chaos ...` from the host and chaos-ui both hit it.
+      - "7780:7780"
+    depends_on:
+      - engine
     restart: unless-stopped
 
   chaos-ui:
@@ -44,6 +60,7 @@ services:
     environment:
       DATABASE_URL: postgres://conductor:conductor@postgres:5432/conductor
       LOG_FILE: /var/log/conductor/engine.log
+      AGENTSIM_URL: http://agentsim:7780
     ports:
       # Override when 3000 is taken locally: CHAOS_UI_PORT=3001 make stack-up
       - "${CHAOS_UI_PORT:-3000}:3000"

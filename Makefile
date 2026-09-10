@@ -106,7 +106,7 @@ stack-down:
 	docker compose --profile stack down
 
 stack-logs:
-	docker compose --profile stack logs -f engine chaos-ui
+	docker compose --profile stack logs -f engine agentsim chaos-ui
 
 # Run the Next.js dev server locally against the docker-compose Postgres. Reads
 # chaos-ui/.env.local if present; defaults target localhost:5432.
