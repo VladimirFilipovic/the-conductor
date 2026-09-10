@@ -42,6 +42,10 @@ func (q querier) ListSchedulableHosts(ctx context.Context) ([]db.Host, error) {
 	return q.queries.ListSchedulableHosts(ctx)
 }
 
+func (q querier) ListAgentHosts(ctx context.Context) ([]db.Host, error) {
+	return q.queries.ListAgentHosts(ctx)
+}
+
 func (q querier) ListActiveVolumes(ctx context.Context) ([]db.Volume, error) {
 	return q.queries.ListActiveVolumes(ctx)
 }

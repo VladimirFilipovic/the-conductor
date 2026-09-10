@@ -180,6 +180,40 @@ CREATE TRIGGER replicas_set_updated_at
 	BEFORE UPDATE ON replicas
 	FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
+-- Downlink change signal for the agent gateway: any change a host agent cares
+-- about (a replica bound/unbound to a host, or its phase moved) notifies the
+-- affected host(s). Payload is the host id — a KEY, never data: the listener
+-- re-reads fresh state, so a lost or reordered notification costs nothing
+-- (the periodic resync heals it). Unassign notifies the OLD host too, so an
+-- agent learns a replica left it.
+-- +goose StatementBegin
+CREATE FUNCTION notify_replicas_changed() RETURNS trigger AS $$
+BEGIN
+	IF TG_OP = 'INSERT' THEN
+		IF NEW.host_id IS NOT NULL THEN
+			PERFORM pg_notify('replicas_changed', NEW.host_id::text);
+		END IF;
+	ELSIF TG_OP = 'DELETE' THEN
+		IF OLD.host_id IS NOT NULL THEN
+			PERFORM pg_notify('replicas_changed', OLD.host_id::text);
+		END IF;
+	ELSIF OLD.host_id IS DISTINCT FROM NEW.host_id OR OLD.phase IS DISTINCT FROM NEW.phase THEN
+		IF OLD.host_id IS NOT NULL THEN
+			PERFORM pg_notify('replicas_changed', OLD.host_id::text);
+		END IF;
+		IF NEW.host_id IS NOT NULL AND NEW.host_id IS DISTINCT FROM OLD.host_id THEN
+			PERFORM pg_notify('replicas_changed', NEW.host_id::text);
+		END IF;
+	END IF;
+	RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+-- +goose StatementEnd
+
+CREATE TRIGGER replicas_notify_changed
+	AFTER INSERT OR UPDATE OR DELETE ON replicas
+	FOR EACH ROW EXECUTE FUNCTION notify_replicas_changed();
+
 -- Single-writer lease (§4). PK on volume_id is the invariant. Created last → no cycle.
 CREATE TABLE volume_leases (
 	volume_id   uuid        PRIMARY KEY REFERENCES volumes  ON DELETE CASCADE,
@@ -193,6 +227,7 @@ CREATE INDEX volume_leases_replica_id_idx ON volume_leases (replica_id);
 -- +goose Down
 DROP TABLE volume_leases;
 DROP TABLE replicas;
+DROP FUNCTION notify_replicas_changed;
 DROP FUNCTION set_updated_at;
 DROP TABLE volumes;
 DROP TABLE hosts;

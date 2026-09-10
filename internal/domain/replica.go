@@ -44,6 +44,20 @@ func (p ReplicaPhase) Terminal() bool {
 	return p == ReplicaPhaseReaped || p == ReplicaPhaseFailed
 }
 
+// AgentReportable reports whether an agent observation may carry this phase.
+// Placement (pending/scheduling/shifting) and retirement (draining/replacing/
+// reaped) are orchestrator-owned: the observation guard in the store only
+// protects replicas already IN those phases, so the sensor must refuse to let
+// a report push a replica INTO one.
+func (p ReplicaPhase) AgentReportable() bool {
+	switch p {
+	case ReplicaPhaseStarting, ReplicaPhaseHealthCheck, ReplicaPhaseHealthy,
+		ReplicaPhaseActive, ReplicaPhaseFailed:
+		return true
+	}
+	return false
+}
+
 // ReplicaDesiredStatus is the operator's intent for a replica (run vs stop),
 // independent of where its lifecycle phase currently sits.
 type ReplicaDesiredStatus string
