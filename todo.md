@@ -16,20 +16,27 @@ Redosled: placement → actuator → sensor. Svaki korak zeleni testovi pre sled
 
 ## 2. Actuator.Apply
 
-- [ ] mapiranje intent → tx pozivi u `WithReconcileTx`: create (CreateReplica + AssignReplicaHost CAS + lease za
-      stateful), assign_host, drain, destroy (+ ReleaseVolumeLease), fail, complete
-- [ ] blue/green: traffic-switch drain batch u istom tx zove `SetServedRevision` (vidi komentar `actuator.go:26-32`);
-      scale-down drain served revizije NE dira pointer — treba signal na Intent-u
-- [ ] `ErrConflict` = ne-greška: drop, sledeći tick self-heal
-- [ ] unit testovi nad stub store-om (koji tx pozivi za koji intent)
-- [ ] promovisati `scenarios_test.go` u prave end-to-end (skinuti TODO na `scenarios_test.go:11`)
+- [x] mapiranje intent → tx pozivi u `WithReconcileTx`: create (CreateReplica, hostless + volume bind za stateful),
+      assign_host (+ AcquireVolumeLease za stateful), place_volume, drain, destroy (+ ReleaseVolumeLease), fail,
+      complete (+ SetServedRevision za first-deploy/recreate)
+- [x] blue/green: traffic-switch drain batch u istom tx zove `SetServedRevision`; scale-down drain NE dira pointer —
+      `SwitchTraffic` signal na Intent-u (postavlja ga samo drainOutgoing)
+- [x] `ErrConflict` = ne-greška: drop, sledeći tick self-heal (tx po intentu; switch batch je jedan tx po slotu)
+- [x] predikatska rezervacija u `ReserveReplicaOnHost`: WHERE nosi invarijantu (host ready + kapacitet, sum živih
+      replika, failed ne broji) — 0 rows = ErrConflict = stvarno ne staje; integracioni test `storage/reconcile_test.go`
+- [x] unit testovi nad stub store-om (koji tx pozivi za koji intent) — `actuator_test.go`
+- [x] promovisati scenarije u prave end-to-end — `e2e_test.go` (in-memory store, pravi tick + sensor);
+      `scenarios_test.go` ostaje decision-level (fake clock za drain/deadline pravila)
 
 ## 3. Sensor
 
-- [ ] observation loop u `sensor.go`: heartbeats, replica observations, stale hosts → MarkHostDown
-- [ ] volume observed size
-- [ ] testovi: stale host → down → reconciler re-place putanja
-- [ ] integracioni test punog loop-a: sensor → snapshot → reconciler → actuator, jedan rollout kraj-na-kraj
+- [x] observation loop u `sensor.go`: heartbeats, replica observations, stale hosts → MarkHostDown (atomski CTE:
+      host notready + replike hostless/replacing → re-place putanja; observation guard drži replacing — zombi
+      agent ne može da vaskrsne oslobođenu repliku)
+- [x] volume observed size (`RecordVolumeObservedSize`)
+- [x] testovi: stale host → down → reconciler re-place (`e2e_test.go` + integracioni `storage/sensor_test.go`)
+- [x] integracioni test punog loop-a: sensor → snapshot → reconciler → actuator, rollout kraj-na-kraj
+      (`TestE2EBlueGreenRollout`, `TestE2EStatefulRecreateKeepsSingleWriter`)
 
 ## 4. Simulirani host agent (chaos tačka)
 
@@ -45,5 +52,14 @@ scenario kaže kako da laže/umire.
 
 ## Posle
 
-- supervisor retry (TODO `supervisor.go:10`)
+- [x] volume lease renewal: healthy observacija kroz Sensor obnavlja lease (`RenewVolumeLease`, holder-keyed —
+      zombijeva obnova ne dira preuzeti lease); unhealthy NE obnavlja → istek oslobađa volume za failover
+- [x] supervisor retry: restart budžet 3 back-to-back crash-a, stabilan run (≥1min) resetuje budžet;
+      engine+sensor se restartuju zajedno (`supervisor.go` + testovi)
+- [ ] agent transport v1 — plain HTTP+JSON: uplink POST (heartbeat, observacije → Sensor fasada, handleri su
+      tanki), downlink poll `ListReplicasByHost` preko keep-alive (level-triggered: pun spisak, ne delte)
+- [ ] agent transport v2 — gRPC bidi `AgentSession` stream: uplink i downlink na jednoj konekciji, `.proto`
+      ugovor + codegen za obe strane, downlink push na Postgres LISTEN/NOTIFY umesto poll-a. Pravila prenosa
+      ostaju ista: preko streama uvek celo stanje hosta, pun snapshot na rekonekt, periodični resync; konekcija
+      NIJE heartbeat (eksplicitni heartbeat sa server timestampom ostaje izvor istine o liveness-u)
 - v2 WASM plugin boundary (v2.md)
