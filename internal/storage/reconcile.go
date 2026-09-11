@@ -34,29 +34,11 @@ type ReplicaSpec struct {
 	VolumeID      uuid.UUID
 }
 
-// ReconcileTx is the set of writes that must commit together to keep the fleet's
-// invariants intact: schedule+reserve (no orphan replica, no double-booked host)
-// and the stateful single-writer lease. The reads that feed a placement decision
-// run outside the tx, so this stays a short lock-holding window.
-//
-// Every write decided against a snapshot needs a guard matched to what can
-// invalidate it, and each guard failure surfaces as ErrConflict (drop, next
-// tick re-decides):
-//
-//   - Revision CAS (SetReplicaPhase): the Sensor and the Reconciler write the
-//     same replica row concurrently, and the decision (drain) depends on the
-//     whole row — "revision unchanged" is the only check that catches ANY
-//     interleaved write, including ABA (crash + restart lands back on the same
-//     phase, but not the same revision).
-//   - Commit-time predicate (AssignReplicaHost, AcquireVolumeLease): the
-//     question isn't "did the row change" but "is the placement still
-//     feasible" — capacity, host readiness, lease liveness are re-checked in
-//     the UPDATE's WHERE, so concurrent placements that all fit don't abort
-//     each other the way a version proxy would.
-//   - Unguarded (create, destroy, status flips): create mints a fresh row,
-//     destroy targets an already-terminal one, and deployment status has a
-//     single writer — nothing can invalidate these between snapshot and commit.
-type ReconcileTx interface {
+// reconcileQuerier is the placement-write slice of Querier: the writes a
+// reconcile pass commits. The guard each one carries (revision CAS,
+// commit-time predicate, or none) is documented on engine.ReconcileTx, the
+// consumer-side view that names why they belong in one transaction.
+type reconcileQuerier interface {
 	// ActiveVolumeLease re-checks the lease inside the tx to close the TOCTOU gap
 	// before acquiring. ErrNotFound means the volume is free.
 	ActiveVolumeLease(ctx context.Context, volumeID uuid.UUID) (db.VolumeLease, error)
@@ -89,16 +71,6 @@ type ReconcileTx interface {
 	// share the tx with the outgoing drain batch so the blue/green shift is
 	// atomic with retiring the old side.
 	SetServedRevision(ctx context.Context, environmentServiceID uuid.UUID, region string, deploymentID uuid.UUID) error
-}
-
-// The tx-scoped querier handed to WithReconcileTx callbacks is exactly this view.
-var _ ReconcileTx = querier{}
-
-// WithReconcileTx runs fn against a tx-scoped ReconcileTx and commits if it
-// returns nil. Any error — including an ErrConflict from a lost CAS — rolls the
-// whole placement back, so the loop re-converges on the next tick.
-func (c *PostgresClient) WithReconcileTx(ctx context.Context, fn func(ReconcileTx) error) error {
-	return c.withTx(ctx, nil, func(q querier) error { return fn(q) })
 }
 
 func (q querier) ActiveVolumeLease(ctx context.Context, volumeID uuid.UUID) (db.VolumeLease, error) {

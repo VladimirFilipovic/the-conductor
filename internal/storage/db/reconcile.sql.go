@@ -48,7 +48,7 @@ WHERE volume_id = $1 AND expires_at > now()
 `
 
 // Engine reconcile-path writes. These are the operations that must commit
-// together (see storage.ReconcileTx); the read/decide queries the loop runs
+// together (see engine.ReconcileTx); the read/decide queries the loop runs
 // beforehand live elsewhere.
 // The live lease on a volume, if any. No row (sql.ErrNoRows) means the volume is
 // free to claim. Used inside the tx to close the TOCTOU gap before acquiring.

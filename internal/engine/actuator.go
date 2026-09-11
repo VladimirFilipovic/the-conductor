@@ -10,19 +10,55 @@ import (
 
 	"conductor/internal/domain"
 	"conductor/internal/storage"
+	"conductor/internal/storage/db"
 
 	"github.com/google/uuid"
 )
 
-type ActuatorStore interface {
-	WithReconcileTx(ctx context.Context, fn func(storage.ReconcileTx) error) error
+// ReconcileTx is the set of writes that must commit together to keep the fleet's
+// invariants intact: schedule+reserve (no orphan replica, no double-booked host)
+// and the stateful single-writer lease. The reads that feed a placement decision
+// run outside the tx, so this stays a short lock-holding window.
+//
+// Every write decided against a snapshot needs a guard matched to what can
+// invalidate it, and each guard failure surfaces as storage.ErrConflict (drop,
+// next tick re-decides):
+//
+//   - Revision CAS (SetReplicaPhase): the Sensor and the Reconciler write the
+//     same replica row concurrently, and the decision (drain) depends on the
+//     whole row — "revision unchanged" is the only check that catches ANY
+//     interleaved write, including ABA (crash + restart lands back on the same
+//     phase, but not the same revision).
+//   - Commit-time predicate (AssignReplicaHost, AcquireVolumeLease): the
+//     question isn't "did the row change" but "is the placement still
+//     feasible" — capacity, host readiness, lease liveness are re-checked in
+//     the UPDATE's WHERE, so concurrent placements that all fit don't abort
+//     each other the way a version proxy would.
+//   - Unguarded (create, destroy, status flips): create mints a fresh row,
+//     destroy targets an already-terminal one, and deployment status has a
+//     single writer — nothing can invalidate these between snapshot and commit.
+type ReconcileTx interface {
+	ActiveVolumeLease(ctx context.Context, volumeID uuid.UUID) (db.VolumeLease, error)
+	CreateReplica(ctx context.Context, spec storage.ReplicaSpec) (db.Replica, error)
+	AssignReplicaHost(ctx context.Context, replicaID, hostID uuid.UUID) error
+	AssignVolumeHost(ctx context.Context, volumeID, hostID uuid.UUID) error
+	AcquireVolumeLease(ctx context.Context, volumeID, replicaID uuid.UUID, expiresAt time.Time) error
+	SetReplicaDesiredStatus(ctx context.Context, replicaID uuid.UUID, desiredStatus domain.ReplicaDesiredStatus) error
+	SetReplicaPhase(ctx context.Context, replicaID uuid.UUID, phase domain.ReplicaPhase, expectRevision int64) error
+	ReleaseVolumeLease(ctx context.Context, volumeID uuid.UUID) error
+	DeleteReplica(ctx context.Context, replicaID uuid.UUID) error
+	SetDeploymentStatus(ctx context.Context, deploymentID uuid.UUID, status domain.DeploymentStatus) error
+	SetServedRevision(ctx context.Context, environmentServiceID uuid.UUID, region string, deploymentID uuid.UUID) error
 }
 
-// volumeLeaseTTL bounds how long a dead engine can hold a volume hostage: the
-// lease is (re-)acquired on every assign_host commit, and expiry frees the
-// volume for the replacement replica. Renewal beyond placement is the host
-// agent's job (todo #4).
-const volumeLeaseTTL = 90 * time.Second
+// The tx-scoped Querier WithTx hands its callback covers this view.
+var _ ReconcileTx = storage.Querier(nil)
+
+// ActuatorStore is the tx entry point every intent commits through; the
+// callback narrows the Querier to ReconcileTx at the point of use.
+type ActuatorStore interface {
+	WithTx(ctx context.Context, fn func(storage.Querier) error) error
+}
 
 // Actuator commits intents to storage. It makes no decisions — it only applies
 // what the Reconciler produced, losing CAS races safely (ErrConflict = another
@@ -74,8 +110,8 @@ func (a *Actuator) applyOne(ctx context.Context, it Intent) error {
 	if it.Kind == IntentSkip {
 		return nil
 	}
-	err := a.store.WithReconcileTx(ctx, func(tx storage.ReconcileTx) error {
-		return a.commit(ctx, tx, it)
+	err := a.store.WithTx(ctx, func(q storage.Querier) error {
+		return a.commit(ctx, q, it)
 	})
 	return dropConflict(err, it)
 }
@@ -85,20 +121,24 @@ func (a *Actuator) applyOne(ctx context.Context, it Intent) error {
 // moved a replica meanwhile) rolls the whole switch back — the pointer never
 // moves off replicas that didn't actually start draining.
 func (a *Actuator) applySwitchBatch(ctx context.Context, batch []Intent) error {
-	err := a.store.WithReconcileTx(ctx, func(tx storage.ReconcileTx) error {
-		for _, it := range batch {
-			if err := tx.SetReplicaPhase(ctx, it.ReplicaID, domain.ReplicaPhaseDraining, it.Revision); err != nil {
-				return err
-			}
-		}
-		lead := batch[0]
-		return tx.SetServedRevision(ctx, lead.Group.EnvironmentServiceID, lead.Group.Region, lead.DeploymentID)
+	err := a.store.WithTx(ctx, func(q storage.Querier) error {
+		return commitSwitchBatch(ctx, q, batch)
 	})
 	return dropConflict(err, batch[0])
 }
 
+func commitSwitchBatch(ctx context.Context, tx ReconcileTx, batch []Intent) error {
+	for _, it := range batch {
+		if err := tx.SetReplicaPhase(ctx, it.ReplicaID, domain.ReplicaPhaseDraining, it.Revision); err != nil {
+			return err
+		}
+	}
+	lead := batch[0]
+	return tx.SetServedRevision(ctx, lead.Group.EnvironmentServiceID, lead.Group.Region, lead.DeploymentID)
+}
+
 // commit maps one intent kind onto its tx calls.
-func (a *Actuator) commit(ctx context.Context, tx storage.ReconcileTx, it Intent) error {
+func (a *Actuator) commit(ctx context.Context, tx ReconcileTx, it Intent) error {
 	switch it.Kind {
 	case IntentCreate:
 		// Hostless by design: the row lands with host_id NULL and next tick's
@@ -122,7 +162,7 @@ func (a *Actuator) commit(ctx context.Context, tx storage.ReconcileTx, it Intent
 		// Stateful: the single-writer lease binds in the same tx as the host,
 		// so a placed replica can never race another writer onto the volume.
 		// The upsert's own predicate rejects a live foreign lease (ErrConflict).
-		return tx.AcquireVolumeLease(ctx, it.VolumeID, it.ReplicaID, a.now().Add(volumeLeaseTTL))
+		return tx.AcquireVolumeLease(ctx, it.VolumeID, it.ReplicaID, a.now().Add(domain.VolumeLeaseTTL))
 
 	case IntentPlaceVolume:
 		return tx.AssignVolumeHost(ctx, it.VolumeID, it.HostID)

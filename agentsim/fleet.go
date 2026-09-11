@@ -50,7 +50,7 @@ func (f *Fleet) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("agentsim: dial gateway: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	f.client = agentpb.NewAgentGatewayClient(conn)
 
 	f.syncAgents(ctx)

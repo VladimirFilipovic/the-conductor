@@ -53,6 +53,7 @@ type Deploy struct {
 	RestartPolicy      string `toml:"restart_policy"`      // never | on-failure | always
 	RestartMaxRetries  int    `toml:"restart_max_retries"` // cap for on-failure
 	DrainSeconds       int    `toml:"drain_seconds"`       // graceful-shutdown window
+	ProgressDeadline   int    `toml:"progress_deadline"`   // cap on "up but never healthy"
 	CPU                string `toml:"cpu"`                 // millicores ("500m") or cores ("1", "1.5")
 	Memory             string `toml:"memory"`              // binary units: "512Mi", "2Gi", or bytes
 }
@@ -69,9 +70,10 @@ type EnvOverride struct {
 const DefaultRegion = "us-east-1"
 
 const (
-	DefaultNumReplicas  = 1
-	DefaultDrainSeconds = 30
-	DefaultRestartMax   = 5
+	DefaultNumReplicas      = 1
+	DefaultDrainSeconds     = 30
+	DefaultRestartMax       = 5
+	DefaultProgressDeadline = 600
 
 	// MaxReplicas caps num_replicas (and `scale`) so a typo can't request an
 	// absurd fleet; the reconcile loop would otherwise try to place every one.
@@ -153,6 +155,9 @@ func (d Deploy) validate() error {
 	if d.DrainSeconds < 0 {
 		return fmt.Errorf("drain_seconds must be >= 0")
 	}
+	if d.ProgressDeadline < 0 {
+		return fmt.Errorf("progress_deadline must be >= 0")
+	}
 	if d.HealthcheckTimeout < 0 {
 		return fmt.Errorf("healthcheck_timeout must be >= 0")
 	}
@@ -210,6 +215,7 @@ func (d Deploy) merge(ov Deploy) Deploy {
 	out.RestartPolicy = orStr(ov.RestartPolicy, out.RestartPolicy)
 	out.RestartMaxRetries = orInt(ov.RestartMaxRetries, out.RestartMaxRetries)
 	out.DrainSeconds = orInt(ov.DrainSeconds, out.DrainSeconds)
+	out.ProgressDeadline = orInt(ov.ProgressDeadline, out.ProgressDeadline)
 	out.CPU = orStr(ov.CPU, out.CPU)
 	out.Memory = orStr(ov.Memory, out.Memory)
 	return out
@@ -234,6 +240,10 @@ func (d Deploy) DrainSecondsOrDefault() int32 {
 
 func (d Deploy) RestartMaxOrDefault() int32 {
 	return orDefaultInt32(int32(d.RestartMaxRetries), DefaultRestartMax)
+}
+
+func (d Deploy) ProgressDeadlineOrDefault() int32 {
+	return orDefaultInt32(int32(d.ProgressDeadline), DefaultProgressDeadline)
 }
 
 const (

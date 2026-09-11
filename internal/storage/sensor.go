@@ -11,7 +11,7 @@ import (
 )
 
 // ReplicaObservation is one agent-reported replica state — the observed half
-// the Sensor ingests. Lives here (like ReplicaSpec) so the engine's
+// the apiserver's Ingest applies. Lives here (like ReplicaSpec) so the engine's
 // SensorStore contract and the Postgres implementation share the type without
 // an import cycle.
 type ReplicaObservation struct {
@@ -20,6 +20,19 @@ type ReplicaObservation struct {
 	Healthy        bool
 	RestartCount   int32
 	LastExitReason string
+}
+
+// sensorQuerier is the observed-state slice of Querier: what agent reports and
+// the staleness sweep write back onto the fleet.
+type sensorQuerier interface {
+	RecordHostHeartbeat(ctx context.Context, hostID uuid.UUID, observedAt time.Time, status string) error
+	MarkStaleHostsNotReady(ctx context.Context, lastHeartbeatBefore time.Time) (int64, error)
+	ListDeadHosts(ctx context.Context, lastHeartbeatBefore time.Time) ([]db.Host, error)
+	MarkHostDown(ctx context.Context, hostID uuid.UUID, lastHeartbeatBefore time.Time) error
+	RecordReplicaObservation(ctx context.Context, obs ReplicaObservation) (bool, error)
+	ListReplicasByHost(ctx context.Context, hostID uuid.UUID) ([]db.Replica, error)
+	RecordVolumeObservedSize(ctx context.Context, volumeID uuid.UUID, observedBytes int64) error
+	RenewVolumeLease(ctx context.Context, replicaID uuid.UUID, expiresAt time.Time) error
 }
 
 func (q querier) RecordHostHeartbeat(ctx context.Context, hostID uuid.UUID, observedAt time.Time, status string) error {

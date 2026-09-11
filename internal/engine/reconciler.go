@@ -221,12 +221,12 @@ var rollingCascade = []rule{
 	anyHostlessReplicas,       // target lost its host → re-place
 	newHealthOpenPastDeadline, // health gate open too long → fail (stalled)
 	notAllHealthy,             // newest not yet healthy, within deadline → hold
-	rollingRampUp,      // below desired → create (canary first, then batch)
-	rollingScaleDown,   // above desired → drain excess target
-	rolloutComplete,    // at desired & all outgoing reaped → status active
-	drainOutgoing,      // outgoing still active → drain
-	reapDrained,        // outgoing drain window elapsed → destroy
-	reapFailedOutgoing, // outgoing crashed terminally → destroy, free the host
+	rollingRampUp,             // below desired → create (canary first, then batch)
+	rollingScaleDown,          // above desired → drain excess target
+	rolloutComplete,           // at desired & all outgoing reaped → status active
+	drainOutgoing,             // outgoing still active → drain
+	reapDrained,               // outgoing drain window elapsed → destroy
+	reapFailedOutgoing,        // outgoing crashed terminally → destroy, free the host
 }
 
 // recreate: stateful. Same gates, but retire-before-create — single-writer

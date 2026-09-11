@@ -13,14 +13,11 @@ import (
 	"conductor/internal/config"
 	"conductor/internal/engine"
 	"conductor/internal/storage"
-
-	"github.com/google/uuid"
 )
 
 func Run(args []string) int {
 	fs := flag.NewFlagSet("engine", flag.ContinueOnError)
 	placement := config.PlacementFlags(fs)
-	grpcAddr := fs.String("grpc.addr", ":7443", "agent gateway gRPC listen address")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -38,7 +35,7 @@ func Run(args []string) int {
 			fmt.Fprintf(os.Stderr, "open log file: %v\n", err)
 			return 1
 		}
-		defer logFile.Close()
+		defer func() { _ = logFile.Close() }()
 		logW = io.MultiWriter(os.Stderr, logFile)
 	}
 
@@ -55,18 +52,12 @@ func Run(args []string) int {
 		slog.Error("engine: connect storage", "err", err)
 		return 1
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
-	sensor := engine.NewSensor(client)
+	watchdog := engine.NewWatchdog(client)
 	eng := engine.New(client, engine.NewReconciler(*placement), engine.NewActuator(client))
-	// The gateway's LISTEN needs its own session-scoped connection, so it
-	// dials the DSN directly instead of borrowing the pooled client.
-	listen := func(ctx context.Context, onChange func(uuid.UUID), onReconnect func()) error {
-		return storage.ListenReplicaChanges(ctx, cfg.DatabaseURL, onChange, onReconnect)
-	}
-	gateway := engine.NewGateway(*grpcAddr, sensor, client, listen)
 
-	if err := engine.Run(ctx, eng, sensor, gateway); err != nil {
+	if err := engine.Run(ctx, eng, watchdog); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}

@@ -100,24 +100,27 @@ func cmdUp(args []string) error {
 		return err
 	}
 
+	// config.toml names a single region, so the spec's replica count is the
+	// whole per-region map for a CLI deploy.
+	region := deployCfg.RegionOrDefault()
 	res, err := proj.Deploy(ctx, project.DeployInput{
-		Target:        t.Target,
-		ImageRef:      image,
-		CPUMillicores: deployCfg.CPUMillicores(),
-		MemBytes:      deployCfg.MemBytes(),
-		Healthcheck:   deployCfg.HealthcheckJSON(),
-		DrainSeconds:  deployCfg.DrainSecondsOrDefault(),
-		RestartMax:    deployCfg.RestartMaxOrDefault(),
-		Region:        deployCfg.RegionOrDefault(),
-		NumReplicas:   deployCfg.ReplicasOrDefault(),
-		CreatedBy:     cfg.User,
+		Target:           t.Target,
+		ImageRef:         image,
+		CPUMillicores:    deployCfg.CPUMillicores(),
+		MemBytes:         deployCfg.MemBytes(),
+		Healthcheck:      deployCfg.HealthcheckJSON(),
+		DrainSeconds:     deployCfg.DrainSecondsOrDefault(),
+		RestartMax:       deployCfg.RestartMaxOrDefault(),
+		ProgressDeadline: deployCfg.ProgressDeadlineOrDefault(),
+		Replicas:         map[string]int32{region: deployCfg.ReplicasOrDefault()},
+		CreatedBy:        cfg.User,
 	})
 	if err != nil {
 		return err
 	}
 
 	fmt.Printf("→ deployed %s  v%d  (%s: %d replicas)  image=%s\n",
-		t, res.Version, res.Region, res.Replicas, image)
+		t, res.Version, region, res.Replicas[region], image)
 	return nil
 }
 

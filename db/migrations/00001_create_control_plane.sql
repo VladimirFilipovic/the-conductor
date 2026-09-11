@@ -224,7 +224,19 @@ CREATE TABLE volume_leases (
 
 CREATE INDEX volume_leases_replica_id_idx ON volume_leases (replica_id);
 
+-- Liveness of the agent-facing API servers. The sensor's death verdict needs
+-- to know heartbeats COULD have arrived: after an apiserver outage every
+-- last_heartbeat is stale by the plane's own absence, not by host death. The
+-- engine reads the oldest continuously-live instance and grants agents a full
+-- death window from its start before freeing anyone's replicas.
+CREATE TABLE gateway_instances (
+	id           uuid        PRIMARY KEY,
+	started_at   timestamptz NOT NULL,
+	heartbeat_at timestamptz NOT NULL
+);
+
 -- +goose Down
+DROP TABLE gateway_instances;
 DROP TABLE volume_leases;
 DROP TABLE replicas;
 DROP FUNCTION notify_replicas_changed;

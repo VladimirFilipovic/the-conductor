@@ -1,4 +1,4 @@
-package engine
+package api
 
 import (
 	"context"
@@ -37,14 +37,14 @@ type GatewayStore interface {
 }
 
 // Gateway is the agent-facing gRPC boundary: one bidi Session stream per host.
-// Uplink (heartbeats, observations) funnels into the Sensor — the gateway adds
-// no rules of its own. Downlink pushes the host's FULL replica state, never
+// Uplink (heartbeats, observations) funnels into Ingest — the gateway adds no
+// rules of its own. Downlink pushes the host's FULL replica state, never
 // deltas: on connect, on a replicas_changed notification, and on the periodic
 // resync, so any single message is sufficient and a lost one self-heals.
 type Gateway struct {
 	agentpb.UnimplementedAgentGatewayServer
 	addr   string
-	sensor *Sensor
+	ingest *Ingest
 	store  GatewayStore
 	// listen blocks delivering change notifications; injectable so tests feed
 	// notifications from a channel instead of a live LISTEN connection.
@@ -61,10 +61,10 @@ type Gateway struct {
 	cache map[uuid.UUID][sha256.Size]byte
 }
 
-func NewGateway(addr string, sensor *Sensor, store GatewayStore, listen func(context.Context, func(uuid.UUID), func()) error) *Gateway {
+func NewGateway(addr string, ingest *Ingest, store GatewayStore, listen func(context.Context, func(uuid.UUID), func()) error) *Gateway {
 	return &Gateway{
 		addr:     addr,
-		sensor:   sensor,
+		ingest:   ingest,
 		store:    store,
 		listen:   listen,
 		sessions: map[uuid.UUID]*agentSession{},
@@ -94,14 +94,17 @@ func (s *agentSession) push(m *agentpb.ServerMessage) {
 	}
 }
 
-// gatewayListenRetryInterval paces bind retries so a failed listen burns time
-// like the engine/sensor loops burn ticks — the supervisor has no pacing of
-// its own and relies on that (see Run's no-hot-loop note).
-const gatewayListenRetryInterval = 5 * time.Second
+// gatewayListenRetryInterval paces bind retries (typically EADDRINUSE from a
+// predecessor still releasing the port); maxListenFailures bounds them so a
+// permanently taken port fails the process instead of spinning.
+const (
+	gatewayListenRetryInterval = 5 * time.Second
+	maxListenFailures          = 5
+)
 
-// run serves gRPC until ctx ends. Blocking; runs under the supervisor next to
-// the engine and sensor loops, restarting with them.
-func (g *Gateway) run(ctx context.Context) error {
+// Run serves gRPC until ctx ends. Blocking; the apiserver runs it next to the
+// control-plane HTTP server.
+func (g *Gateway) Run(ctx context.Context) error {
 	lis, err := g.listenWithRetry(ctx)
 	if err != nil {
 		return err
@@ -152,7 +155,7 @@ func (g *Gateway) listenWithRetry(ctx context.Context) (net.Listener, error) {
 			return lis, nil
 		}
 		failures++
-		if failures >= maxConsecutiveFailures {
+		if failures >= maxListenFailures {
 			return nil, fmt.Errorf("gateway: listen %s: %d consecutive failures: %w", g.addr, failures, err)
 		}
 		slog.Warn("gateway: listen failed, retrying", "addr", g.addr, "err", err, "consecutive", failures)
@@ -282,7 +285,7 @@ func (g *Gateway) unregister(s *agentSession) {
 }
 
 // Session handles one agent's lifetime: Hello binds the stream to a host,
-// then uplink messages flow into the Sensor while the downlink goroutine
+// then uplink messages flow into Ingest while the downlink goroutine
 // drains the session mailbox. Bad uplink messages are logged and dropped, not
 // fatal — a sim agent racing a reap is normal, not a protocol violation.
 func (g *Gateway) Session(stream agentpb.AgentGateway_SessionServer) error {
@@ -329,7 +332,7 @@ func (g *Gateway) Session(stream agentpb.AgentGateway_SessionServer) error {
 		}
 		switch m := msg.Msg.(type) {
 		case *agentpb.AgentMessage_Heartbeat:
-			err = g.sensor.RecordHeartbeat(ctx, hostID, m.Heartbeat.Status)
+			err = g.ingest.RecordHeartbeat(ctx, hostID, m.Heartbeat.Status)
 		case *agentpb.AgentMessage_Observation:
 			o := m.Observation
 			replicaID, perr := uuid.Parse(o.ReplicaId)
@@ -337,7 +340,7 @@ func (g *Gateway) Session(stream agentpb.AgentGateway_SessionServer) error {
 				err = perr
 				break
 			}
-			err = g.sensor.ObserveReplica(ctx, storage.ReplicaObservation{
+			err = g.ingest.ObserveReplica(ctx, storage.ReplicaObservation{
 				ReplicaID:      replicaID,
 				Phase:          o.Phase,
 				Healthy:        o.Healthy,

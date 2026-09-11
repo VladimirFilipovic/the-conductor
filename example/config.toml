@@ -30,6 +30,7 @@ healthcheck_timeout = 300
 restart_policy      = "on-failure"   # never | on-failure | always
 restart_max_retries = 10
 drain_seconds       = 30             # graceful-shutdown window
+progress_deadline   = 600            # seconds a rollout may stay un-healthy before failing
 cpu                 = "500m"         # millicores, or cores ("1", "1.5")
 memory              = "512Mi"        # Ki/Mi/Gi, or a plain byte count
 

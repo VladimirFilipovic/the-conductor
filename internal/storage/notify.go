@@ -51,7 +51,7 @@ func listenOnce(ctx context.Context, dsn string, onChange func(hostID uuid.UUID)
 	if err != nil {
 		return fmt.Errorf("listen connect: %w", err)
 	}
-	defer conn.Close(context.Background())
+	defer func() { _ = conn.Close(context.Background()) }()
 
 	if _, err := conn.Exec(ctx, "LISTEN replicas_changed"); err != nil {
 		return fmt.Errorf("listen: %w", err)

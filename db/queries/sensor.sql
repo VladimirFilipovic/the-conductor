@@ -1,6 +1,6 @@
--- Sensor-path writes: observed state flowing IN from host agents, plus the
--- staleness sweep that turns silence into scheduling signal. The reconcile
--- loop never writes observed state and the sensor never writes desired state —
+-- Observed-state writes: reports flowing IN from host agents (apiserver Ingest),
+-- plus the watchdog sweep that turns silence into scheduling signal. The reconcile
+-- loop never writes observed state and ingest/watchdog never write desired state —
 -- these queries are the whole boundary.
 
 -- Ingest a host agent's liveness ping. Status only moves between the

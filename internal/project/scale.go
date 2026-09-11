@@ -44,41 +44,55 @@ type ScaleInput struct {
 // one tx so a multi-region patch is all-or-nothing. An undeployed service
 // surfaces as storage.ErrNotFound (run `up` first).
 func (s *Service) Scale(ctx context.Context, in ScaleInput) error {
-	return s.store.WithTx(ctx, func(st storage.Store) error {
-		svc, err := st.GetService(ctx, in.Project, in.Service)
-		if err != nil {
+	// Spans both domains: statefulness lives on the service, replica counts on
+	// the deployment, so the body narrows the Querier per step instead of
+	// typing itself to one slice.
+	return s.store.WithTx(ctx, func(st storage.Querier) error {
+		if err := checkStatefulScale(ctx, st, in); err != nil {
 			return err
 		}
-		if svc.Stateful {
-			var total int32
-			for _, count := range in.Replicas {
-				total += count
-			}
-			if total > maxStatefulReplicas {
-				return fmt.Errorf("service %q is stateful and runs a single instance; total replicas must be <= %d, not %d", in.Service, maxStatefulReplicas, total)
-			}
-		}
-		depID, err := st.CurrentDeploymentID(ctx, in.Project, in.Environment, in.Service)
-		if err != nil {
-			return err
-		}
-		for region, count := range in.Replicas {
-			if err := st.SetDeploymentRegion(ctx, depID, region, count); err != nil {
-				return err
-			}
-		}
-		return nil
+		return applyRegionCounts(ctx, st, in)
 	})
+}
+
+func checkStatefulScale(ctx context.Context, st ProjectStore, in ScaleInput) error {
+	svc, err := st.GetService(ctx, in.Project, in.Service)
+	if err != nil {
+		return err
+	}
+	if !svc.Stateful {
+		return nil
+	}
+	if total := totalReplicas(in.Replicas); total > maxStatefulReplicas {
+		return fmt.Errorf("%w: service %q is stateful and runs a single instance; total replicas must be <= %d, not %d", ErrInvalid, in.Service, maxStatefulReplicas, total)
+	}
+	return nil
+}
+
+func applyRegionCounts(ctx context.Context, st DeploymentStore, in ScaleInput) error {
+	depID, err := st.CurrentDeploymentID(ctx, in.Project, in.Environment, in.Service)
+	if err != nil {
+		return err
+	}
+	// Sorted so concurrent multi-region patches take row locks in one order.
+	for _, region := range sortedRegions(in.Replicas) {
+		if err := st.SetDeploymentRegion(ctx, depID, region, in.Replicas[region]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Down zeroes every region of the current deployment — stops compute, leaves
 // the deployment (and its volumes) intact. Like Scale it needs an active deployment.
 func (s *Service) Down(ctx context.Context, t target.Target) error {
-	return s.store.WithTx(ctx, func(st storage.Store) error {
-		depID, err := st.CurrentDeploymentID(ctx, t.Project, t.Environment, t.Service)
-		if err != nil {
-			return err
-		}
-		return st.ZeroDeploymentRegions(ctx, depID)
-	})
+	return s.store.WithTx(ctx, func(st storage.Querier) error { return down(ctx, st, t) })
+}
+
+func down(ctx context.Context, st DeploymentStore, t target.Target) error {
+	depID, err := st.CurrentDeploymentID(ctx, t.Project, t.Environment, t.Service)
+	if err != nil {
+		return err
+	}
+	return st.ZeroDeploymentRegions(ctx, depID)
 }

@@ -51,6 +51,12 @@ type EnvironmentService struct {
 	Source        json.RawMessage `json:"source"`
 }
 
+type GatewayInstance struct {
+	ID          uuid.UUID `json:"id"`
+	StartedAt   time.Time `json:"started_at"`
+	HeartbeatAt time.Time `json:"heartbeat_at"`
+}
+
 type Host struct {
 	ID            uuid.UUID       `json:"id"`
 	Region        string          `json:"region"`

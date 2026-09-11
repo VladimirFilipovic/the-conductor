@@ -91,32 +91,63 @@ type stateSnapshot struct {
 	volumes    []volume
 }
 
+// SnapshotReader is the read side of a reconcile pass: the four whole-fleet
+// queries whose results must come from one REPEATABLE READ snapshot, or the
+// desired count scales out from under the replica list and tears the diff.
+// Read-only; placement writes go through ReconcileTx.
+type SnapshotReader interface {
+	// SnapshotDesired returns one row per (current deployment, region): the
+	// replica target plus the spec needed to mint a replica.
+	SnapshotDesired(ctx context.Context) ([]db.SnapshotDesiredRow, error)
+	// ListActiveReplicas returns the live fleet for services with a current
+	// deployment — the observed half the diff compares against SnapshotDesired.
+	// Includes replicas still under a superseded deployment (an in-flight
+	// rollout); IsCurrent splits the new revision from the outgoing one.
+	ListActiveReplicas(ctx context.Context) ([]db.ListActiveReplicasRow, error)
+	// ListSchedulableHosts returns 'ready' hosts across all regions; the caller
+	// buckets by region for bin-packing.
+	ListSchedulableHosts(ctx context.Context) ([]db.Host, error)
+	// ListActiveVolumes returns the disks of services with a current deployment,
+	// keyed by (service_id, region) against the stateful rows of SnapshotDesired.
+	ListActiveVolumes(ctx context.Context) ([]db.Volume, error)
+}
+
+// The tx-scoped Querier WithReadTx hands its callback covers this view.
+var _ SnapshotReader = storage.Querier(nil)
+
 func (e *Engine) loadSnapshot(ctx context.Context) (stateSnapshot, error) {
 	var snap stateSnapshot
-	err := e.store.WithReadTx(ctx, func(r storage.SnapshotReader) error {
-		desired, err := r.SnapshotDesired(ctx)
-		if err != nil {
-			return err
-		}
-		replicas, err := r.ListActiveReplicas(ctx)
-		if err != nil {
-			return err
-		}
-		hosts, err := r.ListSchedulableHosts(ctx)
-		if err != nil {
-			return err
-		}
-		volumes, err := r.ListActiveVolumes(ctx)
-		if err != nil {
-			return err
-		}
-		snap = newStateSnapshot(desired, replicas, hosts, volumes)
-		return nil
+	err := e.store.WithReadTx(ctx, func(q storage.Querier) error {
+		var err error
+		snap, err = snapshotFrom(ctx, q)
+		return err
 	})
 	if err != nil {
 		return stateSnapshot{}, err
 	}
 	return snap, nil
+}
+
+// snapshotFrom is where the tx-scoped Querier narrows to the reads a pass is
+// allowed to make.
+func snapshotFrom(ctx context.Context, r SnapshotReader) (stateSnapshot, error) {
+	desired, err := r.SnapshotDesired(ctx)
+	if err != nil {
+		return stateSnapshot{}, err
+	}
+	replicas, err := r.ListActiveReplicas(ctx)
+	if err != nil {
+		return stateSnapshot{}, err
+	}
+	hosts, err := r.ListSchedulableHosts(ctx)
+	if err != nil {
+		return stateSnapshot{}, err
+	}
+	volumes, err := r.ListActiveVolumes(ctx)
+	if err != nil {
+		return stateSnapshot{}, err
+	}
+	return newStateSnapshot(desired, replicas, hosts, volumes), nil
 }
 
 func newStateSnapshot(

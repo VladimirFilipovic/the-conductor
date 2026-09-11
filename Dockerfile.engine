@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
-# Builds the conductor engine and bundles goose so the container can migrate the
-# control plane before the reconcile loop starts.
+# Builds the conductor binary and bundles goose so the engine container can
+# migrate the control plane before the reconcile loop starts. The apiserver
+# runs from the same image (compose overrides the command).
 
 FROM golang:1.25-alpine AS builder
 WORKDIR /src

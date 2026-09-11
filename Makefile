@@ -95,7 +95,7 @@ tidy:
 clean:
 	rm -rf $(BUILD_DIR)
 
-# --- chaos-ui full stack (postgres + engine + chaos-ui) --------------------
+# --- full stack (postgres + engine + apiserver + agentsim + chaos-ui) --------------------
 # The engine container migrates and seeds on startup (see docker/engine-
 # entrypoint.sh), so `stack-up` needs no separate `migrate`/`seed` step.
 
@@ -106,9 +106,10 @@ stack-down:
 	docker compose --profile stack down
 
 stack-logs:
-	docker compose --profile stack logs -f engine agentsim chaos-ui
+	docker compose --profile stack logs -f engine apiserver agentsim chaos-ui
 
-# Run the Next.js dev server locally against the docker-compose Postgres. Reads
-# chaos-ui/.env.local if present; defaults target localhost:5432.
+# Run the Next.js dev server locally against a running apiserver. Reads
+# chaos-ui/.env.local if present; defaults target localhost:7080 (control plane)
+# and localhost:7780 (agentsim).
 ui-dev:
 	cd chaos-ui && npm install && npm run dev

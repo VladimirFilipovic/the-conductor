@@ -331,6 +331,8 @@ func (a *Agent) Status() AgentStatus {
 		Hostname: a.Hostname,
 		Region:   a.Region,
 		HostDown: a.hostDown,
+		// Non-nil so an idle host serializes as [] rather than null.
+		Containers: []ContainerStatus{},
 	}
 	for id, c := range a.containers {
 		st.Containers = append(st.Containers, ContainerStatus{

@@ -11,6 +11,13 @@ linters:
     - unconvert
     - unparam
   settings:
+    errcheck:
+      # Writes to tabwriter/stdout in CLI output paths: an error there has no
+      # better handling than the write itself failing loudly at flush.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
     revive:
       # Doc-comment rules clash with this project's "no obvious comments" style.
       rules:

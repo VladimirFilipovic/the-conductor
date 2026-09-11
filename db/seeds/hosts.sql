@@ -33,5 +33,6 @@ ON CONFLICT (hostname) DO UPDATE SET
 	mem_bytes      = EXCLUDED.mem_bytes,
 	disk_bytes     = EXCLUDED.disk_bytes,
 	labels         = EXCLUDED.labels,
-	status         = EXCLUDED.status,
 	last_heartbeat = now();
+-- status is deliberately NOT re-applied on conflict: the seed runs on every
+-- engine container start, and an operator's cordon/drain must survive that.

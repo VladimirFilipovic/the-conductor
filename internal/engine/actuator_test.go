@@ -19,7 +19,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// recordingStore implements ActuatorStore: every WithReconcileTx invocation
+// recordingStore implements ActuatorStore: every WithTx invocation
 // records its call trace, and only traces whose callback returned nil count as
 // committed (the rest rolled back).
 type recordingStore struct {
@@ -27,11 +27,11 @@ type recordingStore struct {
 	rolledBack [][]string
 	// failOn injects an error on the first call whose trace starts with the
 	// given prefix.
-	failOn     string
-	failWith   error
+	failOn   string
+	failWith error
 }
 
-func (s *recordingStore) WithReconcileTx(_ context.Context, fn func(storage.ReconcileTx) error) error {
+func (s *recordingStore) WithTx(_ context.Context, fn func(storage.Querier) error) error {
 	tx := &recordingTx{store: s}
 	if err := fn(tx); err != nil {
 		s.rolledBack = append(s.rolledBack, tx.calls)
@@ -41,7 +41,11 @@ func (s *recordingStore) WithReconcileTx(_ context.Context, fn func(storage.Reco
 	return nil
 }
 
+// The nil embedded Querier makes the stub a storage.Querier without spelling
+// out the methods the actuator never reaches for; touching one panics.
 type recordingTx struct {
+	storage.Querier
+
 	store *recordingStore
 	calls []string
 }
@@ -100,7 +104,7 @@ func (t *recordingTx) SetServedRevision(_ context.Context, environmentServiceID 
 	return t.record("SetServedRevision %s/%s -> %s", environmentServiceID, region, deploymentID)
 }
 
-var _ storage.ReconcileTx = (*recordingTx)(nil)
+var _ ReconcileTx = (*recordingTx)(nil)
 
 // fixedNow pins the actuator clock so lease-expiry traces are exact.
 var fixedNow = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -133,7 +137,7 @@ func TestApplyIntentTxMapping(t *testing.T) {
 	rep := pinnedID(3)
 	hostID := pinnedID(4)
 	vol := pinnedID(5)
-	leaseUntil := fixedNow.Add(volumeLeaseTTL).Format(time.RFC3339)
+	leaseUntil := fixedNow.Add(domain.VolumeLeaseTTL).Format(time.RFC3339)
 
 	tests := []struct {
 		name   string

@@ -20,8 +20,10 @@ const reconcileInterval = 2 * time.Second
 // self-heal on the next tick; only a persistent fault takes the engine down.
 const maxConsecutiveFailures = 5
 
+// SnapshotStore is the tx entry point a pass reads through; the callback
+// narrows the Querier to SnapshotReader at the point of use.
 type SnapshotStore interface {
-	WithReadTx(ctx context.Context, fn func(storage.SnapshotReader) error) error
+	WithReadTx(ctx context.Context, fn func(storage.Querier) error) error
 }
 
 // Consumer-side views of the pass stages, so tests can fake either

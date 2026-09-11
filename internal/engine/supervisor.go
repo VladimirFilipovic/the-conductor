@@ -20,13 +20,13 @@ const supervisorMaxRestarts = 3
 // three lives.
 const supervisorStableAfter = time.Minute
 
-// Run drives the engine and sensor loops — plus the agent gateway when one is
-// wired (nil skips it) — until ctx ends, restarting all together after a
-// crash. They restart together on purpose: they share the store, and a fault
-// that killed one has usually poisoned the others' next pass anyway. No pacing
-// between restarts — the inner loops already burn maxConsecutiveFailures
-// ticks before returning an error, so this can't hot-loop.
-func Run(ctx context.Context, e *Engine, sensor *Sensor, gateway *Gateway) error {
+// Run drives the engine and watchdog loops until ctx ends, restarting both
+// together after a crash. They restart together on purpose: they share the
+// store, and a fault that killed one has usually poisoned the other's next
+// pass anyway. No pacing between restarts — the inner loops already burn
+// maxConsecutiveFailures ticks before returning an error, so this can't
+// hot-loop.
+func Run(ctx context.Context, e *Engine, watchdog *Watchdog) error {
 	slog.Info("engine starting")
 	defer slog.Info("engine shutting down")
 
@@ -34,10 +34,7 @@ func Run(ctx context.Context, e *Engine, sensor *Sensor, gateway *Gateway) error
 	return s.run(ctx, func(ctx context.Context) error {
 		g, ctx := errgroup.WithContext(ctx)
 		g.Go(func() error { return e.run(ctx) })
-		g.Go(func() error { return sensor.run(ctx) })
-		if gateway != nil {
-			g.Go(func() error { return gateway.run(ctx) })
-		}
+		g.Go(func() error { return watchdog.run(ctx) })
 		return g.Wait()
 	})
 }

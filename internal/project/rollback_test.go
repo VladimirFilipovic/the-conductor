@@ -46,11 +46,13 @@ func TestParseVersion(t *testing.T) {
 	}
 }
 
-// fakeStore implements storage.TxStore with only the methods Rollback touches;
-// anything else panics via the embedded nil Store, asserting Rollback reaches for
-// nothing more. WithTx runs the callback on the fake, so rollback is in-memory.
+// fakeStore implements project.TxStore, whose WithTx hands its callback a whole
+// storage.Querier. Rollback is a deployment-domain operation, so only the
+// DeploymentStore subset below is real: the nil embedded Querier panics on
+// anything else, asserting Rollback reaches for nothing more. WithTx runs the
+// callback on the fake, so rollback is in-memory.
 type fakeStore struct {
-	storage.Store
+	storage.Querier
 
 	es        db.GetEnvironmentServiceRow
 	current   db.GetCurrentDeploymentRow
@@ -63,7 +65,7 @@ type fakeStore struct {
 	setCurrentID uuid.UUID
 }
 
-func (f *fakeStore) WithTx(_ context.Context, fn func(storage.Store) error) error {
+func (f *fakeStore) WithTx(_ context.Context, fn func(storage.Querier) error) error {
 	return fn(f)
 }
 

@@ -31,9 +31,9 @@ WHERE environment_service_id = $1 AND is_current;
 INSERT INTO deployments (
 	environment_service_id, version, is_current, image_ref,
 	cpu_millicores, mem_bytes, env, healthcheck,
-	drain_seconds, restart_max, commit_message, created_by
+	drain_seconds, restart_max, progress_deadline, commit_message, created_by
 )
-VALUES ($1, $2, true, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+VALUES ($1, $2, true, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 RETURNING *;
 
 -- name: SetDeploymentRegion :exec

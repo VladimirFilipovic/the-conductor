@@ -1,7 +1,7 @@
 package engine
 
 // End-to-end loop tests: the REAL pass (loadSnapshot → Reconciler → Actuator)
-// and the REAL Sensor sweep run against an in-memory store — no database. The
+// and the REAL Watchdog sweep run against an in-memory store — no database. The
 // store mimics exactly the Postgres semantics the loop depends on: the CAS
 // phase write, the guarded lease upsert, MarkHostDown's atomic unassign, the
 // health high-water trigger, and tx rollback on error. The sim in
@@ -75,7 +75,11 @@ type memLease struct {
 // memStore is single-goroutine safe by construction in the pure e2e tests;
 // the mutex exists for the gateway tests, where a real agent goroutine writes
 // through the gRPC path while the test goroutine ticks and asserts.
+// The nil embedded Querier makes the store a storage.Querier without spelling
+// out the methods the loop never reaches for; touching one panics.
 type memStore struct {
+	storage.Querier
+
 	mu          sync.Mutex
 	deployments []*memDeployment
 	replicas    []*memReplica
@@ -87,12 +91,6 @@ type memStore struct {
 
 // withLock runs fn under the store lock — the concurrent tests' read/mutate
 // window for direct field access.
-func (m *memStore) withLock(fn func()) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	fn()
-}
-
 func newMemStore() *memStore {
 	return &memStore{
 		leases: map[uuid.UUID]memLease{},
@@ -131,7 +129,7 @@ func (m *memStore) volume(id uuid.UUID) *memVolume {
 
 // The read side needs no isolation gymnastics: the loop is single-goroutine in
 // tests, so the live state IS the frozen snapshot.
-func (m *memStore) WithReadTx(_ context.Context, fn func(storage.SnapshotReader) error) error {
+func (m *memStore) WithReadTx(_ context.Context, fn func(storage.Querier) error) error {
 	return fn(m)
 }
 
@@ -236,10 +234,10 @@ func nullTime(t time.Time) sql.NullTime {
 
 // --- ActuatorStore ----------------------------------------------------------
 
-// WithReconcileTx runs fn against a deep copy and adopts it only on success —
-// the same all-or-nothing the real tx gives, which the switch-batch rollback
-// test depends on.
-func (m *memStore) WithReconcileTx(_ context.Context, fn func(storage.ReconcileTx) error) error {
+// WithTx runs fn against a deep copy and adopts it only on success — the same
+// all-or-nothing the real tx gives, which the switch-batch rollback test
+// depends on.
+func (m *memStore) WithTx(_ context.Context, fn func(storage.Querier) error) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	clone := m.clone()
@@ -277,6 +275,8 @@ func (m *memStore) clone() *memStore {
 }
 
 type memTx struct {
+	storage.Querier
+
 	s *memStore
 }
 
@@ -391,9 +391,9 @@ func (t *memTx) SetServedRevision(_ context.Context, environmentServiceID uuid.U
 	return nil
 }
 
-var _ storage.ReconcileTx = (*memTx)(nil)
+var _ ReconcileTx = (*memTx)(nil)
 
-// --- SensorStore ------------------------------------------------------------
+// --- WatchdogStore ------------------------------------------------------------
 
 func (m *memStore) RecordHostHeartbeat(_ context.Context, hostID uuid.UUID, observedAt time.Time, status string) error {
 	m.mu.Lock()
@@ -515,7 +515,13 @@ func (m *memStore) RenewVolumeLease(_ context.Context, replicaID uuid.UUID, expi
 	return nil
 }
 
-var _ SensorStore = (*memStore)(nil)
+// The harness has an apiserver live since the dawn of time: heartbeats were
+// always deliverable, so death verdicts are fair and only the clock matters.
+func (m *memStore) OldestLiveGatewayStart(context.Context, time.Time) (time.Time, bool, error) {
+	return time.Time{}.Add(time.Second), true, nil
+}
+
+var _ WatchdogStore = (*memStore)(nil)
 
 // --- harness -----------------------------------------------------------------
 
@@ -525,22 +531,22 @@ func (c *fakeClock) Now() time.Time          { return c.t }
 func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
 
 type loop struct {
-	t      *testing.T
-	ms     *memStore
-	eng    *Engine
-	sensor *Sensor
-	clock  *fakeClock
+	t        *testing.T
+	ms       *memStore
+	eng      *Engine
+	watchdog *Watchdog
+	clock    *fakeClock
 }
 
 func newLoop(t *testing.T) *loop {
 	ms := newMemStore()
 	clock := &fakeClock{t: time.Now()}
 	return &loop{
-		t:      t,
-		ms:     ms,
-		eng:    New(ms, NewReconciler(config.DefaultPlacement()), NewActuator(ms)),
-		sensor: &Sensor{store: ms, now: clock.Now},
-		clock:  clock,
+		t:        t,
+		ms:       ms,
+		eng:      New(ms, NewReconciler(config.DefaultPlacement()), NewActuator(ms)),
+		watchdog: &Watchdog{store: ms, now: clock.Now},
+		clock:    clock,
 	}
 }
 
@@ -552,7 +558,12 @@ func (l *loop) tick() {
 	}
 }
 
-func (l *loop) addHost(region string, cpu int32, mem, disk int64) uuid.UUID {
+// addHost adds one ready host; every scenario runs in one region on machines
+// that differ only in disk (the stateful scenarios need room for volumes).
+func (l *loop) addHost(disk int64) uuid.UUID {
+	const region = "eu-west-1"
+	const cpu int32 = 2000
+	const mem int64 = 1 << 30
 	id := uuid.New()
 	l.ms.hosts = append(l.ms.hosts, db.Host{
 		ID: id, Region: region, Hostname: "host-" + id.String()[:8],
@@ -604,7 +615,7 @@ func (l *loop) deploy(slot replicaSlot, serviceID uuid.UUID, n int32, stateful b
 }
 
 // agentConverge plays the host agents for one round: every scheduled replica
-// on a live host reports in active+healthy through the real Sensor ingestion
+// on a live host reports in active+healthy through the real Watchdog ingestion
 // path.
 func (l *loop) agentConverge() {
 	l.t.Helper()
@@ -618,7 +629,7 @@ func (l *loop) agentConverge() {
 			switch domain.ReplicaPhase(r.Phase) {
 			case domain.ReplicaPhaseScheduling, domain.ReplicaPhaseStarting, domain.ReplicaPhaseHealthCheck:
 				obs := storage.ReplicaObservation{ReplicaID: r.ID, Phase: string(domain.ReplicaPhaseActive), Healthy: true}
-				if err := l.sensor.ObserveReplica(ctx, obs); err != nil {
+				if _, err := l.ms.RecordReplicaObservation(ctx, obs); err != nil {
 					l.t.Fatalf("observe replica: %v", err)
 				}
 			}
@@ -669,8 +680,8 @@ func TestE2EBlueGreenRollout(t *testing.T) {
 	region := "eu-west-1"
 	slot := replicaSlot{uuid.New(), region}
 	serviceID := uuid.New()
-	l.addHost(region, 2000, 1<<30, 1<<30)
-	l.addHost(region, 2000, 1<<30, 1<<30)
+	l.addHost(1 << 30)
+	l.addHost(1 << 30)
 
 	v1 := l.deploy(slot, serviceID, 2, false)
 	l.rollout(v1)
@@ -707,7 +718,7 @@ func TestE2EBlueGreenRollout(t *testing.T) {
 	}
 }
 
-// The sensor path: a host goes silent → the sweep marks it down and frees its
+// The watchdog path: a host goes silent → the sweep marks it down and frees its
 // replicas atomically → the reconciler re-places them (same rows, replacement
 // priority) onto the surviving host → agents bring them back healthy.
 func TestE2EHostDeathReplacement(t *testing.T) {
@@ -715,18 +726,18 @@ func TestE2EHostDeathReplacement(t *testing.T) {
 	region := "eu-west-1"
 	slot := replicaSlot{uuid.New(), region}
 	serviceID := uuid.New()
-	hostA := l.addHost(region, 2000, 1<<30, 1<<30)
-	hostB := l.addHost(region, 2000, 1<<30, 1<<30)
+	hostA := l.addHost(1 << 30)
+	hostB := l.addHost(1 << 30)
 
 	v1 := l.deploy(slot, serviceID, 2, false)
 	l.rollout(v1)
 
 	// Anti-affinity spread the pair; find who lives where.
 	ctx := context.Background()
-	if err := l.sensor.RecordHeartbeat(ctx, hostA, "ready"); err != nil {
+	if err := l.ms.RecordHostHeartbeat(ctx, hostA, l.clock.Now(), "ready"); err != nil {
 		t.Fatal(err)
 	}
-	if err := l.sensor.RecordHeartbeat(ctx, hostB, "ready"); err != nil {
+	if err := l.ms.RecordHostHeartbeat(ctx, hostB, l.clock.Now(), "ready"); err != nil {
 		t.Fatal(err)
 	}
 	var onA []uuid.UUID
@@ -742,10 +753,10 @@ func TestE2EHostDeathReplacement(t *testing.T) {
 
 	// Host A dies: B keeps heartbeating, A goes silent past the deadline.
 	l.clock.advance(hostDeadAfter + 5*time.Second)
-	if err := l.sensor.RecordHeartbeat(ctx, hostB, "ready"); err != nil {
+	if err := l.ms.RecordHostHeartbeat(ctx, hostB, l.clock.Now(), "ready"); err != nil {
 		t.Fatal(err)
 	}
-	if err := l.sensor.sweepStaleHosts(ctx); err != nil {
+	if err := l.watchdog.sweepStaleHosts(ctx); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 
@@ -757,7 +768,7 @@ func TestE2EHostDeathReplacement(t *testing.T) {
 	// replica alive. The observation guard owns 'replacing' — the report must
 	// drop, not resurrect a freed replica into healthy-but-hostless.
 	zombie := storage.ReplicaObservation{ReplicaID: lost, Phase: string(domain.ReplicaPhaseActive), Healthy: true}
-	if err := l.sensor.ObserveReplica(ctx, zombie); err != nil {
+	if _, err := l.ms.RecordReplicaObservation(ctx, zombie); err != nil {
 		t.Fatalf("zombie observe: %v", err)
 	}
 	if r := l.ms.replica(lost); r.healthy || r.phase != domain.ReplicaPhaseReplacing {
@@ -793,8 +804,8 @@ func TestE2EStatefulRecreateKeepsSingleWriter(t *testing.T) {
 	region := "eu-west-1"
 	slot := replicaSlot{uuid.New(), region}
 	serviceID := uuid.New()
-	l.addHost(region, 2000, 1<<30, 10<<30)
-	l.addHost(region, 2000, 1<<30, 10<<30)
+	l.addHost(10 << 30)
+	l.addHost(10 << 30)
 	vol := l.addVolume(serviceID, region, 1<<30)
 
 	v1 := l.deploy(slot, serviceID, 1, true)

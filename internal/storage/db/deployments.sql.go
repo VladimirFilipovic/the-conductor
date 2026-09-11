@@ -17,9 +17,9 @@ const createDeployment = `-- name: CreateDeployment :one
 INSERT INTO deployments (
 	environment_service_id, version, is_current, image_ref,
 	cpu_millicores, mem_bytes, env, healthcheck,
-	drain_seconds, restart_max, commit_message, created_by
+	drain_seconds, restart_max, progress_deadline, commit_message, created_by
 )
-VALUES ($1, $2, true, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+VALUES ($1, $2, true, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 RETURNING id, environment_service_id, version, is_current, image_ref, cpu_millicores, mem_bytes, env, healthcheck, drain_seconds, restart_max, commit_message, created_by, status, created_at, progress_deadline
 `
 
@@ -33,6 +33,7 @@ type CreateDeploymentParams struct {
 	Healthcheck          json.RawMessage `json:"healthcheck"`
 	DrainSeconds         int32           `json:"drain_seconds"`
 	RestartMax           int32           `json:"restart_max"`
+	ProgressDeadline     int32           `json:"progress_deadline"`
 	CommitMessage        sql.NullString  `json:"commit_message"`
 	CreatedBy            sql.NullString  `json:"created_by"`
 }
@@ -48,6 +49,7 @@ func (q *Queries) CreateDeployment(ctx context.Context, arg CreateDeploymentPara
 		arg.Healthcheck,
 		arg.DrainSeconds,
 		arg.RestartMax,
+		arg.ProgressDeadline,
 		arg.CommitMessage,
 		arg.CreatedBy,
 	)
