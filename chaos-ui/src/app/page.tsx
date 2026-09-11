@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useStore, selectionQuery } from "@/lib/store";
 import { usePoll } from "@/lib/hooks";
-import { postJson } from "@/lib/api";
+import { postJson } from "@/lib/http";
 import { Badge } from "@/components/Badge";
 import { ActivityLog } from "@/components/ActivityLog";
 import { ActionMenu, type MenuItem } from "@/components/ActionMenu";
@@ -21,7 +21,13 @@ import {
   shortId,
   relativeTime,
 } from "@/lib/ui";
-import type { Topology, ServiceNode, HostRow, ServedRow } from "@/lib/db";
+import type {
+  Topology,
+  ServiceNode,
+  HostRow,
+  ServedRow,
+  ServiceTarget,
+} from "@/lib/api";
 
 interface Act {
   key: string;
@@ -178,7 +184,11 @@ export default function ConsolePage() {
                       key={svc.es_id}
                       svc={svc}
                       served={servedFor(svc.es_id)}
-                      path={`${p.project}/${env.name}/${svc.service}`}
+                      target={{
+                        project: p.project,
+                        environment: env.name,
+                        service: svc.service,
+                      }}
                       chaos={chaos}
                     />
                   ))}
@@ -200,14 +210,15 @@ export default function ConsolePage() {
 function ServiceRow({
   svc,
   served,
-  path,
+  target,
   chaos,
 }: {
   svc: ServiceNode;
   served: ServedRow[];
-  path: string;
+  target: ServiceTarget;
   chaos: ChaosFn;
 }) {
+  const path = `${target.project}/${target.environment}/${target.service}`;
   const d = svc.deployment;
   const [form, setForm] = useState<"deploy" | "scale" | null>(null);
   const toggle = (f: "deploy" | "scale") => setForm(form === f ? null : f);
@@ -305,16 +316,16 @@ function ServiceRow({
 
       {form === "deploy" && (
         <DeployForm
-          esId={svc.es_id}
+          target={target}
           label={path}
           defaultImage={d?.image_ref}
           current={svc.regions}
           onDone={() => setForm(null)}
         />
       )}
-      {form === "scale" && d && (
+      {form === "scale" && (
         <ScaleForm
-          deploymentId={d.id}
+          target={target}
           label={path}
           current={svc.regions}
           onDone={() => setForm(null)}

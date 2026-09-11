@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
+  deploymentReplicaIds,
   cordonHost,
   drainHost,
   deleteReplica,
-  deploymentReplicaIds,
-} from "@/lib/db";
+} from "@/lib/api";
+import { failed } from "@/lib/route";
 
 export const dynamic = "force-dynamic";
 
@@ -15,16 +16,17 @@ export const dynamic = "force-dynamic";
 const AGENTSIM_URL = process.env.AGENTSIM_URL ?? "http://localhost:7780";
 
 async function agentChaos(action: string, target: "host" | "replica", id: string) {
+  const url = `${AGENTSIM_URL}/chaos`;
   let res: Response;
   try {
-    res = await fetch(`${AGENTSIM_URL}/chaos`, {
+    res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action, [target]: id }),
       cache: "no-store",
     });
   } catch {
-    throw new Error(`agentsim unreachable at ${AGENTSIM_URL} — is it running?`);
+    throw new Error(`agentsim unreachable at ${url} — is it running?`);
   }
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };
@@ -38,7 +40,7 @@ async function fanOut(action: string, deploymentId: string) {
   await Promise.all(ids.map((id) => agentChaos(action, "replica", id)));
 }
 
-const handlers: Record<string, (id: string) => Promise<void>> = {
+const handlers: Record<string, (id: string) => Promise<unknown>> = {
   // host agent chaos
   host_kill: (id) => agentChaos("host_kill", "host", id),
   host_recover: (id) => agentChaos("host_recover", "host", id),
@@ -50,10 +52,10 @@ const handlers: Record<string, (id: string) => Promise<void>> = {
   // deployment-wide fan-out of agent chaos
   crash_deployment: (id) => fanOut("replica_crash", id),
   stall_rollout: (id) => fanOut("replica_stall_health", id),
-  // operator desired state + synthetic row accidents stay DB-side
-  cordon_host: cordonHost,
-  drain_host: drainHost,
-  delete_replica: deleteReplica,
+  // operator desired state + synthetic row accidents via the control plane
+  cordon_host: (id) => cordonHost(id),
+  drain_host: (id) => drainHost(id),
+  delete_replica: (id) => deleteReplica(id),
 };
 
 export async function POST(req: NextRequest) {
@@ -77,9 +79,6 @@ export async function POST(req: NextRequest) {
     await handler(id);
     return NextResponse.json({ ok: true });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 },
-    );
+    return failed(err);
   }
 }

@@ -3,13 +3,17 @@ import {
   createProject,
   createEnvironment,
   createService,
-  createEnvironmentService,
-  createDeployment,
-  scaleDeployment,
-} from "@/lib/db";
+  bindService,
+  deploy,
+  scale,
+  type ServiceTarget,
+} from "@/lib/api";
+import { failed } from "@/lib/route";
 
 export const dynamic = "force-dynamic";
 
+// Desired-state forms post here; every action is forwarded to the apiserver,
+// which runs it through the same project service the CLI drives.
 export async function POST(req: NextRequest) {
   let body: Record<string, unknown>;
   try {
@@ -30,38 +34,45 @@ export async function POST(req: NextRequest) {
       case "create_service":
         await createService(str(body.project), str(body.name), Boolean(body.stateful));
         break;
-      case "create_environment_service":
-        await createEnvironmentService(
-          str(body.environmentId),
-          str(body.serviceId),
-          str(body.source) || "{}",
-        );
+      case "bind_service":
+        await bindService(str(body.environmentId), str(body.serviceId), {
+          image: str(body.image),
+          repo: str(body.repo),
+        });
         break;
-      case "create_deployment": {
-        const res = await createDeployment({
-          esId: str(body.esId),
-          imageRef: str(body.imageRef),
-          cpuMillicores: num(body.cpuMillicores, 500),
-          memBytes: num(body.memBytes, 536870912),
-          drainSeconds: num(body.drainSeconds, 30),
-          restartMax: num(body.restartMax, 5),
-          progressDeadline: num(body.progressDeadline, 600),
-          commitMessage: str(body.commitMessage),
-          createdBy: str(body.createdBy),
-          regions: regions(body.regions),
+      case "deploy": {
+        const res = await deploy({
+          ...target(body),
+          image_ref: str(body.imageRef),
+          cpu_millicores: num(body.cpuMillicores, 500),
+          mem_bytes: num(body.memBytes, 536870912),
+          drain_seconds: num(body.drainSeconds, 30),
+          restart_max: num(body.restartMax, 5),
+          progress_deadline: num(body.progressDeadline, 600),
+          commit_message: str(body.commitMessage),
+          created_by: str(body.createdBy),
+          replicas: replicas(body.replicas),
         });
         return NextResponse.json({ ok: true, ...res });
       }
       case "scale":
-        await scaleDeployment(str(body.deploymentId), regions(body.regions));
+        await scale(target(body), replicas(body.replicas));
         break;
       default:
         return NextResponse.json({ error: `unknown action ${action}` }, { status: 400 });
     }
     return NextResponse.json({ ok: true });
   } catch (err) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return failed(err);
   }
+}
+
+function target(body: Record<string, unknown>): ServiceTarget {
+  return {
+    project: str(body.project),
+    environment: str(body.environment),
+    service: str(body.service),
+  };
 }
 
 function str(v: unknown): string {
@@ -73,9 +84,13 @@ function num(v: unknown, def: number): number {
   return Number.isFinite(n) ? n : def;
 }
 
-function regions(v: unknown): { region: string; replicas: number }[] {
-  if (!Array.isArray(v)) return [];
-  return v
-    .map((r) => ({ region: str((r as Record<string, unknown>).region), replicas: num((r as Record<string, unknown>).replicas, 0) }))
-    .filter((r) => r.region);
+// Replica counts arrive keyed by region; drop the regions the form left blank
+// so a deploy never commits a region the operator did not ask for.
+function replicas(v: unknown): Record<string, number> {
+  if (typeof v !== "object" || v === null) return {};
+  const out: Record<string, number> = {};
+  for (const [region, count] of Object.entries(v as Record<string, unknown>)) {
+    if (region) out[region] = num(count, 0);
+  }
+  return out;
 }

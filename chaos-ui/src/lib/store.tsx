@@ -8,11 +8,9 @@ import {
   useState,
 } from "react";
 
-export interface Meta {
-  projects: { name: string }[];
-  environments: { id: string; project_name: string; name: string }[];
-  regions: string[];
-}
+import type { Meta } from "@/lib/api";
+
+export type { Meta };
 
 export interface ChaosEntry {
   id: string;

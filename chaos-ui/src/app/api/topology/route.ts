@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getTopology } from "@/lib/db";
+import { getTopology } from "@/lib/api";
+import { failed } from "@/lib/route";
 
 export const dynamic = "force-dynamic";
 
@@ -13,6 +14,6 @@ export async function GET(req: NextRequest) {
     });
     return NextResponse.json(topo);
   } catch (err) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return failed(err);
   }
 }

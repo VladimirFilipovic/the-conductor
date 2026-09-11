@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { useStore } from "@/lib/store";
-import { postJson } from "@/lib/api";
+import { postJson } from "@/lib/http";
+import type { ServiceTarget } from "@/lib/api";
 import { ActionMenu } from "@/components/ActionMenu";
 
 // All desired-state mutations report into the shared activity log instead of a
@@ -217,7 +218,8 @@ function BindForm({ onDone }: { onDone: () => void }) {
   const [project, setProject] = useState("");
   const [environmentId, setEnvironmentId] = useState("");
   const [serviceId, setServiceId] = useState("");
-  const [source, setSource] = useState('{"image":"nginx:latest"}');
+  const [image, setImage] = useState("nginx:latest");
+  const [repo, setRepo] = useState("");
   const [services, setServices] = useState<{ id: string; name: string }[]>([]);
 
   useEffect(() => {
@@ -267,11 +269,20 @@ function BindForm({ onDone }: { onDone: () => void }) {
           ))}
         </select>
       </F>
-      <F label="source (jsonb)" wide>
+      <F label="image">
         <input
           className="input mono"
-          value={source}
-          onChange={(e) => setSource(e.target.value)}
+          value={image}
+          onChange={(e) => setImage(e.target.value)}
+          placeholder="nginx:latest"
+        />
+      </F>
+      <F label="repo (build instead)">
+        <input
+          className="input mono"
+          value={repo}
+          onChange={(e) => setRepo(e.target.value)}
+          placeholder="github.com/acme/api"
         />
       </F>
       <button
@@ -281,10 +292,11 @@ function BindForm({ onDone }: { onDone: () => void }) {
           if (
             await submit(
               {
-                action: "create_environment_service",
+                action: "bind_service",
                 environmentId,
                 serviceId,
-                source,
+                image,
+                repo,
               },
               "bind service",
             )
@@ -303,13 +315,13 @@ const MB = 1024 * 1024;
 // Inline per-service deploy — the service row already pins esId, so the form
 // only asks for the deployment spec itself.
 export function DeployForm({
-  esId,
+  target,
   label,
   defaultImage,
   current,
   onDone,
 }: {
-  esId: string;
+  target: ServiceTarget;
   label: string;
   defaultImage?: string;
   current: { region: string; desired: number }[];
@@ -361,8 +373,8 @@ export function DeployForm({
             if (
               await submit(
                 {
-                  action: "create_deployment",
-                  esId,
+                  action: "deploy",
+                  ...target,
                   imageRef,
                   cpuMillicores: cpu,
                   memBytes: memMb * MB,
@@ -371,9 +383,9 @@ export function DeployForm({
                   progressDeadline: deadline,
                   commitMessage: msg,
                   createdBy: `chaos-ui:${s.session}`,
-                  regions: Object.entries(counts)
-                    .filter(([, v]) => v > 0)
-                    .map(([region, replicas]) => ({ region, replicas })),
+                  replicas: Object.fromEntries(
+                    Object.entries(counts).filter(([, v]) => v > 0),
+                  ),
                 },
                 `deploy ${label}`,
               )
@@ -392,12 +404,12 @@ export function DeployForm({
 }
 
 export function ScaleForm({
-  deploymentId,
+  target,
   label,
   current,
   onDone,
 }: {
-  deploymentId: string;
+  target: ServiceTarget;
   label: string;
   current: { region: string; desired: number }[];
   onDone: () => void;
@@ -417,11 +429,8 @@ export function ScaleForm({
               await submit(
                 {
                   action: "scale",
-                  deploymentId,
-                  regions: Object.entries(counts).map(([region, replicas]) => ({
-                    region,
-                    replicas,
-                  })),
+                  ...target,
+                  replicas: counts,
                 },
                 `scale ${label}`,
               )
