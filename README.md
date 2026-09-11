@@ -20,7 +20,7 @@ This is a learning project — the interesting part is the engine, not productio
 |---|---|
 | `cmd/` | `conductor` CLI (init, add, up, scale, status…) — see `cmd/README.md` |
 | `internal/engine/` | watchdog sweep → reconciler → actuator loop, placement, supervisor |
-| `internal/api/` | apiserver: agent gRPC gateway + ingest, operator HTTP control plane (`/v1/...`) |
+| `internal/api/` | apiserver: `AgentAPI` (agent gRPC, uplink into `ObservedState`), `OperatorAPI` (operator HTTP `/v1/...`, writes via `DesiredState`) |
 | `internal/storage/` | Postgres control plane (sqlc, goose migrations in `db/`) |
 | `agentsim/` | simulated host agents — the deliberate chaos injection point |
 | `chaos-ui/` | Next.js dashboard — a pure HTTP client of the apiserver + the engine log |

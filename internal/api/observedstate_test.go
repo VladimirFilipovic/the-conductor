@@ -1,6 +1,6 @@
 package api
 
-// Ingest unit tests: the observation guards that stand between agent reports
+// ObservedState unit tests: the observation guards that stand between agent reports
 // and the store, and the clock/lease coupling.
 
 import (
@@ -14,7 +14,7 @@ import (
 	"github.com/google/uuid"
 )
 
-type fakeIngestStore struct {
+type fakeObservedStateStore struct {
 	// dropObservations simulates the SQL guard rejecting reports as stale
 	// (replica already in a terminal/orchestrator-owned phase).
 	dropObservations bool
@@ -24,12 +24,12 @@ type fakeIngestStore struct {
 	renewals     []string // "replica until time"
 }
 
-func (f *fakeIngestStore) RecordHostHeartbeat(_ context.Context, hostID uuid.UUID, observedAt time.Time, status string) error {
+func (f *fakeObservedStateStore) RecordHostHeartbeat(_ context.Context, hostID uuid.UUID, observedAt time.Time, status string) error {
 	f.heartbeats = append(f.heartbeats, hostID.String()+"@"+observedAt.UTC().Format(time.RFC3339)+" "+status)
 	return nil
 }
 
-func (f *fakeIngestStore) RecordReplicaObservation(_ context.Context, obs storage.ReplicaObservation) (bool, error) {
+func (f *fakeObservedStateStore) RecordReplicaObservation(_ context.Context, obs storage.ReplicaObservation) (bool, error) {
 	if f.dropObservations {
 		return false, nil
 	}
@@ -37,19 +37,15 @@ func (f *fakeIngestStore) RecordReplicaObservation(_ context.Context, obs storag
 	return true, nil
 }
 
-func (f *fakeIngestStore) RecordVolumeObservedSize(context.Context, uuid.UUID, int64) error {
-	return nil
-}
-
-func (f *fakeIngestStore) RenewVolumeLease(_ context.Context, replicaID uuid.UUID, expiresAt time.Time) error {
+func (f *fakeObservedStateStore) RenewVolumeLease(_ context.Context, replicaID uuid.UUID, expiresAt time.Time) error {
 	f.renewals = append(f.renewals, replicaID.String()+" until "+expiresAt.UTC().Format(time.RFC3339))
 	return nil
 }
 
 var fixedNow = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 
-func newTestIngest(store IngestStore) *Ingest {
-	return NewIngest(store).WithClock(func() time.Time { return fixedNow })
+func newTestObserved(store ObservedStateStore) *ObservedState {
+	return NewObservedState(store).WithClock(func() time.Time { return fixedNow })
 }
 
 func pinnedID(n byte) uuid.UUID {
@@ -61,8 +57,8 @@ func pinnedID(n byte) uuid.UUID {
 // The heartbeat's observation time is the ingest clock, never the agent's — a
 // skewed agent clock must not keep a dead host alive.
 func TestRecordHeartbeatStampsIngestClock(t *testing.T) {
-	store := &fakeIngestStore{}
-	if err := newTestIngest(store).RecordHeartbeat(context.Background(), pinnedID(1), "ready"); err != nil {
+	store := &fakeObservedStateStore{}
+	if err := newTestObserved(store).RecordHeartbeat(context.Background(), pinnedID(1), "ready"); err != nil {
 		t.Fatalf("RecordHeartbeat: %v", err)
 	}
 	want := pinnedID(1).String() + "@2026-01-01T12:00:00Z ready"
@@ -75,8 +71,8 @@ func TestRecordHeartbeatStampsIngestClock(t *testing.T) {
 // hosts.status CHECK (unknown value) or overwrite operator-owned desired
 // state (cordoned/draining).
 func TestRecordHeartbeatRejectsUnreportableStatus(t *testing.T) {
-	store := &fakeIngestStore{}
-	in := newTestIngest(store)
+	store := &fakeObservedStateStore{}
+	in := newTestObserved(store)
 	for _, status := range []string{"up", "cordoned", "draining", ""} {
 		if err := in.RecordHeartbeat(context.Background(), pinnedID(1), status); err == nil {
 			t.Errorf("status %q accepted from agent", status)
@@ -90,8 +86,8 @@ func TestRecordHeartbeatRejectsUnreportableStatus(t *testing.T) {
 // An unknown phase is agent garbage — rejected before it can hit the CHECK
 // constraint as a driver error.
 func TestObserveReplicaRejectsInvalidPhase(t *testing.T) {
-	store := &fakeIngestStore{}
-	in := newTestIngest(store)
+	store := &fakeObservedStateStore{}
+	in := newTestObserved(store)
 
 	if err := in.ObserveReplica(context.Background(), storage.ReplicaObservation{ReplicaID: pinnedID(1), Phase: "zombie"}); err == nil {
 		t.Fatal("invalid phase accepted")
@@ -111,8 +107,8 @@ func TestObserveReplicaRejectsInvalidPhase(t *testing.T) {
 // only protects replicas already IN them, so ingest is the line that stops an
 // agent pushing a live replica INTO draining/reaped/replacing.
 func TestObserveReplicaRejectsOrchestratorOwnedPhases(t *testing.T) {
-	store := &fakeIngestStore{}
-	in := newTestIngest(store)
+	store := &fakeObservedStateStore{}
+	in := newTestObserved(store)
 	for _, phase := range []string{"pending", "scheduling", "shifting", "draining", "reaped", "replacing"} {
 		if err := in.ObserveReplica(context.Background(), storage.ReplicaObservation{ReplicaID: pinnedID(1), Phase: phase}); err == nil {
 			t.Errorf("orchestrator-owned phase %q accepted from agent", phase)
@@ -127,8 +123,8 @@ func TestObserveReplicaRejectsOrchestratorOwnedPhases(t *testing.T) {
 // otherwise a partitioned zombie agent keeps the lease alive forever and the
 // failover replica can never claim the volume.
 func TestObserveReplicaStaleReportDoesNotRenewLease(t *testing.T) {
-	store := &fakeIngestStore{dropObservations: true}
-	if err := newTestIngest(store).ObserveReplica(context.Background(), storage.ReplicaObservation{ReplicaID: pinnedID(1), Phase: "active", Healthy: true}); err != nil {
+	store := &fakeObservedStateStore{dropObservations: true}
+	if err := newTestObserved(store).ObserveReplica(context.Background(), storage.ReplicaObservation{ReplicaID: pinnedID(1), Phase: "active", Healthy: true}); err != nil {
 		t.Fatalf("stale observation errored instead of dropping: %v", err)
 	}
 	if len(store.renewals) != 0 {
@@ -140,8 +136,8 @@ func TestObserveReplicaStaleReportDoesNotRenewLease(t *testing.T) {
 // must not — an ailing replica letting its lease lapse is what frees the
 // volume for failover.
 func TestObserveReplicaRenewsLeaseOnlyWhenHealthy(t *testing.T) {
-	store := &fakeIngestStore{}
-	in := newTestIngest(store)
+	store := &fakeObservedStateStore{}
+	in := newTestObserved(store)
 	ctx := context.Background()
 
 	if err := in.ObserveReplica(ctx, storage.ReplicaObservation{ReplicaID: pinnedID(1), Phase: "active", Healthy: true}); err != nil {

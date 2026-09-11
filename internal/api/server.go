@@ -1,3 +1,16 @@
+// Package api is the apiserver process: two audiences, two transports, one
+// store.
+//
+//   - AgentAPI (gRPC) faces host agents. Uplink reports flow into ObservedState;
+//     downlink pushes each host its full replica state.
+//   - OperatorAPI (HTTP) faces the UI and CLI. Reads assemble the fleet and
+//     topology views; writes go through DesiredState (the project layer) or the
+//     operator-only host/replica transitions.
+//   - Server runs both side by side and keeps the process's own liveness row
+//     fresh so the engine knows whether agents COULD have heartbeated.
+//
+// Wire naming: *JSON types are flat response shapes, *Node types are the
+// nested topology tree, *Request types are inbound bodies.
 package api
 
 import (
@@ -28,44 +41,44 @@ type InstanceStore interface {
 // domain.GatewayLivenessWindow, so one slow tick never reads as an outage.
 const instanceHeartbeatInterval = 5 * time.Second
 
-// Server is the apiserver process: the agent gateway (gRPC) and the operator
-// control plane (HTTP) side by side, plus the liveness heartbeat the engine's
-// startup grace keys on. The two listeners share nothing but the store, so a
-// fault in one is surfaced through the errgroup and takes the process down for
-// the outer supervisor (compose, systemd) to restart.
+// Server is the apiserver process: AgentAPI (gRPC) and OperatorAPI (HTTP)
+// side by side, plus the liveness heartbeat the engine's startup grace keys
+// on. The two listeners share nothing but the store, so a fault in one is
+// surfaced through the errgroup and takes the process down for the outer
+// supervisor (compose, systemd) to restart.
 type Server struct {
-	httpAddr string
-	gateway  *Gateway
-	cp       *ControlPlane
-	store    InstanceStore
-	id       uuid.UUID
-	now      func() time.Time
+	httpAddr  string
+	agents    *AgentAPI
+	operators *OperatorAPI
+	store     InstanceStore
+	id        uuid.UUID
+	now       func() time.Time
 }
 
-func NewServer(httpAddr string, gateway *Gateway, cp *ControlPlane, store InstanceStore) *Server {
-	return &Server{httpAddr: httpAddr, gateway: gateway, cp: cp, store: store, id: uuid.New(), now: time.Now}
+func NewServer(httpAddr string, agents *AgentAPI, operators *OperatorAPI, store InstanceStore) *Server {
+	return &Server{httpAddr: httpAddr, agents: agents, operators: operators, store: store, id: uuid.New(), now: time.Now}
 }
 
 // Run blocks until ctx ends or one component fails.
 func (s *Server) Run(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
-	g.Go(func() error { return s.gateway.Run(ctx) })
+	g.Go(func() error { return s.agents.Run(ctx) })
 	g.Go(func() error { return s.serveHTTP(ctx) })
 	g.Go(func() error { return s.livenessLoop(ctx) })
 	return g.Wait()
 }
 
 func (s *Server) serveHTTP(ctx context.Context) error {
-	srv := &http.Server{Addr: s.httpAddr, Handler: s.cp.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Addr: s.httpAddr, Handler: s.operators.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}()
-	slog.Info("controlplane -> serving", "addr", s.httpAddr)
+	slog.Info("operatorapi -> serving", "addr", s.httpAddr)
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("controlplane: serve: %w", err)
+		return fmt.Errorf("operatorapi: serve: %w", err)
 	}
 	return nil
 }
@@ -106,6 +119,8 @@ func (s *Server) livenessLoop(ctx context.Context) error {
 	}
 }
 
+// registerWithRetry returns ctx.Err() if ctx ends first, so the caller never
+// proceeds to heartbeat (and later deregister) an instance that never existed.
 func (s *Server) registerWithRetry(ctx context.Context) error {
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
@@ -121,7 +136,7 @@ func (s *Server) registerWithRetry(ctx context.Context) error {
 		slog.Warn("apiserver: register failed, retrying", "err", err, "attempt", attempt)
 		select {
 		case <-ctx.Done():
-			return nil
+			return ctx.Err()
 		case <-t.C:
 		}
 	}

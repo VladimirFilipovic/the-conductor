@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -18,19 +17,21 @@ import (
 	"github.com/google/uuid"
 )
 
-// DesiredState is the desired-state half of the control plane: exactly the
+// DesiredState is the desired-state half of the OperatorAPI: exactly the
 // project-domain operations the operator UI drives, and nothing else.
 // *project.Service satisfies it. Every rule these writes must obey (one-current
 // deployment, the single-instance cap on stateful services, the transaction
 // boundaries) lives behind this interface — the handlers only translate JSON.
 type DesiredState interface {
-	Create(ctx context.Context, name, env string) (db.Project, error)
+	CreateProject(ctx context.Context, name, env string) (db.Project, error)
 	CreateEnvironment(ctx context.Context, projectName, sourceEnv, name string) (project.CreateEnvironmentResult, error)
 	CreateService(ctx context.Context, projectName, name string, stateful bool) (db.Service, error)
 	BindService(ctx context.Context, in project.BindServiceInput) (db.EnvironmentService, error)
 	Deploy(ctx context.Context, in project.DeployInput) (project.DeployResult, error)
 	Scale(ctx context.Context, in project.ScaleInput) error
 }
+
+// --- Requests ---------------------------------------------------------------
 
 type createProjectRequest struct {
 	Name        string `json:"name"`
@@ -84,7 +85,64 @@ type scaleRequest struct {
 	Replicas map[string]int32 `json:"replicas"`
 }
 
-func (c *ControlPlane) createProject(w http.ResponseWriter, r *http.Request) {
+// --- Responses --------------------------------------------------------------
+
+type projectCreatedJSON struct {
+	Name        string `json:"name"`
+	Environment string `json:"environment"`
+}
+
+type environmentCreatedJSON struct {
+	ID                uuid.UUID `json:"id"`
+	Project           string    `json:"project"`
+	Name              string    `json:"name"`
+	SourceEnvironment string    `json:"source_environment"`
+	ServicesCloned    int64     `json:"services_cloned"`
+}
+
+type serviceJSON struct {
+	ID       uuid.UUID `json:"id"`
+	Name     string    `json:"name"`
+	Stateful bool      `json:"stateful"`
+}
+
+type servicesJSON struct {
+	Services []serviceJSON `json:"services"`
+}
+
+type environmentServiceJSON struct {
+	ID uuid.UUID `json:"id"`
+}
+
+type deployedJSON struct {
+	Version  int32            `json:"version"`
+	Replicas map[string]int32 `json:"replicas"`
+}
+
+// --- Handlers ---------------------------------------------------------------
+
+// listServices backs the bind form: project-wide by default so a service can be
+// bound into an environment it is not in yet; ?environment= narrows to the
+// services already bound there.
+func (o *OperatorAPI) listServices(w http.ResponseWriter, r *http.Request) {
+	projectName := filterValue(r, "project")
+	if projectName == "" {
+		writeError(w, http.StatusBadRequest, errors.New("project is required"))
+		return
+	}
+	rows, err := o.store.ListProjectServices(r.Context(), projectName, filterValue(r, "environment"))
+	if err != nil {
+		writeInternalError(w, r, err)
+		return
+	}
+	out := make([]serviceJSON, len(rows))
+	for i, row := range rows {
+		out[i] = serviceJSON{ID: row.ID, Name: row.Name, Stateful: row.Stateful}
+	}
+	writeJSON(w, http.StatusOK, servicesJSON{Services: out})
+}
+
+func (o *OperatorAPI) createProject(w http.ResponseWriter, r *http.Request) {
 	var req createProjectRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -96,15 +154,15 @@ func (c *ControlPlane) createProject(w http.ResponseWriter, r *http.Request) {
 	// A project with no environment has nothing to deploy into, so it is born
 	// with one — same rule `conductor init` follows.
 	env := orDefault(req.Environment, link.DefaultEnvironment)
-	if _, err := c.desired.Create(r.Context(), req.Name, env); err != nil {
-		writeDomainError(w, err)
+	if _, err := o.desired.CreateProject(r.Context(), req.Name, env); err != nil {
+		writeDomainError(w, r, err)
 		return
 	}
-	slog.Info("controlplane -> project created", "project", req.Name, "environment", env)
-	writeJSON(w, http.StatusCreated, createProjectRequest{Name: req.Name, Environment: env})
+	slog.Info("operatorapi -> project created", "project", req.Name, "environment", env)
+	writeJSON(w, http.StatusCreated, projectCreatedJSON{Name: req.Name, Environment: env})
 }
 
-func (c *ControlPlane) createEnvironment(w http.ResponseWriter, r *http.Request) {
+func (o *OperatorAPI) createEnvironment(w http.ResponseWriter, r *http.Request) {
 	var req createEnvironmentRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -113,22 +171,22 @@ func (c *ControlPlane) createEnvironment(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, errors.New("project and name are required"))
 		return
 	}
-	res, err := c.desired.CreateEnvironment(r.Context(), req.Project, req.SourceEnvironment, req.Name)
+	res, err := o.desired.CreateEnvironment(r.Context(), req.Project, req.SourceEnvironment, req.Name)
 	if err != nil {
-		writeDomainError(w, err)
+		writeDomainError(w, r, err)
 		return
 	}
-	slog.Info("controlplane -> environment created", "project", req.Project, "environment", req.Name)
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"id":                 res.Environment.ID,
-		"project":            req.Project,
-		"name":               res.Environment.Name,
-		"source_environment": res.SourceEnv,
-		"services_cloned":    res.ServicesCloned,
+	slog.Info("operatorapi -> environment created", "project", req.Project, "environment", req.Name)
+	writeJSON(w, http.StatusCreated, environmentCreatedJSON{
+		ID:                res.Environment.ID,
+		Project:           req.Project,
+		Name:              res.Environment.Name,
+		SourceEnvironment: res.SourceEnv,
+		ServicesCloned:    res.ServicesCloned,
 	})
 }
 
-func (c *ControlPlane) createService(w http.ResponseWriter, r *http.Request) {
+func (o *OperatorAPI) createService(w http.ResponseWriter, r *http.Request) {
 	var req createServiceRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -137,16 +195,16 @@ func (c *ControlPlane) createService(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("project and name are required"))
 		return
 	}
-	svc, err := c.desired.CreateService(r.Context(), req.Project, req.Name, req.Stateful)
+	svc, err := o.desired.CreateService(r.Context(), req.Project, req.Name, req.Stateful)
 	if err != nil {
-		writeDomainError(w, err)
+		writeDomainError(w, r, err)
 		return
 	}
-	slog.Info("controlplane -> service created", "project", req.Project, "service", req.Name)
+	slog.Info("operatorapi -> service created", "project", req.Project, "service", req.Name)
 	writeJSON(w, http.StatusCreated, serviceJSON{ID: svc.ID, Name: svc.Name, Stateful: svc.Stateful})
 }
 
-func (c *ControlPlane) bindService(w http.ResponseWriter, r *http.Request) {
+func (o *OperatorAPI) bindService(w http.ResponseWriter, r *http.Request) {
 	var req bindServiceRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -161,18 +219,18 @@ func (c *ControlPlane) bindService(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("bad service_id"))
 		return
 	}
-	es, err := c.desired.BindService(r.Context(), project.BindServiceInput{
+	es, err := o.desired.BindService(r.Context(), project.BindServiceInput{
 		EnvironmentID: environmentID, ServiceID: serviceID, Source: req.Source,
 	})
 	if err != nil {
-		writeDomainError(w, err)
+		writeDomainError(w, r, err)
 		return
 	}
-	slog.Info("controlplane -> service bound", "environment", environmentID, "service", serviceID)
-	writeJSON(w, http.StatusCreated, map[string]uuid.UUID{"id": es.ID})
+	slog.Info("operatorapi -> service bound", "environment", environmentID, "service", serviceID)
+	writeJSON(w, http.StatusCreated, environmentServiceJSON{ID: es.ID})
 }
 
-func (c *ControlPlane) deploy(w http.ResponseWriter, r *http.Request) {
+func (o *OperatorAPI) deploy(w http.ResponseWriter, r *http.Request) {
 	var req deployRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -181,7 +239,7 @@ func (c *ControlPlane) deploy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	res, err := c.desired.Deploy(r.Context(), project.DeployInput{
+	res, err := o.desired.Deploy(r.Context(), project.DeployInput{
 		Target:           req.target(),
 		ImageRef:         req.ImageRef,
 		CPUMillicores:    req.CPUMillicores,
@@ -194,14 +252,14 @@ func (c *ControlPlane) deploy(w http.ResponseWriter, r *http.Request) {
 		CreatedBy:        req.CreatedBy,
 	})
 	if err != nil {
-		writeDomainError(w, err)
+		writeDomainError(w, r, err)
 		return
 	}
-	slog.Info("controlplane -> deployed", "target", req.serviceTarget, "version", res.Version)
-	writeJSON(w, http.StatusCreated, map[string]any{"version": res.Version, "replicas": res.Replicas})
+	slog.Info("operatorapi -> deployed", "target", req.serviceTarget, "version", res.Version)
+	writeJSON(w, http.StatusCreated, deployedJSON{Version: res.Version, Replicas: res.Replicas})
 }
 
-func (c *ControlPlane) scale(w http.ResponseWriter, r *http.Request) {
+func (o *OperatorAPI) scale(w http.ResponseWriter, r *http.Request) {
 	var req scaleRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -210,17 +268,15 @@ func (c *ControlPlane) scale(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := validateReplicas(req.Replicas); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	if err := o.desired.Scale(r.Context(), project.ScaleInput{Target: req.target(), Replicas: req.Replicas}); err != nil {
+		writeDomainError(w, r, err)
 		return
 	}
-	if err := c.desired.Scale(r.Context(), project.ScaleInput{Target: req.target(), Replicas: req.Replicas}); err != nil {
-		writeDomainError(w, err)
-		return
-	}
-	slog.Info("controlplane -> scaled", "target", req.serviceTarget, "replicas", req.Replicas)
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	slog.Info("operatorapi -> scaled", "target", req.serviceTarget, "replicas", req.Replicas)
+	writeJSON(w, http.StatusOK, okJSON{OK: true})
 }
+
+// --- Validation -------------------------------------------------------------
 
 func (t serviceTarget) target() target.Target {
 	return target.Target{Project: t.Project, Environment: t.Environment, Service: t.Service}
@@ -248,13 +304,20 @@ func (r deployRequest) validate() error {
 	if r.DrainSeconds < 0 || r.RestartMax < 0 || r.ProgressDeadline < 0 {
 		return errors.New("drain_seconds, restart_max and progress_deadline must be >= 0")
 	}
-	if len(r.Replicas) == 0 {
-		return errors.New("replicas must name at least one region")
+	return validateReplicas(r.Replicas)
+}
+
+func (r scaleRequest) validate() error {
+	if err := r.serviceTarget.validate(); err != nil {
+		return err
 	}
 	return validateReplicas(r.Replicas)
 }
 
 func validateReplicas(replicas map[string]int32) error {
+	if len(replicas) == 0 {
+		return errors.New("replicas must name at least one region")
+	}
 	for region, count := range replicas {
 		if region == "" {
 			return errors.New("replicas contains an empty region name")
@@ -266,19 +329,9 @@ func validateReplicas(replicas map[string]int32) error {
 	return nil
 }
 
-func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBytes))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(dst); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid json: %w", err))
-		return false
-	}
-	return true
-}
-
 // writeDomainError maps the project layer's sentinels onto status codes; only a
 // genuinely unexpected failure reaches the client as a 500.
-func writeDomainError(w http.ResponseWriter, err error) {
+func writeDomainError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, storage.ErrNotFound):
 		writeError(w, http.StatusNotFound, err)
@@ -287,7 +340,7 @@ func writeDomainError(w http.ResponseWriter, err error) {
 	case errors.Is(err, project.ErrInvalid):
 		writeError(w, http.StatusBadRequest, err)
 	default:
-		writeError(w, http.StatusInternalServerError, err)
+		writeInternalError(w, r, err)
 	}
 }
 

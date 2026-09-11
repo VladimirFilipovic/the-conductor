@@ -1,5 +1,5 @@
 // Package apiserver is the `conductor apiserver` entrypoint: the agent-facing
-// gRPC gateway and the operator-facing HTTP control plane in one process,
+// gRPC AgentAPI and the operator-facing HTTP OperatorAPI in one process,
 // separate from the engine so either side restarts without pausing the other.
 package apiserver
 
@@ -22,8 +22,8 @@ import (
 
 func Run(args []string) int {
 	fs := flag.NewFlagSet("apiserver", flag.ContinueOnError)
-	grpcAddr := fs.String("grpc.addr", ":7443", "agent gateway gRPC listen address")
-	httpAddr := fs.String("http.addr", ":7080", "control-plane HTTP listen address")
+	grpcAddr := fs.String("grpc.addr", ":7443", "agent API gRPC listen address")
+	httpAddr := fs.String("http.addr", ":7080", "operator API HTTP listen address")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -45,17 +45,17 @@ func Run(args []string) int {
 	}
 	defer func() { _ = client.Close() }()
 
-	// The gateway's LISTEN needs its own session-scoped connection, so it
+	// The agent API's LISTEN needs its own session-scoped connection, so it
 	// dials the DSN directly instead of borrowing the pooled client.
 	listen := func(ctx context.Context, onChange func(uuid.UUID), onReconnect func()) error {
 		return storage.ListenReplicaChanges(ctx, cfg.DatabaseURL, onChange, onReconnect)
 	}
-	gateway := api.NewGateway(*grpcAddr, api.NewIngest(client), client, listen)
-	// The control plane's desired-state writes run through the same project
+	agents := api.NewAgentAPI(*grpcAddr, api.NewObservedState(client), client, listen)
+	// The operator API's desired-state writes run through the same project
 	// service the CLI drives, so UI and CLI cannot disagree on the rules.
-	server := api.NewServer(*httpAddr, gateway, api.NewControlPlane(client, project.New(client)), client)
+	operators := api.NewOperatorAPI(client, project.New(client))
 
-	if err := server.Run(ctx); err != nil {
+	if err := api.NewServer(*httpAddr, agents, operators, client).Run(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
