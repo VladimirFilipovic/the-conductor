@@ -2,14 +2,19 @@
 
 Realne situacije koje sistem mora da preživi, svedene na ponovljive korake.
 Svi su izvedeni protiv docker stack-a (`make stack-up`) sa lokalnim agentsim
-fleet-om. Chaos ide kroz agente (`conductor chaos ...`), nikad direktno u bazu —
+fleet-om. Chaos ide kroz agente (chaos-ui Chaos tab ili agentsim control API na :7780), nikad direktno u bazu —
 agent laže ili ćuti preko pravog gRPC transporta.
+
+chaos-ui uopšte nema pristup bazi: topologiju čita i desired state piše preko
+apiserver control plane-a (`CONTROL_PLANE_URL`, podrazumevano :7080), pa UI i
+CLI prolaze kroz isti project sloj. Operator chaos (cordon/drain/delete replica)
+ide na isti control plane, agent chaos na agentsim.
 
 ## Pragovi (internal/engine)
 
 | Konstanta | Vrednost | Značenje |
 |---|---|---|
-| `sensorSweepInterval` | 5s | koliko često sensor proverava staleness |
+| `watchdogInterval` | 5s | koliko često watchdog proverava staleness |
 | `hostNotReadyAfter` | 30s | tišina → host van scheduling-a (reverzibilno) |
 | `hostDeadAfter` | 2min | tišina → replike se oslobađaju (jednosmerno) |
 | `volumeLeaseTTL` | 90s | bez healthy observacije → lease ističe, failover sme |
@@ -18,7 +23,7 @@ agent laže ili ćuti preko pravog gRPC transporta.
 ## Postavka
 
 ```bash
-make stack-up      # postgres + engine + agentsim + chaos-ui (localhost:3000)
+make stack-up      # postgres + engine + apiserver + agentsim + chaos-ui (localhost:3000)
 make build
 # u praznom folderu:
 ./build/conductor init -n chaos-demo
@@ -27,17 +32,22 @@ make build
 ```
 
 Agentsim je deo stack-a (jedan sim-agent po hostu, control API na :7780).
-Chaos ide ili kroz UI (Chaos tab) ili kroz CLI; ID-jeve daje
-`./build/conductor chaos agents` (host + replika + faza + chaos mod).
+Chaos ide kroz UI (Chaos tab) ili direktno na control API; ID-jeve daje
+`curl localhost:7780/agents` (host + replika + faza + chaos mod). Akcija:
+`curl -XPOST localhost:7780/chaos -d '{"action":"host_kill","host":"<id>"}'`
+(akcije: `host_kill|host_recover`, `replica_crash|replica_crashloop|replica_stall_health|replica_heal`).
 
 ## 1. Mrežni blip (< 2min) — ništa se ne pomera
 
 Zahtev: kratka smetnja ne sme da scrambluje workload.
 
-- `conductor chaos kill-host <host>` → host ćuti
+- chaos `host_kill` <host> → host ćuti
 - ~30s: host `notready`, van scheduling-a; **replike ostaju vezane i active**
-- `conductor chaos recover-host <host>` pre 2min
+- chaos `host_recover` <host> pre 2min
 - prvi heartbeat vraća `ready`; nijedna replika nije mrdnula
+
+Izmereno kroz chaos-ui (2026-09-11): kill → notready 30s → recover → ready 1s;
+replika netaknuta.
 
 Izmereno: kill 11:54:42 → notready 11:55:14 (32s) → recover 11:55:27 → ready
 11:55:32 (5s). Replike netaknute ceo period.
@@ -47,12 +57,15 @@ Izmereno: kill 11:54:42 → notready 11:55:14 (32s) → recover 11:55:27 → rea
 Zahtev: mrtav host gubi replike; one se automatski re-place-uju na druge
 hostove istog regiona; host koji kasnije oživi vraća se prazan u pool.
 
-- `conductor chaos kill-host <host>`, ne oporavljaj
+- chaos `host_kill` <host>, ne oporavljaj
 - ~30s: `notready` (kao gore)
-- ~2min: sensor `MarkHostDown` — replike hostless `replacing`, sledeći tick
+- ~2min: watchdog `MarkHostDown` — replike hostless `replacing`, sledeći tick
   placer ih dodeli drugom hostu, agent ih podigne kroz start → health → active
 - `recover-host` bilo kad posle: host se vraća `ready`, prazan; orphan
   kontejnere agent sam ugasi na prvom full snapshotu (nisu više u njegovoj listi)
+
+Izmereno kroz chaos-ui (2026-09-11): notready 34s → replacing na 2min04s → active na
+drugom hostu 3s kasnije; recover vraća host `ready` prazan za 1s.
 
 Izmereno: kill 11:55:47 → notready 11:56:19 (32s) → replika oslobođena
 11:57:49 (2min02s) → active+healthy na novom hostu 11:57:53 (4s posle presude).
@@ -70,6 +83,10 @@ ne zato što su hostovi mrtvi).
   pada dok uptime engine-a ne pređe `hostDeadAfter` — do tada su se svi živi javili
 - očekivano: nula oslobođenih replika, fleet se vrati `ready` bez ijednog restarta
 
+Izmereno (apiserver kao gateway, 2026-09-11): `docker compose stop apiserver` 153s →
+watchdog demote 5 hostova na +35s, nula presuda smrti → agenti nazad ~64s posle
+starta (gRPC backoff) → svi `ready` na +217s, replike netaknute.
+
 Izmereno: outage 11:58:29→12:00:59 (2.5min) → na +30s sweep demote-ovao svih 6
 hostova (agenti još u backoff-u) → agenti nazad +39s → heartbeat vratio `ready`.
 `hostless=0`, `active=2` tokom celog ciklusa — nijedna replika ni restartovana
@@ -79,18 +96,28 @@ ni pomerena.
 
 Zahtev: kontejner koji stalno umire ne sme da vrti sistem u krug zauvek.
 
-- `conductor chaos crashloop <replica>` → restart_count raste svaki tick
-- reconciler-ovo crashLooping pravilo obara repliku u `failed` (terminalno)
-  kad pređe `restart_max_retries`; pravi se zamenska replika
-- `conductor chaos heal <replica>` nema efekta na `failed` — terminalna faza
+- chaos `replica_crashloop <replica>` → restart_count raste svaki tick
+- kad pređe `restart_max`, reconciler-ovo `crashLooping` pravilo obara **ceo
+  deployment** u `failed` i `deploymentFrozen` ga zamrzava: nema re-place-a,
+  nema zamene, replika ostaje da se vrti dok operator ne uradi redeploy/rollback
+- to je namerno: iscrpljen restart budžet je signal za čoveka, ne za automatiku
+- chaos `replica_heal <replica>` posle toga vraća kontejner u normalan hod, ali
+  deployment ostaje `failed` — jedini izlaz je `conductor up`/`rollback`
+
+Izmereno (kroz chaos-ui): restart_max=5 → deployment `failed` za ~6s; replika
+ostala `starting` sa restart_count u stotinama dok nije stigao sledeći deploy.
 
 ## 5. Zaglavljen health check — progress deadline
 
 Zahtev: deploy koji nikad ne postane healthy ne sme da visi večno.
 
-- `conductor chaos stall <replica>` → kontejner se podigne, probe nikad ne prođu
+- chaos `replica_stall_health` <replica> → kontejner se podigne, probe nikad ne prođu
 - replika stoji u `health_check`; progress-deadline putanja je obara i
   rollout se završava kao failed umesto da visi
+
+Izmereno kroz chaos-ui (progress_deadline=60): kanarinac stall → deployment `failed`
+za 56s, served revision ostao na staroj verziji. Napomena: kontejner postoji na agentu
+tek ~3s posle deploya, stall pre toga vraća 404 (`no agent runs replica`).
 
 ## 6. Zombi agent + stateful lease — single writer
 
@@ -105,6 +132,10 @@ vaskrsne otpisanu repliku.
   zamenska replika sme `AcquireVolumeLease` → single writer očuvan, failover
   nije blokiran
 
+Izmereno kroz chaos-ui (2026-09-11): replacing na +125s, replika ostaje hostless (pin na
+volume hosta), lease istekao ~+90s; recover → ista replika nazad na isti host active za 4s
+i lease ponovo uzet.
+
 ## Regularni scenariji (bez chaosa)
 
 ### 7. Scale up / down
@@ -115,7 +146,7 @@ vaskrsne otpisanu repliku.
   `drain_seconds`; traffic pointer se NE dira (scale-down nije rollout)
 
 Izmereno: 2→4 active+healthy za **8s** (spread na 3 hosta); 4→2: draining na
-+9s, reaped na +12s (drain window 10s).
++9s, reaped na +12s (drain window 10s). Kroz chaos-ui (2026-09-11): 2→4 za 5s, 4→2 za 11s.
 
 ### 8. Novi deploy — blue/green
 
@@ -125,7 +156,8 @@ Izmereno: 2→4 active+healthy za **8s** (spread na 3 hosta); 4→2: draining na
 - pad v2 (crash/stall pre nego što postane healthy) → progress deadline obara
   rollout kao failed, v1 ostaje da služi
 
-Izmereno: `up` v2 → v2 current (2 active) i v1 reaped za **12s**.
+Izmereno: `up` v2 → v2 current (2 active) i v1 reaped za **12s**. Kroz chaos-ui
+(2026-09-11): deploy forma → v2 served i v1 reaped za 21-22s (drain 10s).
 
 ### 9. Stateful servis — volume, lease, recreate
 
@@ -140,11 +172,16 @@ Izmereno: `up` v2 → v2 current (2 active) i v1 reaped za **12s**.
 
 Izmereno: deploy→active+lease za **13s** (replika i volume na istom hostu);
 recreate v1→v2 sa lease handover-om za **19s**, ceo period tačno 1 živa replika.
+2026-09-11: deploy→active+lease 6s; recreate: stara draining → reaped +13s, nova
+scheduling +16s, active + lease +18s.
 
 ### 10. Operator akcije
 
-- `cordon` (UI ili SQL): host ostaje da služi postojeće, ne dobija novo
-- `drain`: engine evakuiše replike sa hosta
+- `cordon` (UI → apiserver): host ostaje da služi postojeće, ne dobija novo
+- `drain` (UI → apiserver): danas isto što i cordon (placer ga preskače), replike
+  ostaju gde su — evakuacija još nije implementirana u reconcileru (TODO);
+  `uncordon` (samo API, `POST /v1/hosts/{id}/uncordon`) vraća i cordoned i
+  draining host u `ready`
 - `conductor rollback`: vrati prethodnu verziju deploymenta
 
 ## Kroz chaos-ui (localhost:3000)
@@ -163,7 +200,6 @@ Chaos tab pokriva sve akcije, po targetu:
 Sve agent-observable akcije UI prosleđuje agentsim control API-ju
 (`AGENTSIM_URL`, u stacku `http://agentsim:7780`) — chaos putuje pravim
 transportom (agent laže/ćuti preko gRPC-a), pa ga sledeći report ne može
-pregaziti. CLI ekvivalent: `conductor chaos kill-host|recover-host|crash|
-crashloop|stall|heal <id>`. Tranzicije gledaj na Topology tabu i u Logs
-(`sensor -> stale hosts out of scheduling`, `sensor -> host down`,
+pregaziti. Curl ekvivalent: `POST :7780/chaos` sa istim `action` poljem. Tranzicije gledaj na Topology tabu i u Logs
+(`watchdog -> stale hosts out of scheduling`, `watchdog -> host down`,
 `reconcile -> rule fired`).

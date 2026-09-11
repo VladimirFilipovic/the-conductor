@@ -6,7 +6,7 @@ A Railway-style deployment platform, built from scratch in Go — CLI, control p
 
 You describe a service (image or repo, replicas, resources, health checks) and `conductor up` commits that as desired state in Postgres. The engine's closed loop does the rest:
 
-- **Sensor** — ingests host heartbeats and replica observations; marks dead hosts down and frees their replicas for re-placement
+- **Watchdog** — sweeps host heartbeats (ingested by the apiserver's gateway); marks dead hosts down and frees their replicas for re-placement
 - **Reconciler** — diffs desired vs observed state, plans intents (create, drain, destroy), and bin-packs replicas onto hosts (best-fit decreasing, capacity ledger, anti-affinity)
 - **Actuator** — applies each intent in its own transaction; conflicts are dropped and self-heal next tick
 
@@ -19,10 +19,11 @@ This is a learning project — the interesting part is the engine, not productio
 | Path | What |
 |---|---|
 | `cmd/` | `conductor` CLI (init, add, up, scale, status…) — see `cmd/README.md` |
-| `internal/engine/` | sensor → reconciler → actuator loop, placement, supervisor |
+| `internal/engine/` | watchdog sweep → reconciler → actuator loop, placement, supervisor |
+| `internal/api/` | apiserver: agent gRPC gateway + ingest, operator HTTP control plane (`/v1/...`) |
 | `internal/storage/` | Postgres control plane (sqlc, goose migrations in `db/`) |
 | `agentsim/` | simulated host agents — the deliberate chaos injection point |
-| `chaos-ui/` | Next.js dashboard over the control plane + engine log |
+| `chaos-ui/` | Next.js dashboard — a pure HTTP client of the apiserver + the engine log |
 
 ## Quick start
 
@@ -38,11 +39,17 @@ make build                     # → ./build/conductor
 ./build/conductor status       # watch the loop converge
 ```
 
-Or run the whole thing — engine + chaos UI — in containers:
+Or run the whole thing — engine, apiserver, agent fleet, chaos UI — in containers:
 
 ```bash
 make stack-up                  # http://localhost:3000
 ```
+
+The UI never touches Postgres: it reads topology and writes desired state over
+the apiserver's HTTP control plane (`CONTROL_PLANE_URL`, default `:7080`), so
+UI and CLI commit through the same project layer and the same rules. Chaos is
+the exception — agent-observable failures go to agentsim (`AGENTSIM_URL`) so
+they travel the real gRPC transport.
 
 Deploy settings live in a `config.toml` next to your service (see `example/config.toml`); identity (project/env/service) comes from the folder link or `-p/-e/-s` flags.
 

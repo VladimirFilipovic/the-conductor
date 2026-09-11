@@ -1,8 +1,8 @@
-# agentsim — gRPC transport + mock agenti + chaos CLI
+# agentsim — gRPC transport + mock agenti + chaos control API
 
 Odluke: agentsim = poseban proces (Fleet), paket van `internal/` (`agentsim/`); chaos ide preko
-HTTP control API-ja na agentsim-u (`conductor chaos` ga gađa; chaos-ui kasnije prelazi na isti);
-gRPC gateway živi u engine procesu, pod istim supervisorom kao engine+sensor petlje.
+HTTP control API-ja na agentsim-u (chaos-ui ga gađa; `conductor chaos` CLI je uklonjen);
+gRPC gateway je u `internal/api` i vrti ga `conductor apiserver`, poseban proces od engine-a.
 
 Pravila prenosa (iz todo.md): preko streama uvek CELO stanje hosta, pun snapshot na
 (re)konekt, periodični resync; konekcija NIJE heartbeat — eksplicitni heartbeat sa
@@ -32,8 +32,8 @@ server timestampom ostaje izvor istine.
 - [x] 8. agentsim Fleet: discovery preko gRPC ListHosts (+ 30s re-discovery za nove hostove),
        spawn 1 agent po hostu; HTTP control API (GET /agents, POST /chaos — isti oblik kao
        chaos-ui /api/chaos, da UI kasnije pređe na njega umesto SQL varanja)
-- [x] 9. `cmd`: `conductor agentsim` (flagovi gateway.addr/control.addr/tick) +
-       `conductor chaos agents|kill-host|recover-host|crash|crashloop|stall|heal`
+- [x] 9. `cmd`: `conductor agentsim` (flagovi gateway.addr/control.addr/tick);
+       `conductor chaos` CLI postojao pa uklonjen — chaos-ui i curl gađaju control API
 - [x] 10. testovi (bufconn, -race): `TestGatewaySessionProtocol` (hello→snapshot, observation→store,
         heartbeat→host, notify→push, cache dedupe) i `TestGatewayFullLoopWithAgent` (pravi
         agentsim.Agent konvergira deployment kroz žicu, pa chaos crash-loop obara u failed);
@@ -45,7 +45,8 @@ server timestampom ostaje izvor istine.
 
 ```
 make migrate-fresh          # trigger je u 00001, menjan u mestu
-conductor engine            # reconcile + sensor + gRPC gateway na :7443
+conductor engine            # reconcile + sensor sweep
+conductor apiserver         # gRPC gateway :7443 + control-plane HTTP :7080
 conductor agentsim          # flota mock agenata + control API na :7780
-conductor chaos agents      # pregled flote
+curl localhost:7780/agents  # pregled flote
 ```
