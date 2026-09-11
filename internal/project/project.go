@@ -93,7 +93,7 @@ func New(store TxStore) *Service {
 	return &Service{store: store}
 }
 
-func (s *Service) Create(ctx context.Context, name, env string) (db.Project, error) {
+func (s *Service) CreateProject(ctx context.Context, name, env string) (db.Project, error) {
 	var p db.Project
 	err := s.store.WithTx(ctx, func(st storage.Querier) error {
 		var err error

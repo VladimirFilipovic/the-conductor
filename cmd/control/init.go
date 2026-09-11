@@ -39,7 +39,7 @@ func cmdInit(args []string) error {
 	defer func() { _ = store.Close() }()
 
 	projects := project.New(store)
-	if _, err := projects.Create(ctx, name, link.DefaultEnvironment); err != nil {
+	if _, err := projects.CreateProject(ctx, name, link.DefaultEnvironment); err != nil {
 		return err
 	}
 
