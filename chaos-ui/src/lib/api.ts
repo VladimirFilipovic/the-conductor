@@ -6,7 +6,7 @@
 const CONTROL_PLANE_URL =
   process.env.CONTROL_PLANE_URL ?? "http://localhost:7080";
 
-// --- Wire shapes (mirror internal/api/controlplane_read.go) ----------------
+// --- Wire shapes (mirror internal/api/topology.go and hosts.go) ----------------
 
 export interface Meta {
   projects: { name: string }[];
@@ -25,14 +25,14 @@ export interface ReplicaRow {
   restart_count: number;
   last_exit_reason: string | null;
   updated_at: string;
-  dep_version: number;
+  deployment_version: number;
   is_current: boolean;
-  es_id: string;
+  environment_service_id: string;
   deployment_id: string;
 }
 
 export interface ServiceNode {
-  es_id: string;
+  environment_service_id: string;
   environment_id: string;
   service: string;
   stateful: boolean;
@@ -64,7 +64,7 @@ export interface ServedRow {
   environment_service_id: string;
   region: string;
   deployment_id: string;
-  dep_version: number;
+  deployment_version: number;
   service: string;
   environment: string;
   updated_at: string;

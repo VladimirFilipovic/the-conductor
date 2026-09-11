@@ -181,9 +181,9 @@ export default function ConsolePage() {
                 <div className="divide-y divide-[var(--color-border-soft)]">
                   {env.services.map((svc) => (
                     <ServiceRow
-                      key={svc.es_id}
+                      key={svc.environment_service_id}
                       svc={svc}
-                      served={servedFor(svc.es_id)}
+                      served={servedFor(svc.environment_service_id)}
                       target={{
                         project: p.project,
                         environment: env.name,
@@ -229,7 +229,7 @@ function ServiceRow({
 
   // Traffic pointing at a version other than the current deployment is the
   // interesting case (mid-rollout or rolled back); otherwise it's just noise.
-  const servedVersions = [...new Set(served.map((sr) => sr.dep_version))];
+  const servedVersions = [...new Set(served.map((sr) => sr.deployment_version))];
   const trafficLagging =
     d && servedVersions.some((v) => v != null && v !== d.version);
 
@@ -282,7 +282,7 @@ function ServiceRow({
               >
                 serving{" "}
                 {served
-                  .map((sr) => `${sr.region} v${sr.dep_version ?? "?"}`)
+                  .map((sr) => `${sr.region} v${sr.deployment_version ?? "?"}`)
                   .join(", ")}
               </Badge>
             )}
@@ -364,7 +364,7 @@ function ReplicaTable({ svc, chaos }: { svc: ServiceNode; chaos: ChaosFn }) {
                   </Badge>
                   {!r.is_current && (
                     <span className="text-[var(--color-faint)]">
-                      v{r.dep_version}
+                      v{r.deployment_version}
                     </span>
                   )}
                   {r.restart_count > 0 && (
