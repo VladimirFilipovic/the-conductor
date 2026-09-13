@@ -8,7 +8,7 @@ import (
 // The chaos control API. Same wire shape chaos-ui's /api/chaos already speaks
 // ({action, id}-ish JSON), so the UI can eventually point here instead of
 // editing the database behind the engine's back — chaos then flows through the
-// real transport: agent lies → gateway → sensor → SQL guards.
+// real transport: agent lies → AgentAPI → ObservedState → SQL guards.
 
 type chaosRequest struct {
 	Action  string `json:"action"`

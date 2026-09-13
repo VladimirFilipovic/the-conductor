@@ -20,38 +20,38 @@ import (
 // startup get an agent without restarting the fleet.
 const hostDiscoveryInterval = 30 * time.Second
 
-// Fleet is the simulated host-agent fleet: it discovers hosts through the gateway's
+// Fleet is the simulated host-agent fleet: it discovers hosts through the AgentAPI's
 // ListHosts (agents never touch the database), spawns one Agent per host, and
 // serves the chaos control API the CLI (and later chaos-ui) drives.
 type Fleet struct {
-	GatewayAddr string
-	ControlAddr string
-	Tick        time.Duration
+	AgentAPIAddr string
+	ControlAddr  string
+	Tick         time.Duration
 
-	client agentpb.AgentGatewayClient
+	client agentpb.AgentAPIClient
 
 	mu     sync.Mutex
 	agents map[uuid.UUID]*Agent
 }
 
-func NewFleet(gatewayAddr, controlAddr string, tick time.Duration) *Fleet {
+func NewFleet(agentAPIAddr, controlAddr string, tick time.Duration) *Fleet {
 	return &Fleet{
-		GatewayAddr: gatewayAddr,
-		ControlAddr: controlAddr,
-		Tick:        tick,
-		agents:      map[uuid.UUID]*Agent{},
+		AgentAPIAddr: agentAPIAddr,
+		ControlAddr:  controlAddr,
+		Tick:         tick,
+		agents:       map[uuid.UUID]*Agent{},
 	}
 }
 
-// Run blocks until ctx ends: dial the gateway (h2c — trusted dev network, no
+// Run blocks until ctx ends: dial the AgentAPI (h2c — trusted dev network, no
 // TLS), keep the agent set in sync with the fleet, serve the control API.
 func (f *Fleet) Run(ctx context.Context) error {
-	conn, err := grpc.NewClient(f.GatewayAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(f.AgentAPIAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		return fmt.Errorf("agentsim: dial gateway: %w", err)
+		return fmt.Errorf("agentsim: dial agentapi: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
-	f.client = agentpb.NewAgentGatewayClient(conn)
+	f.client = agentpb.NewAgentAPIClient(conn)
 
 	f.syncAgents(ctx)
 	go f.discoveryLoop(ctx)
@@ -61,7 +61,7 @@ func (f *Fleet) Run(ctx context.Context) error {
 		<-ctx.Done()
 		_ = srv.Shutdown(context.Background())
 	}()
-	slog.Info("agentsim -> control API serving", "addr", f.ControlAddr, "gateway", f.GatewayAddr)
+	slog.Info("agentsim -> control API serving", "addr", f.ControlAddr, "agentapi", f.AgentAPIAddr)
 
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		return fmt.Errorf("agentsim: control api: %w", err)

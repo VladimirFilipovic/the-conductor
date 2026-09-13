@@ -13,7 +13,7 @@ import (
 
 // listenReconnectDelay paces reconnect attempts after the LISTEN connection
 // drops; notifications missed in the gap are healed by onReconnect (and the
-// gateway's periodic resync), so the delay costs latency, never correctness.
+// AgentAPI's periodic resync), so the delay costs latency, never correctness.
 const listenReconnectDelay = 2 * time.Second
 
 // listenIdleTimeout bounds a single WaitForNotification so a half-open

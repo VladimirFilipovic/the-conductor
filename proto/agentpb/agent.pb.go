@@ -611,8 +611,8 @@ const file_proto_agentpb_agent_proto_rawDesc = "" +
 	"\x04Host\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
 	"\x06region\x18\x02 \x01(\tR\x06region\x12\x1a\n" +
-	"\bhostname\x18\x03 \x01(\tR\bhostname2\xbc\x01\n" +
-	"\fAgentGateway\x12R\n" +
+	"\bhostname\x18\x03 \x01(\tR\bhostname2\xb8\x01\n" +
+	"\bAgentAPI\x12R\n" +
 	"\aSession\x12 .conductor.agent.v1.AgentMessage\x1a!.conductor.agent.v1.ServerMessage(\x010\x01\x12X\n" +
 	"\tListHosts\x12$.conductor.agent.v1.ListHostsRequest\x1a%.conductor.agent.v1.ListHostsResponseB\x19Z\x17conductor/proto/agentpbb\x06proto3"
 
@@ -648,10 +648,10 @@ var file_proto_agentpb_agent_proto_depIdxs = []int32{
 	5, // 3: conductor.agent.v1.ServerMessage.state:type_name -> conductor.agent.v1.HostState
 	6, // 4: conductor.agent.v1.HostState.replicas:type_name -> conductor.agent.v1.Replica
 	9, // 5: conductor.agent.v1.ListHostsResponse.hosts:type_name -> conductor.agent.v1.Host
-	0, // 6: conductor.agent.v1.AgentGateway.Session:input_type -> conductor.agent.v1.AgentMessage
-	7, // 7: conductor.agent.v1.AgentGateway.ListHosts:input_type -> conductor.agent.v1.ListHostsRequest
-	4, // 8: conductor.agent.v1.AgentGateway.Session:output_type -> conductor.agent.v1.ServerMessage
-	8, // 9: conductor.agent.v1.AgentGateway.ListHosts:output_type -> conductor.agent.v1.ListHostsResponse
+	0, // 6: conductor.agent.v1.AgentAPI.Session:input_type -> conductor.agent.v1.AgentMessage
+	7, // 7: conductor.agent.v1.AgentAPI.ListHosts:input_type -> conductor.agent.v1.ListHostsRequest
+	4, // 8: conductor.agent.v1.AgentAPI.Session:output_type -> conductor.agent.v1.ServerMessage
+	8, // 9: conductor.agent.v1.AgentAPI.ListHosts:output_type -> conductor.agent.v1.ListHostsResponse
 	8, // [8:10] is the sub-list for method output_type
 	6, // [6:8] is the sub-list for method input_type
 	6, // [6:6] is the sub-list for extension type_name

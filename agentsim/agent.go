@@ -1,5 +1,5 @@
 // Package agentsim is the simulated host-agent fleet: one Agent per host row,
-// each holding a real gRPC Session to the engine's gateway and playing a tiny
+// each holding a real gRPC Session to the apiserver's AgentAPI and playing a tiny
 // per-host reconciler — desired state arrives on the downlink, fake containers
 // converge toward it, observations and heartbeats ride the uplink. Every agent
 // is also a chaos point: its knobs make it lie or go silent so failure paths
@@ -46,7 +46,7 @@ type Agent struct {
 	Hostname string
 	Region   string
 
-	client agentpb.AgentGatewayClient
+	client agentpb.AgentAPIClient
 	tick   time.Duration
 
 	mu         sync.Mutex
@@ -57,7 +57,7 @@ type Agent struct {
 	done   chan struct{}
 }
 
-func NewAgent(client agentpb.AgentGatewayClient, hostID uuid.UUID, hostname, region string, tick time.Duration) *Agent {
+func NewAgent(client agentpb.AgentAPIClient, hostID uuid.UUID, hostname, region string, tick time.Duration) *Agent {
 	return &Agent{
 		HostID:     hostID,
 		Hostname:   hostname,
@@ -85,7 +85,7 @@ func (a *Agent) Stop() {
 }
 
 // run is the reconnect loop: each attempt opens a fresh Session, and the
-// gateway's first downlink message is a full snapshot, so a dropped stream
+// AgentAPI's first downlink message is a full snapshot, so a dropped stream
 // loses nothing.
 func (a *Agent) run(ctx context.Context) {
 	for ctx.Err() == nil {
@@ -215,7 +215,7 @@ func (a *Agent) step() {
 // report sends the tick's heartbeat plus one observation per container. A
 // downed host sends NOTHING — silence is exactly how a dead host looks to the
 // sensor; the stream deliberately stays open (connection is not liveness).
-func (a *Agent) report(stream agentpb.AgentGateway_SessionClient) error {
+func (a *Agent) report(stream agentpb.AgentAPI_SessionClient) error {
 	a.mu.Lock()
 	if a.hostDown {
 		a.mu.Unlock()

@@ -9,7 +9,7 @@ package conductor.agent.v1;
 
 option go_package = "conductor/proto/agentpb";
 
-service AgentGateway {
+service AgentAPI {
   // Session is the agent's whole protocol. First uplink message must be Hello;
   // after it the server pushes HostState on every relevant change plus a
   // periodic resync, and ingests heartbeats/observations through the Sensor.

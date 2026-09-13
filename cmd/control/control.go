@@ -47,7 +47,7 @@ Observability:
 
 Servers:
   engine                   Start the orchestration engine (reconcile + sensor sweep)
-  apiserver                Start the agent gateway (gRPC) and control-plane API (HTTP)
+  apiserver                Start the agent API (gRPC) and operator API (HTTP)
   agentsim                 Start the simulated host-agent fleet (chaos control API)
 
 Target resolution (flags win over env vars):

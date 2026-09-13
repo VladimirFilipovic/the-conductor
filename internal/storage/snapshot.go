@@ -7,7 +7,7 @@ import (
 )
 
 // snapshotQuerier is the whole-fleet read slice of Querier: the state a
-// reconcile pass diffs, plus the host roster the agent gateway serves.
+// reconcile pass diffs, plus the host roster the AgentAPI serves.
 type snapshotQuerier interface {
 	// SnapshotDesired returns one row per (current deployment, region): the
 	// replica target plus the spec needed to mint a replica.

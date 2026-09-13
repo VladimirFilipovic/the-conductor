@@ -73,7 +73,7 @@ type memLease struct {
 }
 
 // memStore is single-goroutine safe by construction in the pure e2e tests;
-// the mutex exists for the gateway tests, where a real agent goroutine writes
+// the mutex exists for the AgentAPI tests, where a real agent goroutine writes
 // through the gRPC path while the test goroutine ticks and asserts.
 // The nil embedded Querier makes the store a storage.Querier without spelling
 // out the methods the loop never reaches for; touching one panics.
@@ -517,7 +517,7 @@ func (m *memStore) RenewVolumeLease(_ context.Context, replicaID uuid.UUID, expi
 
 // The harness has an apiserver live since the dawn of time: heartbeats were
 // always deliverable, so death verdicts are fair and only the clock matters.
-func (m *memStore) OldestLiveGatewayStart(context.Context, time.Time) (time.Time, bool, error) {
+func (m *memStore) OldestLiveApiserverStart(context.Context, time.Time) (time.Time, bool, error) {
 	return time.Time{}.Add(time.Second), true, nil
 }
 

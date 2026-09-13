@@ -50,7 +50,7 @@ type AgentAPIStore interface {
 // the periodic resync, so any single message is sufficient and a lost one
 // self-heals.
 type AgentAPI struct {
-	agentpb.UnimplementedAgentGatewayServer
+	agentpb.UnimplementedAgentAPIServer
 	addr     string
 	observed *ObservedState
 	store    AgentAPIStore
@@ -125,7 +125,7 @@ func (a *AgentAPI) Run(ctx context.Context) error {
 		grpc.KeepaliveParams(keepalive.ServerParameters{Time: 30 * time.Second, Timeout: 10 * time.Second}),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}),
 	)
-	agentpb.RegisterAgentGatewayServer(srv, a)
+	agentpb.RegisterAgentAPIServer(srv, a)
 	slog.Info("agentapi -> serving", "addr", a.addr)
 
 	go func() {
@@ -285,7 +285,7 @@ func (a *AgentAPI) unregister(s *agentSession) {
 // then uplink messages flow into ObservedState while the downlink goroutine
 // drains the session mailbox. Bad uplink messages are logged and dropped, not
 // fatal — a sim agent racing a reap is normal, not a protocol violation.
-func (a *AgentAPI) Session(stream agentpb.AgentGateway_SessionServer) error {
+func (a *AgentAPI) Session(stream agentpb.AgentAPI_SessionServer) error {
 	ctx := stream.Context()
 	first, err := stream.Recv()
 	if err != nil {

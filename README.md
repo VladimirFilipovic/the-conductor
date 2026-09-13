@@ -6,7 +6,7 @@ A Railway-style deployment platform, built from scratch in Go — CLI, control p
 
 You describe a service (image or repo, replicas, resources, health checks) and `conductor up` commits that as desired state in Postgres. The engine's closed loop does the rest:
 
-- **Watchdog** — sweeps host heartbeats (ingested by the apiserver's gateway); marks dead hosts down and frees their replicas for re-placement
+- **Watchdog** — sweeps host heartbeats (ingested by the apiserver's AgentAPI); marks dead hosts down and frees their replicas for re-placement
 - **Reconciler** — diffs desired vs observed state, plans intents (create, drain, destroy), and bin-packs replicas onto hosts (best-fit decreasing, capacity ledger, anti-affinity)
 - **Actuator** — applies each intent in its own transaction; conflicts are dropped and self-heal next tick
 

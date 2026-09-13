@@ -48,7 +48,7 @@ services:
       CONDUCTOR_DATABASE_URL: postgres://conductor:conductor@postgres:5432/conductor?sslmode=disable
       LOG_LEVEL: DEBUG
     ports:
-      # Agent gateway gRPC (agents dial in) and control-plane HTTP.
+      # AgentAPI gRPC (agents dial in) and OperatorAPI HTTP.
       - "7443:7443"
       - "7080:7080"
     depends_on:
