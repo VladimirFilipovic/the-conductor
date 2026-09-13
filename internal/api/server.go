@@ -29,16 +29,17 @@ import (
 
 // InstanceStore is the apiserver's own liveness record. The engine sensor
 // reads it to know whether agents COULD have heartbeated (see
-// gateway_instances in the schema).
+// apiserver_instances in the schema).
 type InstanceStore interface {
-	RegisterGatewayInstance(ctx context.Context, id uuid.UUID, now time.Time) error
-	HeartbeatGatewayInstance(ctx context.Context, id uuid.UUID, now time.Time) error
-	DeregisterGatewayInstance(ctx context.Context, id uuid.UUID) error
-	DeleteStaleGatewayInstances(ctx context.Context, heartbeatBefore time.Time) error
+	// UpsertApiserverInstance registers on first call and refreshes after; the
+	// row is re-created if it vanished, so liveness never silently lapses.
+	UpsertApiserverInstance(ctx context.Context, id uuid.UUID, startedAt, now time.Time) error
+	DeregisterApiserverInstance(ctx context.Context, id uuid.UUID) error
+	DeleteStaleApiserverInstances(ctx context.Context, heartbeatBefore time.Time) error
 }
 
 // instanceHeartbeatInterval refreshes the liveness row well inside
-// domain.GatewayLivenessWindow, so one slow tick never reads as an outage.
+// domain.ApiserverLivenessWindow, so one slow tick never reads as an outage.
 const instanceHeartbeatInterval = 5 * time.Second
 
 // Server is the apiserver process: AgentAPI (gRPC) and OperatorAPI (HTTP)
@@ -52,6 +53,7 @@ type Server struct {
 	operators *OperatorAPI
 	store     InstanceStore
 	id        uuid.UUID
+	started   time.Time
 	now       func() time.Time
 }
 
@@ -95,7 +97,7 @@ func (s *Server) livenessLoop(ctx context.Context) error {
 		// The run ctx is done; deregister on a fresh short-lived one.
 		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := s.store.DeregisterGatewayInstance(cleanup, s.id); err != nil {
+		if err := s.store.DeregisterApiserverInstance(cleanup, s.id); err != nil {
 			slog.Warn("apiserver: deregister failed; engine will age the row out", "err", err)
 		}
 	}()
@@ -109,11 +111,11 @@ func (s *Server) livenessLoop(ctx context.Context) error {
 		case <-t.C:
 		}
 		now := s.now()
-		if err := s.store.HeartbeatGatewayInstance(ctx, s.id, now); err != nil {
+		if err := s.store.UpsertApiserverInstance(ctx, s.id, s.started, now); err != nil {
 			slog.Warn("apiserver: liveness heartbeat failed", "err", err)
 			continue
 		}
-		if err := s.store.DeleteStaleGatewayInstances(ctx, now.Add(-domain.GatewayLivenessWindow)); err != nil {
+		if err := s.store.DeleteStaleApiserverInstances(ctx, now.Add(-domain.ApiserverLivenessWindow)); err != nil {
 			slog.Warn("apiserver: stale instance cleanup failed", "err", err)
 		}
 	}
@@ -124,8 +126,9 @@ func (s *Server) livenessLoop(ctx context.Context) error {
 func (s *Server) registerWithRetry(ctx context.Context) error {
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
+	s.started = s.now()
 	for attempt := 1; ; attempt++ {
-		err := s.store.RegisterGatewayInstance(ctx, s.id, s.now())
+		err := s.store.UpsertApiserverInstance(ctx, s.id, s.started, s.now())
 		if err == nil {
 			slog.Info("apiserver -> registered", "instance", s.id)
 			return nil

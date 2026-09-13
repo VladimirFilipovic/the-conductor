@@ -12,6 +12,12 @@ import (
 	"github.com/google/uuid"
 )
 
+type ApiserverInstance struct {
+	ID          uuid.UUID `json:"id"`
+	StartedAt   time.Time `json:"started_at"`
+	HeartbeatAt time.Time `json:"heartbeat_at"`
+}
+
 type Deployment struct {
 	ID                   uuid.UUID       `json:"id"`
 	EnvironmentServiceID uuid.UUID       `json:"environment_service_id"`
@@ -49,12 +55,6 @@ type EnvironmentService struct {
 	EnvironmentID uuid.UUID       `json:"environment_id"`
 	ServiceID     uuid.UUID       `json:"service_id"`
 	Source        json.RawMessage `json:"source"`
-}
-
-type GatewayInstance struct {
-	ID          uuid.UUID `json:"id"`
-	StartedAt   time.Time `json:"started_at"`
-	HeartbeatAt time.Time `json:"heartbeat_at"`
 }
 
 type Host struct {

@@ -27,25 +27,27 @@ WHERE id = @host_id AND status IN ('cordoned', 'draining');
 UPDATE hosts SET status = 'draining'
 WHERE id = @host_id AND status <> 'draining';
 
--- name: RegisterGatewayInstance :exec
-INSERT INTO gateway_instances (id, started_at, heartbeat_at)
-VALUES (@id, @now, @now);
+-- Register-or-refresh in one statement: the heartbeat re-creates the row if
+-- it vanished (a dev schema rebuild while the apiserver kept running), so an
+-- instance can't silently drop out of the watchdog's grace computation.
+-- started_at is the instance's own start, never bumped by a refresh.
+-- name: UpsertApiserverInstance :exec
+INSERT INTO apiserver_instances (id, started_at, heartbeat_at)
+VALUES (@id, @started_at, @now)
+ON CONFLICT (id) DO UPDATE SET heartbeat_at = EXCLUDED.heartbeat_at;
 
--- name: HeartbeatGatewayInstance :exec
-UPDATE gateway_instances SET heartbeat_at = @now WHERE id = @id;
-
--- name: DeregisterGatewayInstance :exec
-DELETE FROM gateway_instances WHERE id = @id;
+-- name: DeregisterApiserverInstance :exec
+DELETE FROM apiserver_instances WHERE id = @id;
 
 -- Instances silent past the liveness window are gone (crashed without
 -- deregistering); reap them so they can't anchor the grace computation.
--- name: DeleteStaleGatewayInstances :exec
-DELETE FROM gateway_instances WHERE heartbeat_at < @heartbeat_before;
+-- name: DeleteStaleApiserverInstances :exec
+DELETE FROM apiserver_instances WHERE heartbeat_at < @heartbeat_before;
 
 -- The oldest start among instances heartbeating recently. No row = no live
--- gateway, so no host could have heartbeated and no death verdict is fair.
--- name: OldestLiveGatewayStart :one
-SELECT started_at FROM gateway_instances
+-- apiserver, so no host could have heartbeated and no death verdict is fair.
+-- name: OldestLiveApiserverStart :one
+SELECT started_at FROM apiserver_instances
 WHERE heartbeat_at >= @heartbeat_after
 ORDER BY started_at
 LIMIT 1;

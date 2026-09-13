@@ -180,7 +180,7 @@ CREATE TRIGGER replicas_set_updated_at
 	BEFORE UPDATE ON replicas
 	FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
--- Downlink change signal for the agent gateway: any change a host agent cares
+-- Downlink change signal for the AgentAPI downlink: any change a host agent cares
 -- about (a replica bound/unbound to a host, or its phase moved) notifies the
 -- affected host(s). Payload is the host id — a KEY, never data: the listener
 -- re-reads fresh state, so a lost or reordered notification costs nothing
@@ -224,19 +224,19 @@ CREATE TABLE volume_leases (
 
 CREATE INDEX volume_leases_replica_id_idx ON volume_leases (replica_id);
 
--- Liveness of the agent-facing API servers. The sensor's death verdict needs
+-- Liveness of the apiserver processes (the agent-facing API). The sensor's death verdict needs
 -- to know heartbeats COULD have arrived: after an apiserver outage every
 -- last_heartbeat is stale by the plane's own absence, not by host death. The
 -- engine reads the oldest continuously-live instance and grants agents a full
 -- death window from its start before freeing anyone's replicas.
-CREATE TABLE gateway_instances (
+CREATE TABLE apiserver_instances (
 	id           uuid        PRIMARY KEY,
 	started_at   timestamptz NOT NULL,
 	heartbeat_at timestamptz NOT NULL
 );
 
 -- +goose Down
-DROP TABLE gateway_instances;
+DROP TABLE apiserver_instances;
 DROP TABLE volume_leases;
 DROP TABLE replicas;
 DROP FUNCTION notify_replicas_changed;

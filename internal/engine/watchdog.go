@@ -26,9 +26,9 @@ type WatchdogStore interface {
 	// last_heartbeat < lastHeartbeatBefore itself — a heartbeat that landed
 	// after the sweep listed the host makes it a no-op.
 	MarkHostDown(ctx context.Context, hostID uuid.UUID, lastHeartbeatBefore time.Time) error
-	// OldestLiveGatewayStart reports when the longest-running apiserver that
+	// OldestLiveApiserverStart reports when the longest-running apiserver that
 	// has heartbeated since heartbeatAfter started; ok=false means none has.
-	OldestLiveGatewayStart(ctx context.Context, heartbeatAfter time.Time) (time.Time, bool, error)
+	OldestLiveApiserverStart(ctx context.Context, heartbeatAfter time.Time) (time.Time, bool, error)
 }
 
 // watchdogInterval is the idle gap between stale-host sweeps (same
@@ -137,14 +137,14 @@ func (s *Watchdog) sweepStaleHosts(ctx context.Context) error {
 
 // deathVerdictFair is the startup grace, keyed on the apiserver rather than on
 // this process: a heartbeat can only be stale by a host's fault if some
-// gateway has been continuously live for a full death window. After an
+// apiserver has been continuously live for a full death window. After an
 // apiserver outage every last_heartbeat is stale by the plane's own absence,
 // and agents deserve that window to reconnect before their replicas are freed.
-// No live gateway at all means nobody could have heartbeated — never fair.
+// No live apiserver at all means nobody could have heartbeated — never fair.
 func (s *Watchdog) deathVerdictFair(ctx context.Context, now time.Time) (bool, error) {
-	started, ok, err := s.store.OldestLiveGatewayStart(ctx, now.Add(-domain.GatewayLivenessWindow))
+	started, ok, err := s.store.OldestLiveApiserverStart(ctx, now.Add(-domain.ApiserverLivenessWindow))
 	if err != nil {
-		return false, fmt.Errorf("gateway liveness: %w", err)
+		return false, fmt.Errorf("apiserver liveness: %w", err)
 	}
 	return ok && now.Sub(started) >= hostDeadAfter, nil
 }

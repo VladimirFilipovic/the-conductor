@@ -29,23 +29,23 @@ func (q *Queries) CordonHost(ctx context.Context, hostID uuid.UUID) (int64, erro
 	return result.RowsAffected()
 }
 
-const deleteStaleGatewayInstances = `-- name: DeleteStaleGatewayInstances :exec
-DELETE FROM gateway_instances WHERE heartbeat_at < $1
+const deleteStaleApiserverInstances = `-- name: DeleteStaleApiserverInstances :exec
+DELETE FROM apiserver_instances WHERE heartbeat_at < $1
 `
 
 // Instances silent past the liveness window are gone (crashed without
 // deregistering); reap them so they can't anchor the grace computation.
-func (q *Queries) DeleteStaleGatewayInstances(ctx context.Context, heartbeatBefore time.Time) error {
-	_, err := q.db.ExecContext(ctx, deleteStaleGatewayInstances, heartbeatBefore)
+func (q *Queries) DeleteStaleApiserverInstances(ctx context.Context, heartbeatBefore time.Time) error {
+	_, err := q.db.ExecContext(ctx, deleteStaleApiserverInstances, heartbeatBefore)
 	return err
 }
 
-const deregisterGatewayInstance = `-- name: DeregisterGatewayInstance :exec
-DELETE FROM gateway_instances WHERE id = $1
+const deregisterApiserverInstance = `-- name: DeregisterApiserverInstance :exec
+DELETE FROM apiserver_instances WHERE id = $1
 `
 
-func (q *Queries) DeregisterGatewayInstance(ctx context.Context, id uuid.UUID) error {
-	_, err := q.db.ExecContext(ctx, deregisterGatewayInstance, id)
+func (q *Queries) DeregisterApiserverInstance(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, deregisterApiserverInstance, id)
 	return err
 }
 
@@ -61,20 +61,6 @@ func (q *Queries) DrainHost(ctx context.Context, hostID uuid.UUID) (int64, error
 		return 0, err
 	}
 	return result.RowsAffected()
-}
-
-const heartbeatGatewayInstance = `-- name: HeartbeatGatewayInstance :exec
-UPDATE gateway_instances SET heartbeat_at = $1 WHERE id = $2
-`
-
-type HeartbeatGatewayInstanceParams struct {
-	Now time.Time `json:"now"`
-	ID  uuid.UUID `json:"id"`
-}
-
-func (q *Queries) HeartbeatGatewayInstance(ctx context.Context, arg HeartbeatGatewayInstanceParams) error {
-	_, err := q.db.ExecContext(ctx, heartbeatGatewayInstance, arg.Now, arg.ID)
-	return err
 }
 
 const listDeploymentReplicaIDs = `-- name: ListDeploymentReplicaIDs :many
@@ -311,35 +297,20 @@ func (q *Queries) ListReplicas(ctx context.Context) ([]Replica, error) {
 	return items, nil
 }
 
-const oldestLiveGatewayStart = `-- name: OldestLiveGatewayStart :one
-SELECT started_at FROM gateway_instances
+const oldestLiveApiserverStart = `-- name: OldestLiveApiserverStart :one
+SELECT started_at FROM apiserver_instances
 WHERE heartbeat_at >= $1
 ORDER BY started_at
 LIMIT 1
 `
 
 // The oldest start among instances heartbeating recently. No row = no live
-// gateway, so no host could have heartbeated and no death verdict is fair.
-func (q *Queries) OldestLiveGatewayStart(ctx context.Context, heartbeatAfter time.Time) (time.Time, error) {
-	row := q.db.QueryRowContext(ctx, oldestLiveGatewayStart, heartbeatAfter)
+// apiserver, so no host could have heartbeated and no death verdict is fair.
+func (q *Queries) OldestLiveApiserverStart(ctx context.Context, heartbeatAfter time.Time) (time.Time, error) {
+	row := q.db.QueryRowContext(ctx, oldestLiveApiserverStart, heartbeatAfter)
 	var started_at time.Time
 	err := row.Scan(&started_at)
 	return started_at, err
-}
-
-const registerGatewayInstance = `-- name: RegisterGatewayInstance :exec
-INSERT INTO gateway_instances (id, started_at, heartbeat_at)
-VALUES ($1, $2, $2)
-`
-
-type RegisterGatewayInstanceParams struct {
-	ID  uuid.UUID `json:"id"`
-	Now time.Time `json:"now"`
-}
-
-func (q *Queries) RegisterGatewayInstance(ctx context.Context, arg RegisterGatewayInstanceParams) error {
-	_, err := q.db.ExecContext(ctx, registerGatewayInstance, arg.ID, arg.Now)
-	return err
 }
 
 const topologyDesiredRegions = `-- name: TopologyDesiredRegions :many
@@ -653,4 +624,25 @@ func (q *Queries) UncordonHost(ctx context.Context, hostID uuid.UUID) (int64, er
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const upsertApiserverInstance = `-- name: UpsertApiserverInstance :exec
+INSERT INTO apiserver_instances (id, started_at, heartbeat_at)
+VALUES ($1, $2, $3)
+ON CONFLICT (id) DO UPDATE SET heartbeat_at = EXCLUDED.heartbeat_at
+`
+
+type UpsertApiserverInstanceParams struct {
+	ID        uuid.UUID `json:"id"`
+	StartedAt time.Time `json:"started_at"`
+	Now       time.Time `json:"now"`
+}
+
+// Register-or-refresh in one statement: the heartbeat re-creates the row if
+// it vanished (a dev schema rebuild while the apiserver kept running), so an
+// instance can't silently drop out of the watchdog's grace computation.
+// started_at is the instance's own start, never bumped by a refresh.
+func (q *Queries) UpsertApiserverInstance(ctx context.Context, arg UpsertApiserverInstanceParams) error {
+	_, err := q.db.ExecContext(ctx, upsertApiserverInstance, arg.ID, arg.StartedAt, arg.Now)
+	return err
 }

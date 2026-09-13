@@ -12,7 +12,7 @@ import (
 )
 
 // controlPlaneQuerier is the operator slice of Querier: the topology/roster
-// reads the HTTP API serves, host cordon/drain, and gateway-instance
+// reads the HTTP API serves, host cordon/drain, and apiserver-instance
 // bookkeeping.
 type controlPlaneQuerier interface {
 	ListReplicas(ctx context.Context) ([]db.Replica, error)
@@ -21,11 +21,10 @@ type controlPlaneQuerier interface {
 	UncordonHost(ctx context.Context, hostID uuid.UUID) (bool, error)
 	DrainHost(ctx context.Context, hostID uuid.UUID) (bool, error)
 
-	RegisterGatewayInstance(ctx context.Context, id uuid.UUID, now time.Time) error
-	HeartbeatGatewayInstance(ctx context.Context, id uuid.UUID, now time.Time) error
-	DeregisterGatewayInstance(ctx context.Context, id uuid.UUID) error
-	DeleteStaleGatewayInstances(ctx context.Context, heartbeatBefore time.Time) error
-	OldestLiveGatewayStart(ctx context.Context, heartbeatAfter time.Time) (time.Time, bool, error)
+	UpsertApiserverInstance(ctx context.Context, id uuid.UUID, startedAt, now time.Time) error
+	DeregisterApiserverInstance(ctx context.Context, id uuid.UUID) error
+	DeleteStaleApiserverInstances(ctx context.Context, heartbeatBefore time.Time) error
+	OldestLiveApiserverStart(ctx context.Context, heartbeatAfter time.Time) (time.Time, bool, error)
 
 	ListProjectNames(ctx context.Context, project string) ([]string, error)
 	ListRegionNames(ctx context.Context) ([]string, error)
@@ -62,26 +61,22 @@ func (q querier) DrainHost(ctx context.Context, hostID uuid.UUID) (bool, error) 
 	return n > 0, err
 }
 
-func (q querier) RegisterGatewayInstance(ctx context.Context, id uuid.UUID, now time.Time) error {
-	return q.queries.RegisterGatewayInstance(ctx, db.RegisterGatewayInstanceParams{ID: id, Now: now})
+func (q querier) UpsertApiserverInstance(ctx context.Context, id uuid.UUID, startedAt, now time.Time) error {
+	return q.queries.UpsertApiserverInstance(ctx, db.UpsertApiserverInstanceParams{ID: id, StartedAt: startedAt, Now: now})
 }
 
-func (q querier) HeartbeatGatewayInstance(ctx context.Context, id uuid.UUID, now time.Time) error {
-	return q.queries.HeartbeatGatewayInstance(ctx, db.HeartbeatGatewayInstanceParams{ID: id, Now: now})
+func (q querier) DeregisterApiserverInstance(ctx context.Context, id uuid.UUID) error {
+	return q.queries.DeregisterApiserverInstance(ctx, id)
 }
 
-func (q querier) DeregisterGatewayInstance(ctx context.Context, id uuid.UUID) error {
-	return q.queries.DeregisterGatewayInstance(ctx, id)
+func (q querier) DeleteStaleApiserverInstances(ctx context.Context, heartbeatBefore time.Time) error {
+	return q.queries.DeleteStaleApiserverInstances(ctx, heartbeatBefore)
 }
 
-func (q querier) DeleteStaleGatewayInstances(ctx context.Context, heartbeatBefore time.Time) error {
-	return q.queries.DeleteStaleGatewayInstances(ctx, heartbeatBefore)
-}
-
-// OldestLiveGatewayStart reports when the longest-running live apiserver
+// OldestLiveApiserverStart reports when the longest-running live apiserver
 // started; ok=false means no instance has heartbeated since heartbeatAfter.
-func (q querier) OldestLiveGatewayStart(ctx context.Context, heartbeatAfter time.Time) (time.Time, bool, error) {
-	t, err := q.queries.OldestLiveGatewayStart(ctx, heartbeatAfter)
+func (q querier) OldestLiveApiserverStart(ctx context.Context, heartbeatAfter time.Time) (time.Time, bool, error) {
+	t, err := q.queries.OldestLiveApiserverStart(ctx, heartbeatAfter)
 	if errors.Is(err, sql.ErrNoRows) {
 		return time.Time{}, false, nil
 	}
