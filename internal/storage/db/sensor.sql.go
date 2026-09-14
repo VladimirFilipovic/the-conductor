@@ -157,6 +157,51 @@ func (q *Queries) ListReplicasByHost(ctx context.Context, hostID uuid.NullUUID) 
 	return items, nil
 }
 
+const listVolumesByHost = `-- name: ListVolumesByHost :many
+SELECT id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at FROM volumes
+WHERE host_id = $1
+ORDER BY id
+`
+
+// The disks a host agent is responsible for: create on first sight, grow when
+// the control plane's target exceeds what's on disk, delete when gone. The
+// size the agent should converge to is derived in the AgentAPI from status +
+// desired/observed, so the whole row travels.
+func (q *Queries) ListVolumesByHost(ctx context.Context, hostID uuid.NullUUID) ([]Volume, error) {
+	rows, err := q.db.QueryContext(ctx, listVolumesByHost, hostID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Volume
+	for rows.Next() {
+		var i Volume
+		if err := rows.Scan(
+			&i.ID,
+			&i.ServiceID,
+			&i.Name,
+			&i.MountPath,
+			&i.Region,
+			&i.HostID,
+			&i.Backing,
+			&i.DesiredSizeBytes,
+			&i.ObservedSizeBytes,
+			&i.Status,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markHostDown = `-- name: MarkHostDown :exec
 WITH downed AS (
     UPDATE hosts SET status = 'notready'
@@ -298,7 +343,9 @@ type RecordVolumeObservedSizeParams struct {
 	VolumeID      uuid.UUID     `json:"volume_id"`
 }
 
-// Observed volume size (grow-only resize drift, §4b).
+// Observed volume size (grow-only resize drift, §4b): what the agent reports
+// is on disk. Unguarded — observed state has one writer per volume (its host's
+// agent) and the reconcile loop only ever reads it.
 func (q *Queries) RecordVolumeObservedSize(ctx context.Context, arg RecordVolumeObservedSizeParams) error {
 	_, err := q.db.ExecContext(ctx, recordVolumeObservedSize, arg.ObservedBytes, arg.VolumeID)
 	return err

@@ -31,6 +31,7 @@ type sensorQuerier interface {
 	MarkHostDown(ctx context.Context, hostID uuid.UUID, lastHeartbeatBefore time.Time) error
 	RecordReplicaObservation(ctx context.Context, obs ReplicaObservation) (bool, error)
 	ListReplicasByHost(ctx context.Context, hostID uuid.UUID) ([]db.Replica, error)
+	ListVolumesByHost(ctx context.Context, hostID uuid.UUID) ([]db.Volume, error)
 	RecordVolumeObservedSize(ctx context.Context, volumeID uuid.UUID, observedBytes int64) error
 	RenewVolumeLease(ctx context.Context, replicaID uuid.UUID, expiresAt time.Time) error
 }
@@ -75,6 +76,10 @@ func (q querier) RecordReplicaObservation(ctx context.Context, obs ReplicaObserv
 
 func (q querier) ListReplicasByHost(ctx context.Context, hostID uuid.UUID) ([]db.Replica, error) {
 	return q.queries.ListReplicasByHost(ctx, uuid.NullUUID{UUID: hostID, Valid: true})
+}
+
+func (q querier) ListVolumesByHost(ctx context.Context, hostID uuid.UUID) ([]db.Volume, error) {
+	return q.queries.ListVolumesByHost(ctx, uuid.NullUUID{UUID: hostID, Valid: true})
 }
 
 func (q querier) RecordVolumeObservedSize(ctx context.Context, volumeID uuid.UUID, observedBytes int64) error {

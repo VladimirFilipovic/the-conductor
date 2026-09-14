@@ -166,6 +166,50 @@ func (q *Queries) GetServedRevision(ctx context.Context, arg GetServedRevisionPa
 	return i, err
 }
 
+const markVolumeAttached = `-- name: MarkVolumeAttached :execrows
+UPDATE volumes
+SET status = 'attached'
+WHERE id = $1
+  AND status = 'resizing'
+  AND observed_size_bytes >= desired_size_bytes
+`
+
+// Settle a grow: resizing → attached once the agent reports the disk has
+// reached the desired size. The predicate closes the gap where the operator
+// bumped desired again between snapshot and commit: settling then would leave
+// an attached volume with drift and no resizing to unlock it, so the intent
+// drops and next tick keeps waiting on the new target.
+func (q *Queries) MarkVolumeAttached(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.ExecContext(ctx, markVolumeAttached, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const markVolumeResizing = `-- name: MarkVolumeResizing :execrows
+UPDATE volumes
+SET status = 'resizing'
+WHERE id = $1
+  AND status = 'attached'
+  AND observed_size_bytes IS NOT NULL
+  AND desired_size_bytes > observed_size_bytes
+`
+
+// Approve a grow: attached → resizing. The predicate re-asserts what the
+// reconciler decided on — still attached, still drifting — so a settle or a
+// shrink that landed between snapshot and commit drops the intent instead of
+// flipping a converged volume back into resizing. rows-affected = 0 is the
+// lost race. Never-observed volumes (NULL) don't drift: the agent takes
+// desired as its first size.
+func (q *Queries) MarkVolumeResizing(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.ExecContext(ctx, markVolumeResizing, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const releaseVolumeLease = `-- name: ReleaseVolumeLease :exec
 DELETE FROM volume_leases WHERE volume_id = $1
 `

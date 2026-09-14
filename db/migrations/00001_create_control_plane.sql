@@ -214,6 +214,43 @@ CREATE TRIGGER replicas_notify_changed
 	AFTER INSERT OR UPDATE OR DELETE ON replicas
 	FOR EACH ROW EXECUTE FUNCTION notify_replicas_changed();
 
+-- Volumes ride the same channel: the downlink to a host is its replicas AND
+-- its disks, so a volume landing on, leaving, or changing on a host is a host
+-- state change like any other. Fires on size and status too — the agent's view
+-- of a volume is derived from both (resizing unlocks the new desired size),
+-- and a notification that changes nothing the agent sees is absorbed by the
+-- AgentAPI's digest compare, so over-notifying is free while under-notifying
+-- costs a 60s resync.
+-- +goose StatementBegin
+CREATE FUNCTION notify_volumes_changed() RETURNS trigger AS $$
+BEGIN
+	IF TG_OP = 'INSERT' THEN
+		IF NEW.host_id IS NOT NULL THEN
+			PERFORM pg_notify('replicas_changed', NEW.host_id::text);
+		END IF;
+	ELSIF TG_OP = 'DELETE' THEN
+		IF OLD.host_id IS NOT NULL THEN
+			PERFORM pg_notify('replicas_changed', OLD.host_id::text);
+		END IF;
+	ELSIF OLD.host_id IS DISTINCT FROM NEW.host_id
+	   OR OLD.status IS DISTINCT FROM NEW.status
+	   OR OLD.desired_size_bytes IS DISTINCT FROM NEW.desired_size_bytes THEN
+		IF OLD.host_id IS NOT NULL THEN
+			PERFORM pg_notify('replicas_changed', OLD.host_id::text);
+		END IF;
+		IF NEW.host_id IS NOT NULL AND NEW.host_id IS DISTINCT FROM OLD.host_id THEN
+			PERFORM pg_notify('replicas_changed', NEW.host_id::text);
+		END IF;
+	END IF;
+	RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+-- +goose StatementEnd
+
+CREATE TRIGGER volumes_notify_changed
+	AFTER INSERT OR UPDATE OR DELETE ON volumes
+	FOR EACH ROW EXECUTE FUNCTION notify_volumes_changed();
+
 -- Single-writer lease (§4). PK on volume_id is the invariant. Created last → no cycle.
 CREATE TABLE volume_leases (
 	volume_id   uuid        PRIMARY KEY REFERENCES volumes  ON DELETE CASCADE,
@@ -240,6 +277,7 @@ DROP TABLE apiserver_instances;
 DROP TABLE volume_leases;
 DROP TABLE replicas;
 DROP FUNCTION notify_replicas_changed;
+DROP FUNCTION notify_volumes_changed;
 DROP FUNCTION set_updated_at;
 DROP TABLE volumes;
 DROP TABLE hosts;

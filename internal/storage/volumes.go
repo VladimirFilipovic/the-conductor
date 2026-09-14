@@ -17,7 +17,11 @@ import (
 type volumeQuerier interface {
 	CreateVolume(ctx context.Context, serviceID uuid.UUID, name, region, mountPath string, sizeBytes int64) (db.Volume, error)
 	ListVolumesByService(ctx context.Context, projectName, service string) ([]db.Volume, error)
+	GetVolume(ctx context.Context, serviceID uuid.UUID, mountPath string) (db.Volume, error)
 	UpdateVolumeSize(ctx context.Context, serviceID uuid.UUID, mountPath string, sizeBytes int64) (db.Volume, error)
+	// HostVolumeCommitment is the host's raw disk and the desired bytes of every
+	// volume placed on it — the resize advisory's inputs.
+	HostVolumeCommitment(ctx context.Context, hostID uuid.UUID) (db.HostVolumeCommitmentRow, error)
 	DeleteVolume(ctx context.Context, serviceID uuid.UUID, mountPath string) (db.Volume, error)
 }
 
@@ -40,6 +44,22 @@ func (q querier) CreateVolume(ctx context.Context, serviceID uuid.UUID, name, re
 
 func (q querier) ListVolumesByService(ctx context.Context, projectName, service string) ([]db.Volume, error) {
 	return q.queries.ListVolumesByService(ctx, db.ListVolumesByServiceParams{ProjectName: projectName, Name: service})
+}
+
+func (q querier) GetVolume(ctx context.Context, serviceID uuid.UUID, mountPath string) (db.Volume, error) {
+	v, err := q.queries.GetVolume(ctx, db.GetVolumeParams{ServiceID: serviceID, MountPath: mountPath})
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.Volume{}, fmt.Errorf("volume at %q: %w", mountPath, ErrNotFound)
+	}
+	return v, err
+}
+
+func (q querier) HostVolumeCommitment(ctx context.Context, hostID uuid.UUID) (db.HostVolumeCommitmentRow, error) {
+	row, err := q.queries.HostVolumeCommitment(ctx, hostID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.HostVolumeCommitmentRow{}, fmt.Errorf("host %s: %w", hostID, ErrNotFound)
+	}
+	return row, err
 }
 
 func (q querier) UpdateVolumeSize(ctx context.Context, serviceID uuid.UUID, mountPath string, sizeBytes int64) (db.Volume, error) {

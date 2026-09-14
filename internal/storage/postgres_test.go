@@ -171,6 +171,98 @@ func TestVolumeCRUD(t *testing.T) {
 	}
 }
 
+// TestVolumeResizeGuards covers the resize state machine's SQL side: the two
+// status flips only land while their predicate holds, the observed size is
+// recorded verbatim, and the host commitment sums desired sizes.
+func TestVolumeResizeGuards(t *testing.T) {
+	ctx := context.Background()
+	c := newTestClient(t)
+
+	proj, err := c.CreateProject(ctx, t.Name())
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	svc, err := c.CreateService(ctx, proj.Name, "pg", true)
+	if err != nil {
+		t.Fatalf("CreateService: %v", err)
+	}
+	t.Cleanup(func() { _, _ = c.pool.ExecContext(ctx, "DELETE FROM projects WHERE name = $1", proj.Name) })
+	t.Cleanup(func() { _, _ = c.pool.ExecContext(ctx, "DELETE FROM volumes WHERE service_id = $1", svc.ID) })
+
+	hosts, err := c.ListAgentHosts(ctx)
+	if err != nil || len(hosts) == 0 {
+		t.Fatalf("ListAgentHosts: %v (need the seeded fleet: make seed)", err)
+	}
+	host := hosts[0]
+
+	v, err := c.CreateVolume(ctx, svc.ID, "data", host.Region, "/data", 2<<30)
+	if err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	if err := c.AssignVolumeHost(ctx, v.ID, host.ID); err != nil {
+		t.Fatalf("AssignVolumeHost: %v", err)
+	}
+
+	// Never observed: no drift, the approve predicate refuses.
+	if _, err := c.UpdateVolumeSize(ctx, svc.ID, "/data", 4<<30); err != nil {
+		t.Fatalf("UpdateVolumeSize: %v", err)
+	}
+	if err := c.MarkVolumeResizing(ctx, v.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("MarkVolumeResizing on never-observed = %v, want ErrConflict", err)
+	}
+
+	if err := c.RecordVolumeObservedSize(ctx, v.ID, 2<<30); err != nil {
+		t.Fatalf("RecordVolumeObservedSize: %v", err)
+	}
+	if err := c.MarkVolumeResizing(ctx, v.ID); err != nil {
+		t.Fatalf("MarkVolumeResizing with drift: %v", err)
+	}
+	if err := c.MarkVolumeResizing(ctx, v.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("MarkVolumeResizing twice = %v, want ErrConflict (already resizing)", err)
+	}
+
+	// Still growing: settle refuses until observed reaches desired.
+	if err := c.MarkVolumeAttached(ctx, v.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("MarkVolumeAttached before catch-up = %v, want ErrConflict", err)
+	}
+	if err := c.RecordVolumeObservedSize(ctx, v.ID, 4<<30); err != nil {
+		t.Fatalf("RecordVolumeObservedSize: %v", err)
+	}
+	if err := c.MarkVolumeAttached(ctx, v.ID); err != nil {
+		t.Fatalf("MarkVolumeAttached after catch-up: %v", err)
+	}
+	got, err := c.GetVolume(ctx, svc.ID, "/data")
+	if err != nil {
+		t.Fatalf("GetVolume: %v", err)
+	}
+	if got.Status != "attached" || !got.ObservedSizeBytes.Valid || got.ObservedSizeBytes.Int64 != 4<<30 {
+		t.Fatalf("settled volume = status %s observed %v, want attached at 4GiB", got.Status, got.ObservedSizeBytes)
+	}
+
+	byHost, err := c.ListVolumesByHost(ctx, host.ID)
+	if err != nil {
+		t.Fatalf("ListVolumesByHost: %v", err)
+	}
+	found := false
+	for _, hv := range byHost {
+		found = found || hv.ID == v.ID
+	}
+	if !found {
+		t.Fatalf("ListVolumesByHost(%s) missing %s", host.ID, v.ID)
+	}
+
+	commit, err := c.HostVolumeCommitment(ctx, host.ID)
+	if err != nil {
+		t.Fatalf("HostVolumeCommitment: %v", err)
+	}
+	if commit.DiskBytes != host.DiskBytes || commit.CommittedBytes < 4<<30 {
+		t.Fatalf("HostVolumeCommitment = %+v, want disk %d and at least 4GiB committed", commit, host.DiskBytes)
+	}
+	if _, err := c.GetVolume(ctx, svc.ID, "/missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetVolume missing = %v, want ErrNotFound", err)
+	}
+}
+
 // TestCurrentDeploymentScaleDown covers the reconciler's direct input: scale
 // upserts a deployment_region for the current commit, down zeroes them, and an
 // undeployed service resolves to ErrNotFound.

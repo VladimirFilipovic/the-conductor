@@ -16,13 +16,30 @@ WHERE s.project_name = $1 AND s.name = $2
 ORDER BY v.mount_path;
 
 -- UpdateVolumeSize patches only the desired size; the reconcile loop notices the
--- drift and flips status to 'resizing' itself. RETURNING lets the caller map a
--- missing (service, mount) to not-found instead of a silent no-op.
+-- drift (desired > observed), approves the grow once the host has room
+-- (status → 'resizing'), and settles it back to 'attached' when the agent
+-- reports the new size. RETURNING lets the caller map a missing (service,
+-- mount) to not-found instead of a silent no-op.
 -- name: UpdateVolumeSize :one
 UPDATE volumes
 SET desired_size_bytes = @desired_size_bytes
 WHERE service_id = @service_id AND mount_path = @mount_path
 RETURNING *;
+
+-- name: GetVolume :one
+SELECT * FROM volumes
+WHERE service_id = @service_id AND mount_path = @mount_path;
+
+-- What a host's disk already promises to volumes, against its raw size. The
+-- CLI's resize advisory divides the budget out of disk_bytes in Go with the
+-- same knob the placer uses, so the two never disagree on "fits".
+-- name: HostVolumeCommitment :one
+SELECT h.disk_bytes,
+       coalesce(sum(v.desired_size_bytes), 0)::bigint AS committed_bytes
+FROM hosts h
+LEFT JOIN volumes v ON v.host_id = h.id
+WHERE h.id = @host_id
+GROUP BY h.id;
 
 -- name: DeleteVolume :one
 DELETE FROM volumes

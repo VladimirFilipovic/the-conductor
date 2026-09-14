@@ -104,7 +104,18 @@ SELECT * FROM hosts;
 SELECT * FROM replicas
 WHERE host_id = @host_id AND phase <> 'reaped';
 
--- Observed volume size (grow-only resize drift, §4b).
+-- The disks a host agent is responsible for: create on first sight, grow when
+-- the control plane's target exceeds what's on disk, delete when gone. The
+-- size the agent should converge to is derived in the AgentAPI from status +
+-- desired/observed, so the whole row travels.
+-- name: ListVolumesByHost :many
+SELECT * FROM volumes
+WHERE host_id = @host_id
+ORDER BY id;
+
+-- Observed volume size (grow-only resize drift, §4b): what the agent reports
+-- is on disk. Unguarded — observed state has one writer per volume (its host's
+-- agent) and the reconcile loop only ever reads it.
 -- name: RecordVolumeObservedSize :exec
 UPDATE volumes
 SET observed_size_bytes = @observed_bytes

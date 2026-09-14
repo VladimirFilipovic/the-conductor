@@ -122,3 +122,11 @@ func orDefault(key, def string) string {
 	}
 	return def
 }
+
+// DiskBudget is the part of a host's disk volumes may occupy, in bytes. The
+// placer packs against it and a grow-only resize may fill it to the last byte
+// (the DiskReserve is carved out of this budget for exactly that); the CLI's
+// resize advisory reuses it so both sides answer "does it fit" the same way.
+func (p Placement) DiskBudget(hostDiskBytes int64) int64 {
+	return int64(float64(hostDiskBytes) * p.VolumeBudget)
+}

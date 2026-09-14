@@ -40,7 +40,7 @@ type hostLedger struct {
 type ledger map[uuid.UUID]*hostLedger
 
 func (p *placer) diskBudget(h host) int64 {
-	return int64(float64(h.DiskBytes) * p.cfg.VolumeBudget)
+	return p.cfg.DiskBudget(h.DiskBytes)
 }
 
 func (p *placer) newLedger(snap stateSnapshot) ledger {
@@ -428,8 +428,9 @@ func isReplacement(r replica) bool { return r.Phase == domain.ReplicaPhaseReplac
 // joins as a third dimension, and the service's replica cpu/mem gate the
 // filter: a host with disk but no cpu is a trap — the volume lands, the
 // replica never schedules. No anti-affinity: stateful services run one
-// replica, nothing to spread.
-func (p *placer) placeVolumes(snap stateSnapshot) []Intent {
+// replica, nothing to spread. Placements commit onto the caller's ledger so
+// the resize pass that follows (planVolumes) sees them.
+func (p *placer) placeVolumes(snap stateSnapshot, led ledger) []Intent {
 	var items []packItem
 	for _, v := range snap.volumes {
 		if v.HostID != uuid.Nil {
@@ -448,7 +449,6 @@ func (p *placer) placeVolumes(snap stateSnapshot) []Intent {
 		return nil
 	}
 
-	led := p.newLedger(snap)
 	rw := p.scarcityWeights(snap)
 	sortItems(items, p.regionReference(snap))
 
