@@ -1,7 +1,7 @@
 // Agent <-> control-plane contract. One bidi Session stream per host: uplink
-// carries what the agent OBSERVES (heartbeats, replica states), downlink
-// carries what the host SHOULD look like — always the full host state, never
-// a delta, so any single message is sufficient and a lost one is healed by the
+// carries what the agent OBSERVES (heartbeats, replica states, disk sizes),
+// downlink carries what the host SHOULD look like — always the full host
+// state (replicas and volumes), never a delta, so any single message is sufficient and a lost one is healed by the
 // next (level-triggered; see todo.md "agent transport").
 syntax = "proto3";
 
@@ -27,6 +27,7 @@ message AgentMessage {
     Hello hello = 1;
     Heartbeat heartbeat = 2;
     ReplicaObservation observation = 3;
+    VolumeObservation volume_observation = 4;
   }
 }
 
@@ -50,21 +51,42 @@ message ReplicaObservation {
   string last_exit_reason = 5;
 }
 
+// VolumeObservation is what the agent has on disk for one volume. The control
+// plane compares it against the desired size to notice resize drift and to
+// settle a resize once the disk has caught up.
+message VolumeObservation {
+  string volume_id = 1;
+  int64 observed_size_bytes = 2;
+}
+
 message ServerMessage {
   HostState state = 1;
 }
 
-// HostState is the FULL set of replicas bound to the host. A replica present
-// in phase scheduling is the signal to start it; draining to stop it; absent
-// means gone (reaped or moved) — the agent removes anything it runs that the
-// state no longer lists.
+// HostState is the FULL set of replicas and volumes bound to the host. A
+// replica present in phase scheduling is the signal to start it; draining to
+// stop it; absent means gone (reaped or moved) — the agent removes anything it
+// runs that the state no longer lists. A volume present is a disk to have at
+// size_bytes: create it on first sight, grow it when the size exceeds what's
+// on disk (never shrink), delete it when absent.
 message HostState {
   repeated Replica replicas = 1;
+  repeated Volume volumes = 2;
 }
 
 message Replica {
   string id = 1;
   string phase = 2;
+}
+
+// Volume is the size the agent should converge the disk to — NOT the raw
+// desired size. The control plane hands out the new desired size only once
+// the engine has approved the grow against host capacity; until then the
+// agent keeps seeing what it already has.
+message Volume {
+  string id = 1;
+  string mount_path = 2;
+  int64 size_bytes = 3;
 }
 
 message ListHostsRequest {}
