@@ -68,13 +68,18 @@ migrate-down:
 migrate-status:
 	$(GOOSE) status
 
-# Wipe the local Postgres volume and re-apply every migration from scratch —
-# the `go run` workflow's counterpart to `stack-fresh`. --wait blocks until the
-# healthcheck passes so goose doesn't race the container's startup.
+# Rebuild schema + fleet from scratch. Works on the database only: the Postgres
+# container and its volume stay put, so this is the cheap one to reach for while
+# developing against `go run`. psql runs inside the container the way `seed`
+# does, so you don't need it installed locally.
+# DROP SCHEMA rather than `goose reset`: it owes nothing to the Down half of
+# every migration being written and correct, and it takes goose's own version
+# table with it, so `up` really does replay from zero.
 migrate-fresh:
-	docker compose down -v
 	docker compose up -d --wait
+	docker compose exec -T postgres psql -U conductor -d conductor -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
 	$(GOOSE) up
+	$(MAKE) seed
 
 # Load dev fixtures into the local Postgres. Piped into the container's own psql
 # (like db-up/db-down, this targets the docker-compose database) so you don't
