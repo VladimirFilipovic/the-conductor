@@ -67,9 +67,11 @@ type ResizeOutcome struct {
 }
 
 // ResizeVolume patches the desired size of the volume at mountPath; the reconcile
-// loop grows the disk to match (§4b grow-only). Shrinking is refused here, not
-// left to the engine: a smaller desired would never converge (the agent keeps
-// the bigger disk) and would sit as permanent drift.
+// loop grows the disk to match (§4b grow-only). The floor is what's ON DISK,
+// not the previous desired: a desired below the observed size would never
+// converge (the agent never shrinks) and would sit as permanent drift, but
+// lowering a not-yet-applied grow back down to the disk is how an operator
+// takes back a request the host can't hold.
 //
 // The space advisory is exactly that — advisory. It reuses the placer's
 // DiskBudget with the default knobs, so an engine started with a non-default
@@ -84,9 +86,12 @@ func (s *Service) ResizeVolume(ctx context.Context, t target.Target, mountPath s
 	if err != nil {
 		return ResizeOutcome{}, err
 	}
-	if sizeBytes <= cur.DesiredSizeBytes {
-		return ResizeOutcome{}, fmt.Errorf("%w: volume at %q is %d bytes and resize is grow-only; %d requested",
-			ErrInvalid, mountPath, cur.DesiredSizeBytes, sizeBytes)
+	if sizeBytes == cur.DesiredSizeBytes {
+		return ResizeOutcome{}, fmt.Errorf("%w: volume at %q is already %d bytes", ErrInvalid, mountPath, sizeBytes)
+	}
+	if cur.ObservedSizeBytes.Valid && sizeBytes < cur.ObservedSizeBytes.Int64 {
+		return ResizeOutcome{}, fmt.Errorf("%w: volume at %q has %d bytes on disk and resize is grow-only; %d requested",
+			ErrInvalid, mountPath, cur.ObservedSizeBytes.Int64, sizeBytes)
 	}
 	vol, err := s.store.UpdateVolumeSize(ctx, id, mountPath, sizeBytes)
 	if err != nil {

@@ -23,7 +23,8 @@ Subcommands:
   add --mount PATH    Attach a new volume (default 1 GiB; pass --size GiB).
   update --size GiB   Grow the volume at --mount PATH (live, grow-only). The
                       engine applies it once the host has room; until then
-                      list shows the volume attached with a pending grow.
+                      list shows the volume attached with a pending grow, and
+                      update back to the on-disk size withdraws it.
   rm --mount PATH     Detach and delete the volume at the mount path.`
 
 // Sizes are entered in GiB on the CLI, stored as bytes in the control plane.
@@ -94,6 +95,8 @@ func cmdVolume(args []string) error {
 		switch {
 		case !vol.HostID.Valid:
 			fmt.Println("  not placed yet: the volume will be created at the new size")
+		case vol.ObservedSizeBytes.Valid && vol.DesiredSizeBytes == vol.ObservedSizeBytes.Int64:
+			fmt.Println("  matches what is on disk: pending grow withdrawn")
 		case out.WaitingForSpace:
 			fmt.Printf("  host is short %s of volume budget; the grow waits until space frees up (no action needed)\n", formatBytes(out.ShortfallBytes))
 		default:
