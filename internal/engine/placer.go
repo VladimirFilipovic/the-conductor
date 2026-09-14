@@ -102,6 +102,11 @@ type packItem struct {
 	// replacement (hostless after host death) skips the headroom reserve —
 	// the reserve exists exactly for them.
 	replacement bool
+	// resize is a grow on a volume already placed on the host. Its demand is
+	// ALREADY in the ledger (newLedger subtracts every placed volume's desired
+	// size), so fitting it means the host isn't overcommitted, and it may eat
+	// the whole DiskReserve — that reserve exists exactly for grows.
+	resize bool
 	// spread applies the anti-affinity constraint; volumes never spread
 	// (stateful services run one replica, nothing to spread).
 	spread bool
@@ -241,9 +246,14 @@ func sortItems(items []packItem, refs map[string]reference) {
 }
 
 // fits is constraint 1: the item fits in every dimension after subtracting
-// the per-host reserve. Replacements skip the cpu/mem headroom; the disk
-// reserve is never skipped — it's held for grow-only resizes, not failover.
+// the per-host reserve. Replacements skip the cpu/mem headroom; new volumes
+// never skip the disk reserve — it's held for grow-only resizes, which are the
+// one item allowed to dip into it.
 func (p *placer) fits(it packItem, hl *hostLedger) bool {
+	if it.resize {
+		// The grow's bytes are already subtracted; cpu/mem are not its concern.
+		return hl.disk >= 0
+	}
 	var rCPU, rMem int64
 	if !it.replacement {
 		rCPU = int64(p.cfg.Headroom * float64(hl.host.CPUMillicores))

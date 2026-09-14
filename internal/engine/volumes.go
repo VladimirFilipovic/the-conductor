@@ -22,13 +22,11 @@ func (p *placer) planVolumes(snap stateSnapshot) []Intent {
 //	attached, desired > observed, no room       → hold; drift stays visible, retried every tick
 //	resizing, observed >= desired               → volume_resized (→ attached)
 //
-// "Has room" is read straight off the ledger: newLedger already subtracts
-// every placed volume's DESIRED size, so a bumped desired is a reservation
-// the moment it lands and the host fits iff its disk isn't negative. A grow is
-// allowed to eat the whole DiskReserve — that is what the reserve is held for
-// — which is why this checks the ledger instead of going through fits. A host
-// outside the ledger (notready, cordoned) holds too: no new work lands on it,
-// a grow included.
+// "Has room" is fits with a resize item: newLedger already subtracts every
+// placed volume's DESIRED size, so a bumped desired is a reservation the
+// moment it lands, and the grow fits iff the host isn't overcommitted (the
+// DiskReserve is its to use — see packItem.resize). A host outside the ledger
+// (notready, cordoned) holds too: no new work lands on it, a grow included.
 //
 // There is no failed exit. Waiting is the only outcome for a grow that doesn't
 // fit: the operator sees desired > observed on an attached volume, and the
@@ -47,7 +45,7 @@ func (p *placer) resizeVolumes(snap stateSnapshot, led ledger) []Intent {
 
 		case v.Status == domain.VolumeAttached && v.ObservedSizeBytes > 0 && v.DesiredSizeBytes > v.ObservedSizeBytes:
 			hl := led[v.HostID]
-			if hl == nil || hl.disk < 0 {
+			if hl == nil || !p.fits(packItem{id: v.ID, region: v.Region, resize: true}, hl) {
 				slog.Debug("reconcile -> volume grow waiting for host space",
 					"volume", v.ID, "host", v.HostID,
 					"desired", v.DesiredSizeBytes, "observed", v.ObservedSizeBytes)
