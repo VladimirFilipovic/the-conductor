@@ -215,9 +215,9 @@ javi novu veličinu → volume stoji `resizing`, `ON DISK` zaostaje; `volume_hea
 → agent naraste i engine settle-uje za 2s. Nema timeout-a ni `failed`: stalled
 resize je vidljiv drift za čoveka, ne presuda za automatiku (isti stav kao 4).
 
-Dok je volume `resizing`, `update` sme samo da spusti cilj (do on-disk
-veličine), ne da ga podigne — podizanje bi preskočilo disk gate jer downlink
-već šalje `desired`. Resize je za sad CLI-only — chaos-ui ne prikazuje volumene.
+Dok je volume `resizing`, `update` je odbijen — downlink već šalje `desired`,
+pa bi svaka promena preskočila disk gate; jedan resize u letu, čeka se
+`attached`. Resize je za sad CLI-only — chaos-ui ne prikazuje volumene.
 
 ### 10. Operator akcije
 
