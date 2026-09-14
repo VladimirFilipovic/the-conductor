@@ -44,7 +44,7 @@ server timestampom ostaje izvor istine.
 ## Pokretanje
 
 ```
-make migrate-fresh          # trigger je u 00001, menjan u mestu
+make migrate-fresh          # prazan volume + sve migracije od nule
 conductor engine            # reconcile + sensor sweep
 conductor apiserver         # gRPC gateway :7443 + control-plane HTTP :7080
 conductor agentsim          # flota mock agenata + control API na :7780

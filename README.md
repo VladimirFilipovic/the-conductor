@@ -59,5 +59,5 @@ Deploy settings live in a `config.toml` next to your service (see `example/confi
 make test          # unit + e2e (e2e drives real ticks against an in-memory store)
 make lint          # golangci-lint
 make sqlc          # regenerate queries after editing db/queries/
-make migrate-fresh # wipe + re-apply migrations
+make migrate-fresh # wipe + re-apply migrations (stack equivalent: make stack-fresh)
 ```

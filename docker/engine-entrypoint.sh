@@ -1,6 +1,6 @@
 #!/bin/sh
 # Shared entrypoint for the engine and apiserver containers (same image).
-# engine: migrate the schema and load the host fleet, then run — the reconcile
+# engine: rebuild the schema and load the host fleet, then run — the reconcile
 # loop can't place anything onto an empty hosts table, so the seed is part of
 # bringing the engine up, not an optional dev step.
 # any other mode (apiserver): wait until the engine has seeded, then run. Only
@@ -15,24 +15,46 @@ if [ "$#" -eq 0 ]; then
 fi
 MODE="$1"
 
+# Written after the first successful rebuild. It lives in the container's own
+# writable layer rather than in a volume, which is exactly the distinction we
+# need: a restart (crash loop, `docker restart`, restart: unless-stopped) finds
+# it and leaves the data alone, while a recreated container (stack-down then
+# stack-up, a rebuilt image, --force-recreate) does not and starts clean.
+INIT_MARKER=/var/lib/conductor/schema-initialized
+
+psql_q() { psql "$DSN" -v ON_ERROR_STOP=1 -tAq -c "$1"; }
+
 if [ "$MODE" = "engine" ]; then
-	# goose speaks the same DSN the engine uses. The postgres depends_on
-	# healthcheck gates start, but retry briefly to cover the gap before the
-	# socket accepts.
-	echo "entrypoint: running migrations"
+	# The postgres depends_on healthcheck gates start, but retry briefly to
+	# cover the gap before the socket accepts.
 	tries=0
-	until goose -dir ./db/migrations postgres "$DSN" up; do
+	until psql_q 'SELECT 1' >/dev/null 2>&1; do
 		tries=$((tries + 1))
 		if [ "$tries" -ge 30 ]; then
-			echo "entrypoint: migrations failed after $tries attempts" >&2
+			echo "entrypoint: database unreachable after $tries attempts" >&2
 			exit 1
 		fi
-		echo "entrypoint: migrate retry $tries"
 		sleep 2
 	done
 
+	# Dev-only schema policy: there is no production database, so a new
+	# container always builds the schema from scratch instead of migrating onto
+	# whatever the previous run left behind. DROP SCHEMA rather than
+	# `goose reset`, so the wipe never depends on a migration's Down staying in
+	# sync with the schema its Up produced.
+	if [ ! -f "$INIT_MARKER" ]; then
+		echo "entrypoint: new container; dropping and rebuilding the schema"
+		psql_q 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;' >/dev/null
+	fi
+
+	echo "entrypoint: running migrations"
+	goose -dir ./db/migrations postgres "$DSN" up
+
 	echo "entrypoint: seeding hosts"
-	psql "$DSN" -v ON_ERROR_STOP=1 -f ./db/seeds/hosts.sql
+	psql "$DSN" -v ON_ERROR_STOP=1 -q -f ./db/seeds/hosts.sql
+
+	mkdir -p "$(dirname "$INIT_MARKER")"
+	touch "$INIT_MARKER"
 else
 	echo "entrypoint: waiting for the engine to migrate and seed"
 	tries=0
