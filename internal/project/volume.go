@@ -2,8 +2,10 @@ package project
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
+	"conductor/internal/config"
 	"conductor/internal/storage/db"
 	"conductor/internal/target"
 
@@ -50,14 +52,61 @@ func (s *Service) ListVolumes(ctx context.Context, t target.Target) ([]db.Volume
 	return s.store.ListVolumesByService(ctx, t.Project, t.Service)
 }
 
+// ResizeOutcome is ResizeVolume's answer: the patched row plus the engine's
+// likely first verdict, so the caller can say up front whether the grow starts
+// on the next tick or waits for host space.
+type ResizeOutcome struct {
+	Volume db.Volume
+	// WaitingForSpace: the host's volume budget can't absorb the new size right
+	// now. The request is kept — the engine re-checks every tick and approves
+	// the grow the moment the host has room (another volume leaves, disk is
+	// added); there is no failed state to clear.
+	WaitingForSpace bool
+	// ShortfallBytes is how much room the host is missing; 0 when it fits.
+	ShortfallBytes int64
+}
+
 // ResizeVolume patches the desired size of the volume at mountPath; the reconcile
-// loop grows the disk to match (§4b grow-only).
-func (s *Service) ResizeVolume(ctx context.Context, t target.Target, mountPath string, sizeBytes int64) (db.Volume, error) {
+// loop grows the disk to match (§4b grow-only). Shrinking is refused here, not
+// left to the engine: a smaller desired would never converge (the agent keeps
+// the bigger disk) and would sit as permanent drift.
+//
+// The space advisory is exactly that — advisory. It reuses the placer's
+// DiskBudget with the default knobs, so an engine started with a non-default
+// volume-budget flag may disagree at the margin; the engine's answer is the one
+// that counts, this one just saves the operator a round-trip to `volume list`.
+func (s *Service) ResizeVolume(ctx context.Context, t target.Target, mountPath string, sizeBytes int64) (ResizeOutcome, error) {
 	id, err := serviceID(ctx, s.store, t)
 	if err != nil {
-		return db.Volume{}, err
+		return ResizeOutcome{}, err
 	}
-	return s.store.UpdateVolumeSize(ctx, id, mountPath, sizeBytes)
+	cur, err := s.store.GetVolume(ctx, id, mountPath)
+	if err != nil {
+		return ResizeOutcome{}, err
+	}
+	if sizeBytes <= cur.DesiredSizeBytes {
+		return ResizeOutcome{}, fmt.Errorf("%w: volume at %q is %d bytes and resize is grow-only; %d requested",
+			ErrInvalid, mountPath, cur.DesiredSizeBytes, sizeBytes)
+	}
+	vol, err := s.store.UpdateVolumeSize(ctx, id, mountPath, sizeBytes)
+	if err != nil {
+		return ResizeOutcome{}, err
+	}
+	out := ResizeOutcome{Volume: vol}
+	if !vol.HostID.Valid {
+		return out, nil // not placed yet: the placer sizes it at creation
+	}
+	c, err := s.store.HostVolumeCommitment(ctx, vol.HostID.UUID)
+	if err != nil {
+		return out, err
+	}
+	// CommittedBytes already includes the size just written — the same
+	// "desired is a reservation" view the engine's ledger takes.
+	if budget := config.DefaultPlacement().DiskBudget(c.DiskBytes); c.CommittedBytes > budget {
+		out.WaitingForSpace = true
+		out.ShortfallBytes = c.CommittedBytes - budget
+	}
+	return out, nil
 }
 
 // RemoveVolume detaches and deletes the volume at mountPath. A volume still
@@ -76,7 +125,9 @@ func (s *Service) RemoveVolume(ctx context.Context, t target.Target, mountPath s
 type VolumeStore interface {
 	CreateVolume(ctx context.Context, serviceID uuid.UUID, name, region, mountPath string, sizeBytes int64) (db.Volume, error)
 	ListVolumesByService(ctx context.Context, projectName, service string) ([]db.Volume, error)
+	GetVolume(ctx context.Context, serviceID uuid.UUID, mountPath string) (db.Volume, error)
 	UpdateVolumeSize(ctx context.Context, serviceID uuid.UUID, mountPath string, sizeBytes int64) (db.Volume, error)
+	HostVolumeCommitment(ctx context.Context, hostID uuid.UUID) (db.HostVolumeCommitmentRow, error)
 	DeleteVolume(ctx context.Context, serviceID uuid.UUID, mountPath string) (db.Volume, error)
 }
 
