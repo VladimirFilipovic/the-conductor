@@ -35,7 +35,8 @@ Agentsim je deo stack-a (jedan sim-agent po hostu, control API na :7780).
 Chaos ide kroz UI (Chaos tab) ili direktno na control API; ID-jeve daje
 `curl localhost:7780/agents` (host + replika + faza + chaos mod). Akcija:
 `curl -XPOST localhost:7780/chaos -d '{"action":"host_kill","host":"<id>"}'`
-(akcije: `host_kill|host_recover`, `replica_crash|replica_crashloop|replica_stall_health|replica_heal`).
+(akcije: `host_kill|host_recover`, `replica_crash|replica_crashloop|replica_stall_health|replica_heal`,
+`volume_stall_resize|volume_heal` sa `"volume":"<id>"`).
 
 ## 1. Mrežni blip (< 2min) — ništa se ne pomera
 
@@ -174,6 +175,49 @@ Izmereno: deploy→active+lease za **13s** (replika i volume na istom hostu);
 recreate v1→v2 sa lease handover-om za **19s**, ceo period tačno 1 živa replika.
 2026-09-11: deploy→active+lease 6s; recreate: stara draining → reaped +13s, nova
 scheduling +16s, active + lease +18s.
+
+### 11. Volume resize — grow-only, engine je gate za prostor
+
+Zahtev: `conductor volume update --size N` mora da poraste disk uživo bez
+restarta replike (kao Railway live resize); shrink ne postoji; zahtev koji host
+ne može da primi ne sme da završi u `failed` nego čeka dok se prostor ne pojavi.
+
+Model: CLI menja samo `desired_size_bytes`. Engine svaki tick gleda drift
+(`desired > observed`) i, ako ledger hosta ima mesta (grow sme da potroši ceo
+`DiskReserve`, nova plasiranja ne smeju), flipuje status `attached → resizing`.
+Tek taj status otključava novu veličinu na downlinku (`volumeTargetSize`), pa
+agent nikad ne raste disk koji host ne drži. Agent javlja `VolumeObservation`
+sa stvarnom veličinom; kad `observed >= desired` engine vraća `resizing →
+attached`. Oba flipa su po jedan red u sopstvenoj tx sa SQL predikatom
+(`MarkVolumeResizing`/`MarkVolumeAttached`), izgubljena trka = drop, sledeći
+tick odlučuje ponovo.
+
+- postavka kao u 9 (stateful `pg`, `volume add --size 2`, `up`)
+- `conductor volume update --mount /var/lib/postgresql/data --size 4 -s pg`
+  → CLI kaže "host has room"; engine `resizing` na sledećem ticku; agent
+  naraste disk u jednom ticku i javi; engine `attached`
+- `--size 100` na hostu sa 80GB (budžet 64GiB) → CLI kaže "host is short
+  36GiB … waits"; `volume list` pokazuje `SIZE 100GiB / ON DISK 4GiB /
+  attached (grow waiting for host space)`; ništa se ne dešava koliko god tickova
+- povlačenje: `--size 4` (= on disk) → "pending grow withdrawn"; pod on-disk
+  veličinu CLI odbija (`grow-only`)
+- prostor se pojavi (drugi volume ode sa hosta, ili operator doda disk:
+  `update hosts set disk_bytes=…`) → engine sam odobri, bez akcije operatera
+
+Izmereno (2026-09-14, agentsim tick 1s, reconcile 2s): update 10:17:05 →
+`resizing` 10:17:06 → agent 4GiB 10:17:06 → `attached` 10:17:07 (**2s**).
+Čekanje na prostor: 3 ticka bez promene, status label vidljiv u `volume list`.
+Host 80→200GiB 10:17:55 → `resizing` +2s → `attached` na 100GiB +5s. Replika
+`active|healthy|restart_count=0` ceo period, lease netaknut.
+
+Chaos `volume_stall_resize <volume>`: engine odobri (`resizing`), agent nikad ne
+javi novu veličinu → volume stoji `resizing`, `ON DISK` zaostaje; `volume_heal`
+→ agent naraste i engine settle-uje za 2s. Nema timeout-a ni `failed`: stalled
+resize je vidljiv drift za čoveka, ne presuda za automatiku (isti stav kao 4).
+
+Poznata rupa: dve uzastopne `update` dok je volume već `resizing` ne prolaze
+ponovo kroz disk gate (status je već odobren). Resize je za sad CLI-only —
+chaos-ui ne prikazuje volumene.
 
 ### 10. Operator akcije
 
