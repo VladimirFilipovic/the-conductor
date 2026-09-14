@@ -29,11 +29,12 @@ import (
 //     whole row — "revision unchanged" is the only check that catches ANY
 //     interleaved write, including ABA (crash + restart lands back on the same
 //     phase, but not the same revision).
-//   - Commit-time predicate (AssignReplicaHost, AcquireVolumeLease): the
-//     question isn't "did the row change" but "is the placement still
-//     feasible" — capacity, host readiness, lease liveness are re-checked in
-//     the UPDATE's WHERE, so concurrent placements that all fit don't abort
-//     each other the way a version proxy would.
+//   - Commit-time predicate (AssignReplicaHost, AcquireVolumeLease,
+//     MarkVolumeResizing, MarkVolumeAttached): the question isn't "did the
+//     row change" but "is the decision still right" — capacity, host
+//     readiness, lease liveness, resize drift are re-checked in the UPDATE's
+//     WHERE, so concurrent placements that all fit don't abort each other the
+//     way a version proxy would.
 //   - Unguarded (create, destroy, status flips): create mints a fresh row,
 //     destroy targets an already-terminal one, and deployment status has a
 //     single writer — nothing can invalidate these between snapshot and commit.
@@ -42,6 +43,8 @@ type ReconcileTx interface {
 	CreateReplica(ctx context.Context, spec storage.ReplicaSpec) (db.Replica, error)
 	AssignReplicaHost(ctx context.Context, replicaID, hostID uuid.UUID) error
 	AssignVolumeHost(ctx context.Context, volumeID, hostID uuid.UUID) error
+	MarkVolumeResizing(ctx context.Context, volumeID uuid.UUID) error
+	MarkVolumeAttached(ctx context.Context, volumeID uuid.UUID) error
 	AcquireVolumeLease(ctx context.Context, volumeID, replicaID uuid.UUID, expiresAt time.Time) error
 	SetReplicaDesiredStatus(ctx context.Context, replicaID uuid.UUID, desiredStatus domain.ReplicaDesiredStatus) error
 	SetReplicaPhase(ctx context.Context, replicaID uuid.UUID, phase domain.ReplicaPhase, expectRevision int64) error
@@ -167,6 +170,15 @@ func (a *Actuator) commit(ctx context.Context, tx ReconcileTx, it Intent) error 
 	case IntentPlaceVolume:
 		return tx.AssignVolumeHost(ctx, it.VolumeID, it.HostID)
 
+	// One row each, and always on different ticks (the agent grows the disk
+	// in between), so they never share a tx. The status flip is what the
+	// downlink keys on: resizing unlocks the new desired size for the agent.
+	case IntentResizeVolume:
+		return tx.MarkVolumeResizing(ctx, it.VolumeID)
+
+	case IntentVolumeResized:
+		return tx.MarkVolumeAttached(ctx, it.VolumeID)
+
 	case IntentDrain:
 		return tx.SetReplicaPhase(ctx, it.ReplicaID, domain.ReplicaPhaseDraining, it.Revision)
 
@@ -203,7 +215,7 @@ func dropConflict(err error, it Intent) error {
 	}
 	if errors.Is(err, storage.ErrConflict) {
 		slog.Debug("actuate -> intent lost its race, dropped",
-			"kind", it.Kind, "replica", it.ReplicaID, "service", it.Group.EnvironmentServiceID)
+			"kind", it.Kind, "replica", it.ReplicaID, "volume", it.VolumeID, "service", it.Group.EnvironmentServiceID)
 		return nil
 	}
 	return fmt.Errorf("actuator: %s: %w", it.Kind, err)

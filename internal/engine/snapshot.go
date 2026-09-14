@@ -81,6 +81,11 @@ type volume struct {
 	Region           string
 	HostID           uuid.UUID
 	DesiredSizeBytes int64
+	// ObservedSizeBytes is what the host's agent last reported on disk; 0
+	// until the first report. desired > observed is the drift the resize pass
+	// converges (grow-only).
+	ObservedSizeBytes int64
+	Status            domain.VolumeStatus
 }
 
 type stateSnapshot struct {
@@ -210,11 +215,13 @@ func newStateSnapshot(
 	}
 	for _, v := range volumes {
 		snap.volumes = append(snap.volumes, volume{
-			ID:               v.ID,
-			ServiceID:        v.ServiceID,
-			Region:           v.Region,
-			HostID:           v.HostID.UUID,
-			DesiredSizeBytes: v.DesiredSizeBytes,
+			ID:                v.ID,
+			ServiceID:         v.ServiceID,
+			Region:            v.Region,
+			HostID:            v.HostID.UUID,
+			DesiredSizeBytes:  v.DesiredSizeBytes,
+			ObservedSizeBytes: v.ObservedSizeBytes.Int64,
+			Status:            domain.VolumeStatus(v.Status),
 		})
 	}
 	return snap

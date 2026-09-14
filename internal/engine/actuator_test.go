@@ -76,6 +76,14 @@ func (t *recordingTx) AssignVolumeHost(_ context.Context, volumeID, hostID uuid.
 	return t.record("AssignVolumeHost %s -> %s", volumeID, hostID)
 }
 
+func (t *recordingTx) MarkVolumeResizing(_ context.Context, volumeID uuid.UUID) error {
+	return t.record("MarkVolumeResizing %s", volumeID)
+}
+
+func (t *recordingTx) MarkVolumeAttached(_ context.Context, volumeID uuid.UUID) error {
+	return t.record("MarkVolumeAttached %s", volumeID)
+}
+
 func (t *recordingTx) AcquireVolumeLease(_ context.Context, volumeID, replicaID uuid.UUID, expiresAt time.Time) error {
 	return t.record("AcquireVolumeLease %s by %s until %s", volumeID, replicaID, expiresAt.UTC().Format(time.RFC3339))
 }
@@ -175,6 +183,16 @@ func TestApplyIntentTxMapping(t *testing.T) {
 			name:   "place_volume binds the volume host",
 			intent: Intent{Kind: IntentPlaceVolume, VolumeID: vol, HostID: hostID},
 			want:   []string{fmt.Sprintf("AssignVolumeHost %s -> %s", vol, hostID)},
+		},
+		{
+			name:   "resize_volume approves the grow",
+			intent: Intent{Kind: IntentResizeVolume, VolumeID: vol},
+			want:   []string{fmt.Sprintf("MarkVolumeResizing %s", vol)},
+		},
+		{
+			name:   "volume_resized settles it",
+			intent: Intent{Kind: IntentVolumeResized, VolumeID: vol},
+			want:   []string{fmt.Sprintf("MarkVolumeAttached %s", vol)},
 		},
 		{
 			name:   "plain drain is a CAS phase write, no pointer move",

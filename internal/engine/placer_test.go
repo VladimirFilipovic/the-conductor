@@ -352,7 +352,7 @@ func TestVolumeFilterRejectsCPUStarvedHost(t *testing.T) {
 	}
 
 	p := placer{cfg: flatPlacement()}
-	got := placedVolumes(t, p.placeVolumes(snap))
+	got := placedVolumes(t, p.placeVolumes(snap, p.newLedger(snap)))
 	if got[pinnedID(40)] != balanced.ID {
 		t.Fatalf("volume on %s, want balanced %s", got[pinnedID(40)], balanced.ID)
 	}
@@ -380,7 +380,7 @@ func TestVolumeBudgetBoundary(t *testing.T) {
 				volumes: []volume{{ID: pinnedID(40), ServiceID: uuid.New(), Region: region, DesiredSizeBytes: tt.size}},
 			}
 			p := placer{cfg: flatPlacement()}
-			got := placedVolumes(t, p.placeVolumes(snap))
+			got := placedVolumes(t, p.placeVolumes(snap, p.newLedger(snap)))
 			if _, ok := got[pinnedID(40)]; ok != tt.placed {
 				t.Fatalf("placed = %v, want %v", ok, tt.placed)
 			}
@@ -404,7 +404,7 @@ func TestResizedVolumeBlocksNewVolume(t *testing.T) {
 	}
 
 	p := placer{cfg: flatPlacement()}
-	if got := placedVolumes(t, p.placeVolumes(snap)); len(got) != 0 {
+	if got := placedVolumes(t, p.placeVolumes(snap, p.newLedger(snap))); len(got) != 0 {
 		t.Fatalf("new volume placed into the resize reserve: %v", got)
 	}
 }
@@ -426,7 +426,7 @@ func TestVolumesShareLedger(t *testing.T) {
 	}
 
 	p := placer{cfg: cfg}
-	got := placedVolumes(t, p.placeVolumes(snap))
+	got := placedVolumes(t, p.placeVolumes(snap, p.newLedger(snap)))
 	if len(got) != 2 {
 		t.Fatalf("placed %d volumes, want 2", len(got))
 	}
@@ -452,7 +452,7 @@ func TestVolumeSteadyStates(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			snap := stateSnapshot{hosts: []host{h}, volumes: []volume{tt.vol}}
 			p := placer{cfg: flatPlacement()}
-			if got := p.placeVolumes(snap); len(got) != 0 {
+			if got := p.placeVolumes(snap, p.newLedger(snap)); len(got) != 0 {
 				t.Fatalf("intents = %v, want none", got)
 			}
 		})

@@ -24,6 +24,14 @@ const (
 	// IntentPlaceVolume binds a hostless volume to a host. Emitted only by the
 	// placer — the rules cascade knows lifecycle, not geometry.
 	IntentPlaceVolume IntentKind = "place_volume"
+	// IntentResizeVolume approves a grow (attached → resizing): the host has
+	// room for the bumped desired size, so the downlink may hand it to the
+	// agent. IntentVolumeResized settles it (resizing → attached) once the
+	// agent reports the disk at desired. Two intents because they are two
+	// ticks apart with agent work in between; both placer-emitted, since only
+	// the ledger knows whether a grow fits.
+	IntentResizeVolume  IntentKind = "resize_volume"
+	IntentVolumeResized IntentKind = "volume_resized"
 )
 
 // Intent is the complete decision record handed to the Actuator: everything a
@@ -37,7 +45,8 @@ type Intent struct {
 	// intents; zero everywhere else.
 	HostID uuid.UUID
 	// VolumeID is the volume a place_volume intent binds, the lease to acquire
-	// on a stateful assign_host, and the lease to release on destroy.
+	// on a stateful assign_host, the lease to release on destroy, and the
+	// volume a resize_volume/volume_resized intent moves.
 	VolumeID uuid.UUID
 	// DeploymentID targets deployment-level writes: the parent for create, the
 	// status flip for fail/complete, and the revision traffic switches to on a
@@ -93,7 +102,7 @@ type Reconciler struct {
 	rolling  []rule // stateless replicas
 	recreate []rule // stateful replicas
 	orphan   []rule // slots the current deployment no longer declares: drain-only
-	placer   placer // WHERE: fills HostID on assign_host, places hostless volumes
+	placer   placer // WHERE: fills HostID on assign_host, places hostless volumes, gates grows
 }
 
 func NewReconciler(placement config.Placement) *Reconciler {
@@ -108,7 +117,7 @@ func NewReconciler(placement config.Placement) *Reconciler {
 func (r *Reconciler) Reconcile(snap stateSnapshot) []Intent {
 	intents := r.planIntents(buildReplicaGroups(snap))
 	intents = r.placer.placeHostless(snap, intents)
-	intents = append(intents, r.placer.placeVolumes(snap)...)
+	intents = append(intents, r.placer.planVolumes(snap)...)
 	return intents
 }
 

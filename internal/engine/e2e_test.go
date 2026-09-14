@@ -63,7 +63,8 @@ type memVolume struct {
 	serviceID uuid.UUID
 	region    string
 	hostID    uuid.UUID
-	size      int64
+	size      int64 // desired
+	observed  int64 // 0 = never reported
 	status    string
 }
 
@@ -217,12 +218,13 @@ func (m *memStore) ListActiveVolumes(context.Context) ([]db.Volume, error) {
 	var out []db.Volume
 	for _, v := range m.volumes {
 		out = append(out, db.Volume{
-			ID:               v.id,
-			ServiceID:        v.serviceID,
-			Region:           v.region,
-			HostID:           uuid.NullUUID{UUID: v.hostID, Valid: v.hostID != uuid.Nil},
-			DesiredSizeBytes: v.size,
-			Status:           v.status,
+			ID:                v.id,
+			ServiceID:         v.serviceID,
+			Region:            v.region,
+			HostID:            uuid.NullUUID{UUID: v.hostID, Valid: v.hostID != uuid.Nil},
+			DesiredSizeBytes:  v.size,
+			ObservedSizeBytes: sql.NullInt64{Int64: v.observed, Valid: v.observed != 0},
+			Status:            v.status,
 		})
 	}
 	return out, nil
@@ -337,6 +339,26 @@ func (t *memTx) AssignReplicaHost(_ context.Context, replicaID, hostID uuid.UUID
 func (t *memTx) AssignVolumeHost(_ context.Context, volumeID, hostID uuid.UUID) error {
 	v := t.s.volume(volumeID)
 	v.hostID = hostID
+	v.status = "attached"
+	return nil
+}
+
+// The two resize predicates, as the SQL states them: still attached and
+// drifting to approve, still resizing and caught up to settle.
+func (t *memTx) MarkVolumeResizing(_ context.Context, volumeID uuid.UUID) error {
+	v := t.s.volume(volumeID)
+	if v == nil || v.status != "attached" || v.observed == 0 || v.size <= v.observed {
+		return storage.ErrConflict
+	}
+	v.status = "resizing"
+	return nil
+}
+
+func (t *memTx) MarkVolumeAttached(_ context.Context, volumeID uuid.UUID) error {
+	v := t.s.volume(volumeID)
+	if v == nil || v.status != "resizing" || v.observed < v.size {
+		return storage.ErrConflict
+	}
 	v.status = "attached"
 	return nil
 }
@@ -502,7 +524,14 @@ func (m *memStore) ListReplicasByHost(_ context.Context, hostID uuid.UUID) ([]db
 	return out, nil
 }
 
-func (m *memStore) RecordVolumeObservedSize(context.Context, uuid.UUID, int64) error { return nil }
+func (m *memStore) RecordVolumeObservedSize(_ context.Context, volumeID uuid.UUID, observedBytes int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if v := m.volume(volumeID); v != nil {
+		v.observed = observedBytes
+	}
+	return nil
+}
 
 func (m *memStore) RenewVolumeLease(_ context.Context, replicaID uuid.UUID, expiresAt time.Time) error {
 	m.mu.Lock()
@@ -616,13 +645,25 @@ func (l *loop) deploy(slot replicaSlot, serviceID uuid.UUID, n int32, stateful b
 
 // agentConverge plays the host agents for one round: every scheduled replica
 // on a live host reports in active+healthy through the real Watchdog ingestion
-// path.
+// path, and every placed volume reports its disk at the size the downlink
+// would hand the agent (api.volumeTargetSize: desired while resizing or never
+// observed, else what it has).
 func (l *loop) agentConverge() {
 	l.t.Helper()
 	ctx := context.Background()
 	for _, h := range l.ms.hosts {
 		if h.Status != "ready" {
 			continue
+		}
+		for _, v := range l.ms.volumes {
+			if v.hostID != h.ID {
+				continue
+			}
+			if v.status == "resizing" || v.observed == 0 {
+				if err := l.ms.RecordVolumeObservedSize(ctx, v.id, v.size); err != nil {
+					l.t.Fatalf("observe volume: %v", err)
+				}
+			}
 		}
 		reps, _ := l.ms.ListReplicasByHost(ctx, h.ID)
 		for _, r := range reps {
@@ -845,5 +886,69 @@ func TestE2EStatefulRecreateKeepsSingleWriter(t *testing.T) {
 	}
 	if got := l.ms.served[slot]; got != v2 {
 		t.Fatalf("served revision = %s, want v2 %s", got, v2)
+	}
+}
+
+// The resize loop: a bumped desired size is approved by the engine only when
+// the host has room, the agent grows to it, and the engine settles the volume
+// back to attached. Without room the volume just keeps its drift — no failed
+// exit — and the grow goes through the moment the host gains disk.
+func TestE2EVolumeResizeGrowOnly(t *testing.T) {
+	l := newLoop(t)
+	region := "eu-west-1"
+	slot := replicaSlot{uuid.New(), region}
+	serviceID := uuid.New()
+	// 10 GiB disk, 0.8 volume budget → 8 GiB packable; 0.2 reserve → new
+	// volumes see 6.4 GiB, grows may fill all 8.
+	hostID := l.addHost(10 << 30)
+	vol := l.addVolume(serviceID, region, 2<<30)
+
+	v1 := l.deploy(slot, serviceID, 1, true)
+	l.rollout(v1)
+	if v := l.ms.volume(vol); v.status != "attached" || v.observed != 2<<30 {
+		t.Fatalf("after rollout: status=%s observed=%d, want attached at 2GiB", v.status, v.observed)
+	}
+
+	// Grow into the reserve: 8 GiB is the whole budget, more than a fresh
+	// placement could take, but exactly what a grow is allowed.
+	l.ms.volume(vol).size = 8 << 30
+	l.tick()
+	if got := l.ms.volume(vol).status; got != "resizing" {
+		t.Fatalf("after bump: status = %s, want resizing (host has room)", got)
+	}
+	l.agentConverge() // the agent grows the disk and reports it
+	l.tick()
+	if v := l.ms.volume(vol); v.status != "attached" || v.observed != 8<<30 {
+		t.Fatalf("after grow: status=%s observed=%d, want attached at 8GiB", v.status, v.observed)
+	}
+
+	// Beyond the budget: the request stays as visible drift, nothing flips.
+	l.ms.volume(vol).size = 9 << 30
+	for range 3 {
+		l.tick()
+		l.agentConverge()
+	}
+	if v := l.ms.volume(vol); v.status != "attached" || v.observed != 8<<30 {
+		t.Fatalf("no room: status=%s observed=%d, want attached still at 8GiB", v.status, v.observed)
+	}
+
+	// The host gains disk (or another volume leaves): the waiting grow is
+	// picked up on the next tick with no operator action.
+	for i := range l.ms.hosts {
+		if l.ms.hosts[i].ID == hostID {
+			l.ms.hosts[i].DiskBytes = 20 << 30
+		}
+	}
+	l.tick()
+	if got := l.ms.volume(vol).status; got != "resizing" {
+		t.Fatalf("after host grew: status = %s, want resizing", got)
+	}
+	l.agentConverge()
+	l.tick()
+	if v := l.ms.volume(vol); v.status != "attached" || v.observed != 9<<30 {
+		t.Fatalf("settled: status=%s observed=%d, want attached at 9GiB", v.status, v.observed)
+	}
+	if r := l.replicasOf(v1)[0]; r.hostID != hostID || !r.healthy {
+		t.Fatalf("replica disturbed by resize: host=%s healthy=%v", r.hostID, r.healthy)
 	}
 }
