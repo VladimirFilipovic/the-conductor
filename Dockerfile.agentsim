@@ -17,4 +17,4 @@ RUN apk add --no-cache ca-certificates
 COPY --from=builder /out/conductor /usr/local/bin/conductor
 
 ENTRYPOINT ["conductor", "agentsim"]
-CMD ["--gateway.addr", "apiserver:7443", "--control.addr", ":7780"]
+CMD ["--agentapi.addr", "apiserver:7443", "--control.addr", ":7780"]
