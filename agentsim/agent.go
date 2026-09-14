@@ -1,7 +1,7 @@
 // Package agentsim is the simulated host-agent fleet: one Agent per host row,
 // each holding a real gRPC Session to the apiserver's AgentAPI and playing a tiny
 // per-host reconciler — desired state arrives on the downlink, fake containers
-// converge toward it, observations and heartbeats ride the uplink. Every agent
+// and disks converge toward it, observations and heartbeats ride the uplink. Every agent
 // is also a chaos point: its knobs make it lie or go silent so failure paths
 // can be exercised through the REAL transport instead of SQL edits behind the
 // engine's back.
@@ -37,7 +37,20 @@ const (
 	chaosNone        chaosMode = ""
 	chaosCrashLoop   chaosMode = "crash_loop"
 	chaosStallHealth chaosMode = "stall_health"
+	chaosStallResize chaosMode = "stall_resize"
 )
+
+// disk is one fake volume on the host. sizeBytes is what's "on disk" and is
+// what the agent reports; targetBytes is the size the last downlink asked
+// for. A grow lands on the next tick (a real resize2fs takes a moment), a
+// shrink is ignored — the control plane is grow-only and the agent must not
+// destroy data because a message said so.
+type disk struct {
+	mountPath   string
+	sizeBytes   int64
+	targetBytes int64
+	chaos       chaosMode
+}
 
 // Agent simulates one host's agent. Lifecycle: Start spawns the session loop,
 // Stop tears it down. All chaos knobs are safe to call concurrently.
@@ -52,6 +65,7 @@ type Agent struct {
 	mu         sync.Mutex
 	hostDown   bool
 	containers map[string]*container
+	disks      map[string]*disk
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -65,6 +79,7 @@ func NewAgent(client agentpb.AgentAPIClient, hostID uuid.UUID, hostname, region 
 		client:     client,
 		tick:       tick,
 		containers: map[string]*container{},
+		disks:      map[string]*disk{},
 	}
 }
 
@@ -177,13 +192,38 @@ func (a *Agent) applyState(state *agentpb.HostState) {
 			delete(a.containers, id) // reaped or moved away
 		}
 	}
+
+	// Disks: first sight creates the volume at the requested size (the
+	// control plane hands out desired for a never-observed volume); a larger
+	// size later is a grow the engine already approved; absence is deletion.
+	seenDisks := map[string]bool{}
+	for _, v := range state.Volumes {
+		seenDisks[v.Id] = true
+		d := a.disks[v.Id]
+		if d == nil {
+			a.disks[v.Id] = &disk{mountPath: v.MountPath, sizeBytes: v.SizeBytes, targetBytes: v.SizeBytes}
+			continue
+		}
+		d.targetBytes = v.SizeBytes
+	}
+	for id := range a.disks {
+		if !seenDisks[id] {
+			delete(a.disks, id)
+		}
+	}
 }
 
 // step advances every container one tick: the happy path walks
-// starting → health_check → active/healthy; chaos modes bend it.
+// starting → health_check → active/healthy; chaos modes bend it. Disks grow
+// to their target in one tick unless a stalled resize pins them.
 func (a *Agent) step() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	for _, d := range a.disks {
+		if d.chaos != chaosStallResize && d.targetBytes > d.sizeBytes {
+			d.sizeBytes = d.targetBytes
+		}
+	}
 	for _, c := range a.containers {
 		switch c.chaos {
 		case chaosCrashLoop:
@@ -212,8 +252,8 @@ func (a *Agent) step() {
 	}
 }
 
-// report sends the tick's heartbeat plus one observation per container. A
-// downed host sends NOTHING — silence is exactly how a dead host looks to the
+// report sends the tick's heartbeat plus one observation per container and
+// one per disk. A downed host sends NOTHING — silence is exactly how a dead host looks to the
 // sensor; the stream deliberately stays open (connection is not liveness).
 func (a *Agent) report(stream agentpb.AgentAPI_SessionClient) error {
 	a.mu.Lock()
@@ -233,6 +273,11 @@ func (a *Agent) report(stream agentpb.AgentAPI_SessionClient) error {
 				RestartCount:   c.restartCount,
 				LastExitReason: c.exitReason,
 			},
+		}})
+	}
+	for id, d := range a.disks {
+		msgs = append(msgs, &agentpb.AgentMessage{Msg: &agentpb.AgentMessage_VolumeObservation{
+			VolumeObservation: &agentpb.VolumeObservation{VolumeId: id, ObservedSizeBytes: d.sizeBytes},
 		}})
 	}
 	a.mu.Unlock()
@@ -294,6 +339,29 @@ func (a *Agent) Heal(replicaID string) bool {
 	return a.withContainer(replicaID, func(c *container) { c.chaos = chaosNone })
 }
 
+// StallResize pins one disk at its current size: the engine approves the grow
+// and flips the volume to resizing, the agent acknowledges nothing — the
+// resize that never finishes, as seen from the control plane.
+func (a *Agent) StallResize(volumeID string) bool {
+	return a.withDisk(volumeID, func(d *disk) { d.chaos = chaosStallResize })
+}
+
+// HealVolume clears a stalled resize; the disk catches up on the next tick.
+func (a *Agent) HealVolume(volumeID string) bool {
+	return a.withDisk(volumeID, func(d *disk) { d.chaos = chaosNone })
+}
+
+func (a *Agent) withDisk(volumeID string, fn func(*disk)) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	d := a.disks[volumeID]
+	if d == nil {
+		return false
+	}
+	fn(d)
+	return true
+}
+
 func (a *Agent) withContainer(replicaID string, fn func(*container)) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -315,12 +383,21 @@ type ContainerStatus struct {
 	Chaos        string `json:"chaos,omitempty"`
 }
 
+type VolumeStatus struct {
+	VolumeID    string `json:"volume_id"`
+	MountPath   string `json:"mount_path"`
+	SizeBytes   int64  `json:"size_bytes"`
+	TargetBytes int64  `json:"target_bytes"`
+	Chaos       string `json:"chaos,omitempty"`
+}
+
 type AgentStatus struct {
 	HostID     string            `json:"host_id"`
 	Hostname   string            `json:"hostname"`
 	Region     string            `json:"region"`
 	HostDown   bool              `json:"host_down"`
 	Containers []ContainerStatus `json:"containers"`
+	Volumes    []VolumeStatus    `json:"volumes"`
 }
 
 func (a *Agent) Status() AgentStatus {
@@ -333,6 +410,7 @@ func (a *Agent) Status() AgentStatus {
 		HostDown: a.hostDown,
 		// Non-nil so an idle host serializes as [] rather than null.
 		Containers: []ContainerStatus{},
+		Volumes:    []VolumeStatus{},
 	}
 	for id, c := range a.containers {
 		st.Containers = append(st.Containers, ContainerStatus{
@@ -341,6 +419,15 @@ func (a *Agent) Status() AgentStatus {
 			Healthy:      c.healthy,
 			RestartCount: c.restartCount,
 			Chaos:        string(c.chaos),
+		})
+	}
+	for id, d := range a.disks {
+		st.Volumes = append(st.Volumes, VolumeStatus{
+			VolumeID:    id,
+			MountPath:   d.mountPath,
+			SizeBytes:   d.sizeBytes,
+			TargetBytes: d.targetBytes,
+			Chaos:       string(d.chaos),
 		})
 	}
 	return st

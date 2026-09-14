@@ -14,6 +14,7 @@ type chaosRequest struct {
 	Action  string `json:"action"`
 	Host    string `json:"host,omitempty"`
 	Replica string `json:"replica,omitempty"`
+	Volume  string `json:"volume,omitempty"`
 }
 
 func (f *Fleet) controlMux() *http.ServeMux {
@@ -67,6 +68,24 @@ func (f *Fleet) handleChaos(w http.ResponseWriter, r *http.Request) {
 		}
 		if !ok {
 			httpError(w, http.StatusNotFound, "replica "+req.Replica+" not on agent anymore")
+			return
+		}
+
+	case "volume_stall_resize", "volume_heal":
+		a := f.agentByVolume(req.Volume)
+		if a == nil {
+			httpError(w, http.StatusNotFound, "no agent holds volume "+req.Volume)
+			return
+		}
+		ok := false
+		switch req.Action {
+		case "volume_stall_resize":
+			ok = a.StallResize(req.Volume)
+		case "volume_heal":
+			ok = a.HealVolume(req.Volume)
+		}
+		if !ok {
+			httpError(w, http.StatusNotFound, "volume "+req.Volume+" not on agent anymore")
 			return
 		}
 

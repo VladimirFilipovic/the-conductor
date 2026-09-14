@@ -143,6 +143,21 @@ func (f *Fleet) agentByReplica(replicaID string) *Agent {
 	return nil
 }
 
+// agentByVolume finds the agent holding a volume's disk, so chaos can target
+// a volume without the caller knowing its host.
+func (f *Fleet) agentByVolume(volumeID string) *Agent {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, a := range f.agents {
+		if slices.ContainsFunc(a.Status().Volumes, func(v VolumeStatus) bool {
+			return v.VolumeID == volumeID
+		}) {
+			return a
+		}
+	}
+	return nil
+}
+
 func (f *Fleet) statuses() []AgentStatus {
 	f.mu.Lock()
 	agents := make([]*Agent, 0, len(f.agents))
