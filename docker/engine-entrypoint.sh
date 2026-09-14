@@ -2,7 +2,10 @@
 # Shared entrypoint for the engine and apiserver containers (same image).
 # engine: migrate the schema and load the host fleet, then run — the reconcile
 # loop can't place anything onto an empty hosts table, so the seed is part of
-# bringing the engine up, not an optional dev step.
+# bringing the engine up, not an optional dev step. Both steps are idempotent
+# and neither ever drops anything: wiping is an explicit operator action
+# (`make stack-fresh`, which removes the database volume), never something a
+# container start infers on its own.
 # any other mode (apiserver): wait until the engine has seeded, then run. Only
 # one container migrates, so goose never races itself.
 set -eu
@@ -15,24 +18,26 @@ if [ "$#" -eq 0 ]; then
 fi
 MODE="$1"
 
+psql_q() { psql "$DSN" -v ON_ERROR_STOP=1 -tAq -c "$1"; }
+
 if [ "$MODE" = "engine" ]; then
-	# goose speaks the same DSN the engine uses. The postgres depends_on
-	# healthcheck gates start, but retry briefly to cover the gap before the
-	# socket accepts.
-	echo "entrypoint: running migrations"
+	# The postgres depends_on healthcheck gates start, but retry briefly to
+	# cover the gap before the socket accepts.
 	tries=0
-	until goose -dir ./db/migrations postgres "$DSN" up; do
+	until psql_q 'SELECT 1' >/dev/null 2>&1; do
 		tries=$((tries + 1))
 		if [ "$tries" -ge 30 ]; then
-			echo "entrypoint: migrations failed after $tries attempts" >&2
+			echo "entrypoint: database unreachable after $tries attempts" >&2
 			exit 1
 		fi
-		echo "entrypoint: migrate retry $tries"
 		sleep 2
 	done
 
+	echo "entrypoint: running migrations"
+	goose -dir ./db/migrations postgres "$DSN" up
+
 	echo "entrypoint: seeding hosts"
-	psql "$DSN" -v ON_ERROR_STOP=1 -f ./db/seeds/hosts.sql
+	psql "$DSN" -v ON_ERROR_STOP=1 -q -f ./db/seeds/hosts.sql
 else
 	echo "entrypoint: waiting for the engine to migrate and seed"
 	tries=0

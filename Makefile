@@ -4,7 +4,7 @@ PREFIX    ?= /usr/local
 VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS   := -X conductor/cmd.version=$(VERSION)
 
-.PHONY: build run install uninstall fmt vet lint test tidy clean migrate migrate-down migrate-status migrate-fresh sqlc db-up db-down seed stack-up stack-down stack-logs ui-dev
+.PHONY: build run install uninstall fmt vet lint test tidy clean migrate migrate-down migrate-status migrate-fresh sqlc db-up db-down seed stack-up stack-fresh stack-down stack-logs ui-dev
 
 GOLANGCI_LINT_VERSION ?= v2.11.4
 
@@ -68,9 +68,8 @@ migrate-down:
 migrate-status:
 	$(GOOSE) status
 
-# Wipe the local Postgres volume and re-apply every migration from scratch.
-# Use after editing a migration in place (goose tracks version numbers, so an
-# edited-but-already-applied migration never re-runs). --wait blocks until the
+# Wipe the local Postgres volume and re-apply every migration from scratch —
+# the `go run` workflow's counterpart to `stack-fresh`. --wait blocks until the
 # healthcheck passes so goose doesn't race the container's startup.
 migrate-fresh:
 	docker compose down -v
@@ -97,9 +96,17 @@ clean:
 
 # --- full stack (postgres + engine + apiserver + agentsim + chaos-ui) --------------------
 # The engine container migrates and seeds on startup (see docker/engine-
-# entrypoint.sh), so `stack-up` needs no separate `migrate`/`seed` step.
+# entrypoint.sh), so neither target needs a separate `migrate`/`seed` step.
+# Nothing in that path ever drops: a wipe only happens where you asked for one,
+# and `stack-fresh` is that ask — it removes the database volume, so the stack
+# comes back up on a schema built from scratch. Same deal as `migrate-fresh`
+# for the `go run` workflow.
 
 stack-up:
+	docker compose --profile stack up --build -d
+
+stack-fresh:
+	docker compose --profile stack down -v
 	docker compose --profile stack up --build -d
 
 stack-down:
