@@ -5,6 +5,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"sync"
 	"testing"
 	"time"
@@ -22,6 +23,7 @@ type fakeAgentStore struct {
 	mu      sync.Mutex
 	script  []scriptedRead
 	entered chan struct{} // one send per call, as it begins
+	volumes []db.Volume   // served verbatim on every ListVolumesByHost
 }
 
 type scriptedRead struct {
@@ -44,6 +46,10 @@ func (f *fakeAgentStore) ListReplicasByHost(context.Context, uuid.UUID) ([]db.Re
 }
 
 func (f *fakeAgentStore) ListAgentHosts(context.Context) ([]db.Host, error) { return nil, nil }
+
+func (f *fakeAgentStore) ListVolumesByHost(context.Context, uuid.UUID) ([]db.Volume, error) {
+	return f.volumes, nil
+}
 
 func newTestAgentAPI(store *fakeAgentStore) *AgentAPI {
 	return NewAgentAPI("", nil, store, nil)
@@ -162,5 +168,60 @@ func TestUnregisterKeepsReplacementSession(t *testing.T) {
 	api.unregister(replacement)
 	if api.session(pinnedID(1)) != nil {
 		t.Error("replacement teardown left a session behind")
+	}
+}
+
+// The downlink size is the capacity gate made visible: a bumped desired size
+// reaches the agent only once the engine has flipped the volume to resizing.
+func TestVolumeTargetSizeGatesGrowOnResizing(t *testing.T) {
+	observed := func(n int64) sql.NullInt64 { return sql.NullInt64{Int64: n, Valid: true} }
+	tests := []struct {
+		name string
+		in   db.Volume
+		want int64
+	}{
+		{"fresh placement takes desired", db.Volume{Status: "attached", DesiredSizeBytes: 4}, 4},
+		{"attached with drift keeps what it has", db.Volume{Status: "attached", DesiredSizeBytes: 8, ObservedSizeBytes: observed(4)}, 4},
+		{"resizing unlocks desired", db.Volume{Status: "resizing", DesiredSizeBytes: 8, ObservedSizeBytes: observed(4)}, 8},
+		{"converged reports observed", db.Volume{Status: "attached", DesiredSizeBytes: 8, ObservedSizeBytes: observed(8)}, 8},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := volumeTargetSize(tt.in); got != tt.want {
+				t.Errorf("volumeTargetSize() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// Volumes travel with the replicas, sorted, and a volume-only change is a
+// state change: the digest moves, the agent wakes.
+func TestHostStateCarriesVolumesAndDigestsThem(t *testing.T) {
+	store := &fakeAgentStore{
+		script:  []scriptedRead{{rows: replicaRows("active")}, {rows: replicaRows("active")}},
+		volumes: []db.Volume{{ID: pinnedID(2), MountPath: "/data", Status: "attached", DesiredSizeBytes: 4}},
+	}
+	api := newTestAgentAPI(store)
+	ctx := context.Background()
+
+	state, sum1, err := api.hostState(ctx, pinnedID(1))
+	if err != nil {
+		t.Fatalf("hostState: %v", err)
+	}
+	if len(state.Volumes) != 1 || state.Volumes[0].MountPath != "/data" || state.Volumes[0].SizeBytes != 4 {
+		t.Fatalf("volumes = %v, want one /data at 4", state.Volumes)
+	}
+
+	store.volumes[0].Status = "resizing"
+	store.volumes[0].DesiredSizeBytes = 8
+	state, sum2, err := api.hostState(ctx, pinnedID(1))
+	if err != nil {
+		t.Fatalf("hostState: %v", err)
+	}
+	if state.Volumes[0].SizeBytes != 8 {
+		t.Fatalf("resizing volume size = %d, want 8", state.Volumes[0].SizeBytes)
+	}
+	if sum1 == sum2 {
+		t.Error("digest unchanged across a volume-only change; the agent would never wake")
 	}
 }

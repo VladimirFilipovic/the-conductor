@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"conductor/internal/domain"
 	"conductor/internal/storage"
 	"conductor/internal/storage/db"
 	"conductor/proto/agentpb"
@@ -37,6 +38,7 @@ const (
 // AgentAPIStore is the read side the AgentAPI serves agents from.
 type AgentAPIStore interface {
 	ListReplicasByHost(ctx context.Context, hostID uuid.UUID) ([]db.Replica, error)
+	ListVolumesByHost(ctx context.Context, hostID uuid.UUID) ([]db.Volume, error)
 	// ListAgentHosts is agent discovery: every host, scheduling status
 	// ignored — a notready host's agent must still enroll and heartbeat,
 	// or a demoted host could never heal back to ready.
@@ -45,8 +47,8 @@ type AgentAPIStore interface {
 
 // AgentAPI is the agent-facing gRPC boundary: one bidi Session stream per
 // host. Uplink (heartbeats, observations) funnels into ObservedState — this
-// layer adds no rules of its own. Downlink pushes the host's FULL replica
-// state, never deltas: on connect, on a replicas_changed notification, and on
+// layer adds no rules of its own. Downlink pushes the host's FULL state
+// (replicas and volumes), never deltas: on connect, on a replicas_changed notification, and on
 // the periodic resync, so any single message is sufficient and a lost one
 // self-heals.
 type AgentAPI struct {
@@ -243,9 +245,9 @@ func (a *AgentAPI) pushState(ctx context.Context, hostID uuid.UUID, force bool) 
 	s.push(&agentpb.ServerMessage{State: state})
 }
 
-// hostState reads the host's replicas and digests the wire encoding.
-// Deterministic marshal pins map order; repeated fields keep the order sorted
-// here, so equality means equality, not iteration luck.
+// hostState reads the host's replicas and volumes and digests the wire
+// encoding. Deterministic marshal pins map order; repeated fields keep the
+// order sorted here, so equality means equality, not iteration luck.
 func (a *AgentAPI) hostState(ctx context.Context, hostID uuid.UUID) (*agentpb.HostState, [sha256.Size]byte, error) {
 	rows, err := a.store.ListReplicasByHost(ctx, hostID)
 	if err != nil {
@@ -256,13 +258,36 @@ func (a *AgentAPI) hostState(ctx context.Context, hostID uuid.UUID) (*agentpb.Ho
 		replicas[i] = &agentpb.Replica{Id: r.ID.String(), Phase: r.Phase}
 	}
 	slices.SortFunc(replicas, func(x, y *agentpb.Replica) int { return strings.Compare(x.Id, y.Id) })
-	state := &agentpb.HostState{Replicas: replicas}
+
+	vols, err := a.store.ListVolumesByHost(ctx, hostID)
+	if err != nil {
+		return nil, [sha256.Size]byte{}, err
+	}
+	volumes := make([]*agentpb.Volume, len(vols))
+	for i, v := range vols {
+		volumes[i] = &agentpb.Volume{Id: v.ID.String(), MountPath: v.MountPath, SizeBytes: volumeTargetSize(v)}
+	}
+	slices.SortFunc(volumes, func(x, y *agentpb.Volume) int { return strings.Compare(x.Id, y.Id) })
+	state := &agentpb.HostState{Replicas: replicas, Volumes: volumes}
 
 	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(state)
 	if err != nil {
 		return nil, [sha256.Size]byte{}, fmt.Errorf("agentapi: marshal host state: %w", err)
 	}
 	return state, sha256.Sum256(b), nil
+}
+
+// volumeTargetSize is the size the agent should have on disk. The engine is
+// the capacity gate for a grow: a bumped desired size stays invisible to the
+// agent until the reconciler flips the volume to resizing, so an agent never
+// grows a disk the host can't hold. Outside a resize the agent is told what it
+// already has; a never-observed volume (fresh placement) takes desired as its
+// first size.
+func volumeTargetSize(v db.Volume) int64 {
+	if domain.VolumeStatus(v.Status) == domain.VolumeResizing || !v.ObservedSizeBytes.Valid {
+		return v.DesiredSizeBytes
+	}
+	return v.ObservedSizeBytes.Int64
 }
 
 func (a *AgentAPI) register(s *agentSession) {
@@ -351,6 +376,13 @@ func (a *AgentAPI) applyUplink(ctx context.Context, hostID uuid.UUID, msg *agent
 			RestartCount:   o.RestartCount,
 			LastExitReason: o.LastExitReason,
 		})
+	case *agentpb.AgentMessage_VolumeObservation:
+		o := m.VolumeObservation
+		volumeID, err := uuid.Parse(o.VolumeId)
+		if err != nil {
+			return fmt.Errorf("agentapi: volume observation with bad volume id %q", o.VolumeId)
+		}
+		return a.observed.ObserveVolumeSize(ctx, volumeID, o.ObservedSizeBytes)
 	default:
 		return fmt.Errorf("agentapi: unexpected uplink message %T", msg.Msg)
 	}

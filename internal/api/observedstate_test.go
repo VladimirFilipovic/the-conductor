@@ -5,6 +5,7 @@ package api
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -22,6 +23,12 @@ type fakeObservedStateStore struct {
 	heartbeats   []string // "host@time status"
 	observations []storage.ReplicaObservation
 	renewals     []string // "replica until time"
+	volumeSizes  []string // "volume=bytes"
+}
+
+func (f *fakeObservedStateStore) RecordVolumeObservedSize(_ context.Context, volumeID uuid.UUID, observedBytes int64) error {
+	f.volumeSizes = append(f.volumeSizes, volumeID.String()+"="+strconv.FormatInt(observedBytes, 10))
+	return nil
 }
 
 func (f *fakeObservedStateStore) RecordHostHeartbeat(_ context.Context, hostID uuid.UUID, observedAt time.Time, status string) error {
@@ -152,5 +159,29 @@ func TestObserveReplicaRenewsLeaseOnlyWhenHealthy(t *testing.T) {
 	}
 	if len(store.renewals) != 1 {
 		t.Fatalf("unhealthy observation renewed the lease: %v", store.renewals)
+	}
+}
+
+// A disk size lands as reported — including one smaller than before, which is
+// how a recreated disk shows up as drift again. Zero and negative are garbage.
+func TestObserveVolumeSizeRecordsPositiveOnly(t *testing.T) {
+	store := &fakeObservedStateStore{}
+	in := newTestObserved(store)
+	ctx := context.Background()
+
+	for _, bad := range []int64{0, -1} {
+		if err := in.ObserveVolumeSize(ctx, pinnedID(1), bad); err == nil {
+			t.Errorf("size %d accepted from agent", bad)
+		}
+	}
+	if err := in.ObserveVolumeSize(ctx, pinnedID(1), 8); err != nil {
+		t.Fatalf("ObserveVolumeSize: %v", err)
+	}
+	if err := in.ObserveVolumeSize(ctx, pinnedID(1), 4); err != nil {
+		t.Fatalf("ObserveVolumeSize (shrink): %v", err)
+	}
+	want := []string{pinnedID(1).String() + "=8", pinnedID(1).String() + "=4"}
+	if len(store.volumeSizes) != 2 || store.volumeSizes[0] != want[0] || store.volumeSizes[1] != want[1] {
+		t.Fatalf("recorded = %v, want %v", store.volumeSizes, want)
 	}
 }

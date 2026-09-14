@@ -22,6 +22,8 @@ type ObservedStateStore interface {
 	// RenewVolumeLease extends the lease replicaID holds; a no-op when it
 	// holds none (stateless) or the lease moved to another replica.
 	RenewVolumeLease(ctx context.Context, replicaID uuid.UUID, expiresAt time.Time) error
+	// RecordVolumeObservedSize stores what the agent has on disk for a volume.
+	RecordVolumeObservedSize(ctx context.Context, volumeID uuid.UUID, observedBytes int64) error
 }
 
 // ObservedState is the counterpart of DesiredState: what agents report about
@@ -75,4 +77,16 @@ func (o *ObservedState) ObserveReplica(ctx context.Context, obs storage.ReplicaO
 		return nil
 	}
 	return o.store.RenewVolumeLease(ctx, obs.ReplicaID, o.now().Add(domain.VolumeLeaseTTL))
+}
+
+// ObserveVolumeSize ingests what an agent has on disk for one volume. No
+// guard against a smaller-than-before report: observed state mirrors the disk,
+// and a disk that shrank (recreated, corrupted) is exactly what the reconciler
+// must see to re-approve the grow. A non-positive size is agent garbage — a
+// disk that doesn't exist reports nothing, not zero.
+func (o *ObservedState) ObserveVolumeSize(ctx context.Context, volumeID uuid.UUID, observedBytes int64) error {
+	if observedBytes <= 0 {
+		return fmt.Errorf("observedstate: volume %s observed size %d is not positive", volumeID, observedBytes)
+	}
+	return o.store.RecordVolumeObservedSize(ctx, volumeID, observedBytes)
 }
