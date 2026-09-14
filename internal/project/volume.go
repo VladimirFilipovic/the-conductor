@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"conductor/internal/config"
+	"conductor/internal/domain"
 	"conductor/internal/storage/db"
 	"conductor/internal/target"
 
@@ -92,6 +93,14 @@ func (s *Service) ResizeVolume(ctx context.Context, t target.Target, mountPath s
 	if cur.ObservedSizeBytes.Valid && sizeBytes < cur.ObservedSizeBytes.Int64 {
 		return ResizeOutcome{}, fmt.Errorf("%w: volume at %q has %d bytes on disk and resize is grow-only; %d requested",
 			ErrInvalid, mountPath, cur.ObservedSizeBytes.Int64, sizeBytes)
+	}
+	// While a grow is in flight the downlink already hands the agent whatever
+	// desired says, so raising it here would skip the engine's disk gate.
+	// Lowering is fine: it can only shrink the in-flight target (floor is the
+	// disk, above), and the settle predicate closes it out.
+	if cur.Status == string(domain.VolumeResizing) && sizeBytes > cur.DesiredSizeBytes {
+		return ResizeOutcome{}, fmt.Errorf("%w: volume at %q is resizing to %d bytes; wait for it to attach before growing further",
+			ErrInvalid, mountPath, cur.DesiredSizeBytes)
 	}
 	vol, err := s.store.UpdateVolumeSize(ctx, id, mountPath, sizeBytes)
 	if err != nil {
