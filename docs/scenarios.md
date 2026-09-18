@@ -288,49 +288,6 @@ recreate v1→v2 sa lease handover-om za **19s**, ceo period tačno 1 živa repl
 2026-09-11: deploy→active+lease 6s; recreate: stara draining → reaped +13s, nova
 scheduling +16s, active + lease +18s.
 
-### 11. Volume resize — grow-only, engine je gate za prostor
-
-Zahtev: `conductor volume update --size N` mora da poraste disk uživo bez
-restarta replike (kao Railway live resize); shrink ne postoji; zahtev koji host
-ne može da primi ne sme da završi u `failed` nego čeka dok se prostor ne pojavi.
-
-Model: CLI menja samo `desired_size_bytes`. Engine svaki tick gleda drift
-(`desired > observed`) i, ako ledger hosta ima mesta (grow sme da potroši ceo
-`DiskReserve`, nova plasiranja ne smeju), flipuje status `attached → resizing`.
-Tek taj status otključava novu veličinu na downlinku (`volumeTargetSize`), pa
-agent nikad ne raste disk koji host ne drži. Agent javlja `VolumeObservation`
-sa stvarnom veličinom; kad `observed >= desired` engine vraća `resizing →
-attached`. Oba flipa su po jedan red u sopstvenoj tx sa SQL predikatom
-(`MarkVolumeResizing`/`MarkVolumeAttached`), izgubljena trka = drop, sledeći
-tick odlučuje ponovo.
-
-- postavka kao u 9 (stateful `pg`, `volume add --size 2`, `up`)
-- `conductor volume update --mount /var/lib/postgresql/data --size 4 -s pg`
-  → CLI kaže "host has room"; engine `resizing` na sledećem ticku; agent
-  naraste disk u jednom ticku i javi; engine `attached`
-- `--size 100` na hostu sa 80GB (budžet 64GiB) → CLI kaže "host is short
-  36GiB … waits"; `volume list` pokazuje `SIZE 100GiB / ON DISK 4GiB /
-  attached (grow waiting for host space)`; ništa se ne dešava koliko god tickova
-- povlačenje: `--size 4` (= on disk) → "pending grow withdrawn"; pod on-disk
-  veličinu CLI odbija (`grow-only`)
-- prostor se pojavi (drugi volume ode sa hosta, ili operator doda disk:
-  `update hosts set disk_bytes=…`) → engine sam odobri, bez akcije operatera
-
-Izmereno (2026-09-14, agentsim tick 1s, reconcile 2s): update 10:17:05 →
-`resizing` 10:17:06 → agent 4GiB 10:17:06 → `attached` 10:17:07 (**2s**).
-Čekanje na prostor: 3 ticka bez promene, status label vidljiv u `volume list`.
-Host 80→200GiB 10:17:55 → `resizing` +2s → `attached` na 100GiB +5s. Replika
-`active|healthy|restart_count=0` ceo period, lease netaknut.
-
-Chaos `volume_stall_resize <volume>`: engine odobri (`resizing`), agent nikad ne
-javi novu veličinu → volume stoji `resizing`, `ON DISK` zaostaje; `volume_heal`
-→ agent naraste i engine settle-uje za 2s. Nema timeout-a ni `failed`: stalled
-resize je vidljiv drift za čoveka, ne presuda za automatiku (isti stav kao 4).
-
-Dok je volume `resizing`, `update` je odbijen — downlink već šalje `desired`,
-pa bi svaka promena preskočila disk gate; jedan resize u letu, čeka se
-`attached`. Resize je za sad CLI-only — chaos-ui ne prikazuje volumene.
-
 ### 10. Operator akcije
 
 - `cordon` (UI → apiserver): host ostaje da služi postojeće, ne dobija novo;
@@ -351,6 +308,108 @@ pa bi svaka promena preskočila disk gate; jedan resize u letu, čeka se
   replici je ovo ručna "jedna zamena" — red nestane, `rollingRampUp` vidi
   deficit i napravi novu
 - `conductor rollback`: vrati prethodnu verziju deploymenta
+
+### 11. Volume resize — grow-only, engine je gate za prostor, `resize_pending` + `revert`
+
+Zahtev: `conductor volume update --size N` mora da poraste disk uživo bez
+restarta replike (kao Railway live resize); shrink ne postoji; zahtev koji host
+ne može da primi ne sme da završi u `failed` nego čeka dok se prostor ne pojavi
+— ali dok čeka, mora da se **vidi** kao stanje, ne sme da blokira druge volumene
+na hostu, i operator mora da može da ga **povuče** (`volume revert`).
+
+Model (v2, 2026-09-18):
+
+- **Engine je jedini pisac `volumes.status`.** CLI/project pišu samo
+  `desired_size_bytes` (+ `previous_desired_size_bytes`, cilj za revert).
+- **Desired postaje rezervacija tek kad je odobren.** Ledger tereti
+  `VolumeSizing.Committed()`: `resizing → desired`; inače `observed` ako je
+  agent javio; inače `desired` (sveže plasiranje). Istu formulu koristi
+  downlink (`volumeTargetSize`) i CLI advisory — neodobren grow od 100GiB ne
+  sprečava novi volume da sleti na host.
+- **Grow je delta item kroz `fits`.** `resize` item nosi `GrowDelta()`
+  (Committed je već naplatio ono što je na disku), preskače `DiskReserve`
+  (rezerva postoji baš za grow-ove) i cpu/mem headroom; ista poredba za svaki
+  item. Odobren grow se odmah upiše u ledger — drugi grow na istom hostu u
+  istom ticku vidi prvi (redosled po `id`).
+- **Novi status `resize_pending`** = tačno "grow tražen, host nema mesta".
+  Piše ga engine (`MarkVolumeResizePending`), nikad CLI.
+- **Jedan grow u letu.** `update` prolazi samo za `pending` (neplasiran) ili
+  `attached` **i konvergiran** (`observed == desired`, ili nikad javljeno);
+  grow-only (`size > desired`).
+- **`volume revert`** vraća `desired` na `previous_desired_size_bytes`
+  (puni `update`, briše `revert` → radi jednom). Dozvoljen **samo** iz
+  `resize_pending`. Ne u `resizing` (odobreno = obećano agentu; zaglavljen
+  resize je posao za budući watchdog/alarm, ne za revert). Ne dira status —
+  engine sam settle-uje `resize_pending → attached` jer sad važi
+  `observed >= desired`.
+- SQL predikati u `Mark*` ostaju eksplicitni (commit-time pojas mora u bazi) i
+  zrcale `VolumeSizing.Drifting`/`CaughtUp`; izgubljena trka = drop, sledeći
+  tick odlučuje ponovo.
+
+```
+pending ──place──▶ attached ──drift, fits───────────────▶ resizing ──observed≥desired──▶ attached
+                      │                                      ▲
+                      └──drift, !fits──▶ resize_pending ─────┘ (fits na nekom kasnijem ticku)
+                                             │
+                                             └──revert──▶ desired=previous ──engine: observed≥desired──▶ attached
+```
+
+| status | `update` (grow-only) | `revert` |
+|---|---|---|
+| `pending` (neplasiran), `attached` konvergiran | ✅ | ❌ (`previous` je ionako NULL) |
+| `attached` sa driftom (≤2s prozor dok engine ne klasifikuje) | ❌ "grow already requested; revert first" | ❌ "not classified yet, retry" |
+| `resize_pending` | ❌ "is resize_pending; revert or wait" | ✅ |
+| `resizing` | ❌ | ❌ "nothing to revert" |
+
+Koraci (postavka kao u 9: stateful `pg`, `volume add --size 2`, `up`; volume
+je sleteo na `ue1-small-1` — 80GB, budžet 64GiB):
+
+- grow sa mestom: `volume update --mount /var/lib/postgresql/data --size 4 -s pg`
+  → CLI "host has room"; `resizing` na sledećem ticku; agent naraste i javi;
+  `attached`
+- grow bez mesta: `--size 100` → CLI "host is short 36GiB … waits as
+  resize_pending (volume revert takes it back)"; odmah drugi `update` →
+  "already has a grow requested (4G → 100G); revert first"; posle ticka
+  `volume list` pokazuje `SIZE 100GiB / ON DISK 4GiB / resize_pending`;
+  `update` sad → "is resize_pending; revert or wait"
+- drugi volume pored pending grow-a: `cordon` medium i large (da placer mora
+  na small), `add --database --name pg2`, `volume add --mount /data --size 30
+  -s pg2`, `up -s pg2` → sleti na isti host (30 ≤ 64 − 4 − 12.8); po staroj
+  logici (desired kao rezervacija) host bi izgledao 40GiB prekomitovan
+- `volume revert --mount /var/lib/postgresql/data -s pg` → "reverted … → 4GiB
+  (engine settles on next tick)"; `attached` na sledećem ticku; drugi `revert`
+  → "is attached; nothing to revert"
+- prostor se pojavi: `--size 60` → `resize_pending` (delta 56 > 64−4−30);
+  `update hosts set disk_bytes=200G` → engine sam odobri → `resizing` →
+  `attached` na 60GiB, bez akcije operatera
+- chaos `volume_stall_resize <volume>` pa `--size 70` (ima mesta): engine
+  odobri (`resizing`), agent nikad ne javi → volume **stoji `resizing`**,
+  `ON DISK` zaostaje; `update` → "is resizing; revert or wait"; `revert` →
+  "is resizing; nothing to revert" — nema CLI izlaza iz `resizing`, namerno;
+  `volume_heal` → agent naraste i engine settle-uje. Nema timeout-a ni
+  `failed` (isti stav kao 4).
+
+Izmereno (2026-09-18 UTC, agentsim tick 1s, reconcile 2s; replika
+`active|healthy|restart_count=0` ceo period, lease netaknut):
+
+- deploy 15:25:59 → volume `attached` 2GiB + replika `active` 15:26:07
+- `--size 4` 15:26:47 → `resizing` 15:26:49 (agent već 4GiB) → `attached`
+  15:26:50 (**3s**)
+- `--size 100` 15:27:22 → `resize_pending` 15:27:24 (**2s**); zatim samo
+  DEBUG "still waiting" svaki tick, status ne mrda
+- `up -s pg2` (30GiB) 15:28:04 → volume `attached` na `ue1-small-1` 15:28:07,
+  replika `active` 15:28:11 — pored parkiranog 100GiB zahteva
+- `revert` 15:29:08 → `attached` 4GiB 15:29:09 (**1s**), `previous` NULL
+- `--size 60` 15:29:12 (CLI short 26GiB) → `resize_pending` 15:29:15; host
+  80→200GB 15:29:17 → `resizing` 15:29:18 → agent 60GiB 15:29:19 →
+  `attached` 15:29:20 (**3s** od diska)
+- stall 15:29:55 + `--size 70` → `resizing` 15:29:57, `ON DISK` 60GiB stoji
+  4+ ticka; `volume_heal` 15:30:01 → `attached` 70GiB 15:30:03 (**2s**)
+
+Engine log: jedan INFO `volume grow waiting for host space` pri parkiranju,
+posle toga DEBUG `still waiting` po ticku; `volume grow approved` /
+`volume resized from=<status>` na flipovima. Resize je i dalje CLI-only —
+chaos-ui ne prikazuje volumene.
 
 ### 12. Drain hosta — graciozna evakuacija
 
