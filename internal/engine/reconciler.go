@@ -39,6 +39,11 @@ const (
 	// the ledger knows whether a grow fits.
 	IntentResizeVolume  IntentKind = "resize_volume"
 	IntentVolumeResized IntentKind = "volume_resized"
+	// IntentVolumeResizePending parks a grow the host has no room for
+	// (attached → resize_pending). The request is kept and re-judged every
+	// tick; the status exists so the operator sees "waiting for space" in
+	// `volume list` and has a state `volume revert` may act on.
+	IntentVolumeResizePending IntentKind = "volume_resize_pending"
 )
 
 // Intent is the complete decision record handed to the Actuator: everything a

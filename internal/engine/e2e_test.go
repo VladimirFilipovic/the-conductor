@@ -64,9 +64,17 @@ type memVolume struct {
 	region    string
 	hostID    uuid.UUID
 	size      int64 // desired
+	previous  int64 // desired before the last grow request; 0 = nothing to revert to
 	observed  int64 // 0 = never reported
 	status    string
 }
+
+// grow plays `volume update`: desired moves, the revert target is kept, the
+// status is left to the engine.
+func (v *memVolume) grow(size int64) { v.previous, v.size = v.size, size }
+
+// revert plays `volume revert`: desired returns to the pre-update size, once.
+func (v *memVolume) revert() { v.size, v.previous = v.previous, 0 }
 
 type memLease struct {
 	replicaID uuid.UUID
@@ -229,13 +237,14 @@ func (m *memStore) ListActiveVolumes(context.Context) ([]db.Volume, error) {
 	var out []db.Volume
 	for _, v := range m.volumes {
 		out = append(out, db.Volume{
-			ID:                v.id,
-			ServiceID:         v.serviceID,
-			Region:            v.region,
-			HostID:            uuid.NullUUID{UUID: v.hostID, Valid: v.hostID != uuid.Nil},
-			DesiredSizeBytes:  v.size,
-			ObservedSizeBytes: sql.NullInt64{Int64: v.observed, Valid: v.observed != 0},
-			Status:            v.status,
+			ID:                       v.id,
+			ServiceID:                v.serviceID,
+			Region:                   v.region,
+			HostID:                   uuid.NullUUID{UUID: v.hostID, Valid: v.hostID != uuid.Nil},
+			DesiredSizeBytes:         v.size,
+			PreviousDesiredSizeBytes: sql.NullInt64{Int64: v.previous, Valid: v.previous != 0},
+			ObservedSizeBytes:        sql.NullInt64{Int64: v.observed, Valid: v.observed != 0},
+			Status:                   v.status,
 		})
 	}
 	return out, nil
@@ -355,11 +364,21 @@ func (t *memTx) AssignVolumeHost(_ context.Context, volumeID, hostID uuid.UUID) 
 	return nil
 }
 
-// The two resize predicates, as the SQL states them: still attached and
-// drifting to approve, still resizing and caught up to settle.
-func (t *memTx) MarkVolumeResizing(_ context.Context, volumeID uuid.UUID) error {
+// The three resize predicates, as the SQL states them: attached and
+// drifting to park, drifting and not yet approved to approve, approved or
+// parked and caught up to settle.
+func (t *memTx) MarkVolumeResizePending(_ context.Context, volumeID uuid.UUID) error {
 	v := t.s.volume(volumeID)
 	if v == nil || v.status != "attached" || v.observed == 0 || v.size <= v.observed {
+		return storage.ErrConflict
+	}
+	v.status = "resize_pending"
+	return nil
+}
+
+func (t *memTx) MarkVolumeResizing(_ context.Context, volumeID uuid.UUID) error {
+	v := t.s.volume(volumeID)
+	if v == nil || (v.status != "attached" && v.status != "resize_pending") || v.observed == 0 || v.size <= v.observed {
 		return storage.ErrConflict
 	}
 	v.status = "resizing"
@@ -368,7 +387,7 @@ func (t *memTx) MarkVolumeResizing(_ context.Context, volumeID uuid.UUID) error 
 
 func (t *memTx) MarkVolumeAttached(_ context.Context, volumeID uuid.UUID) error {
 	v := t.s.volume(volumeID)
-	if v == nil || v.status != "resizing" || v.observed < v.size {
+	if v == nil || (v.status != "resizing" && v.status != "resize_pending") || v.observed < v.size {
 		return storage.ErrConflict
 	}
 	v.status = "attached"
@@ -966,9 +985,11 @@ func TestE2EStatefulRecreateKeepsSingleWriter(t *testing.T) {
 }
 
 // The resize loop: a bumped desired size is approved by the engine only when
-// the host has room, the agent grows to it, and the engine settles the volume
-// back to attached. Without room the volume just keeps its drift — no failed
-// exit — and the grow goes through the moment the host gains disk.
+// the host has room for the delta, the agent grows to it, and the engine
+// settles the volume back to attached. Without room the engine parks the
+// request as resize_pending — the host stays open to other volumes because an
+// unapproved grow is not a reservation — and either the operator reverts it
+// or the grow goes through the moment the host gains disk.
 func TestE2EVolumeResizeGrowOnly(t *testing.T) {
 	l := newLoop(t)
 	region := "eu-west-1"
@@ -985,31 +1006,44 @@ func TestE2EVolumeResizeGrowOnly(t *testing.T) {
 		t.Fatalf("after rollout: status=%s observed=%d, want attached at 2GiB", v.status, v.observed)
 	}
 
-	// Grow into the reserve: 8 GiB is the whole budget, more than a fresh
-	// placement could take, but exactly what a grow is allowed.
-	l.ms.volume(vol).size = 8 << 30
+	// Happy path is one tick: attached with drift and room → resizing directly.
+	l.ms.volume(vol).grow(4 << 30)
 	l.tick()
 	if got := l.ms.volume(vol).status; got != "resizing" {
 		t.Fatalf("after bump: status = %s, want resizing (host has room)", got)
 	}
 	l.agentConverge() // the agent grows the disk and reports it
 	l.tick()
-	if v := l.ms.volume(vol); v.status != "attached" || v.observed != 8<<30 {
-		t.Fatalf("after grow: status=%s observed=%d, want attached at 8GiB", v.status, v.observed)
+	if v := l.ms.volume(vol); v.status != "attached" || v.observed != 4<<30 {
+		t.Fatalf("after grow: status=%s observed=%d, want attached at 4GiB", v.status, v.observed)
 	}
 
-	// Beyond the budget: the request stays as visible drift, nothing flips.
-	l.ms.volume(vol).size = 9 << 30
+	// Beyond the room (delta 5 > 8 − 4): parked, and it stays parked.
+	l.ms.volume(vol).grow(9 << 30)
+	l.tick()
+	if got := l.ms.volume(vol).status; got != "resize_pending" {
+		t.Fatalf("no room: status = %s, want resize_pending", got)
+	}
 	for range 3 {
 		l.tick()
 		l.agentConverge()
 	}
-	if v := l.ms.volume(vol); v.status != "attached" || v.observed != 8<<30 {
-		t.Fatalf("no room: status=%s observed=%d, want attached still at 8GiB", v.status, v.observed)
+	if v := l.ms.volume(vol); v.status != "resize_pending" || v.observed != 4<<30 {
+		t.Fatalf("no room: status=%s observed=%d, want resize_pending still at 4GiB", v.status, v.observed)
 	}
 
-	// The host gains disk (or another volume leaves): the waiting grow is
-	// picked up on the next tick with no operator action.
+	// The parked request is not a reservation: a second 2 GiB volume lands on
+	// the same host (2 ≤ 8 − 4 − 1.6 reserve), where charging the 9 GiB desired
+	// would have made the host look overcommitted.
+	second := l.addVolume(uuid.New(), region, 2<<30)
+	l.tick()
+	l.agentConverge()
+	if v := l.ms.volume(second); v.hostID != hostID || v.status != "attached" {
+		t.Fatalf("second volume next to a parked grow: host=%s status=%s, want placed on %s", v.hostID, v.status, hostID)
+	}
+
+	// The host gains disk: the parked grow is approved on the next tick with
+	// no operator action (delta 5 ≤ 16 − 4 − 2).
 	for i := range l.ms.hosts {
 		if l.ms.hosts[i].ID == hostID {
 			l.ms.hosts[i].DiskBytes = 20 << 30
@@ -1023,6 +1057,20 @@ func TestE2EVolumeResizeGrowOnly(t *testing.T) {
 	l.tick()
 	if v := l.ms.volume(vol); v.status != "attached" || v.observed != 9<<30 {
 		t.Fatalf("settled: status=%s observed=%d, want attached at 9GiB", v.status, v.observed)
+	}
+
+	// Revert: a grow the host can't hold (delta 6 > 16 − 9 − 2) is parked, the
+	// operator takes it back, and the engine settles it — observed ≥ desired
+	// again — without the agent doing anything.
+	l.ms.volume(vol).grow(15 << 30)
+	l.tick()
+	if got := l.ms.volume(vol).status; got != "resize_pending" {
+		t.Fatalf("second over-budget bump: status = %s, want resize_pending", got)
+	}
+	l.ms.volume(vol).revert()
+	l.tick()
+	if v := l.ms.volume(vol); v.status != "attached" || v.size != 9<<30 || v.observed != 9<<30 {
+		t.Fatalf("after revert: status=%s desired=%d observed=%d, want attached at 9GiB", v.status, v.size, v.observed)
 	}
 	if r := l.replicasOf(v1)[0]; r.hostID != hostID || !r.healthy {
 		t.Fatalf("replica disturbed by resize: host=%s healthy=%v", r.hostID, r.healthy)

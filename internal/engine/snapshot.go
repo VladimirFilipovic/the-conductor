@@ -85,16 +85,14 @@ type host struct {
 }
 
 type volume struct {
-	ID               uuid.UUID
-	ServiceID        uuid.UUID
-	Region           string
-	HostID           uuid.UUID
-	DesiredSizeBytes int64
-	// ObservedSizeBytes is what the host's agent last reported on disk; 0
-	// until the first report. desired > observed is the drift the resize pass
-	// converges (grow-only).
-	ObservedSizeBytes int64
-	Status            domain.VolumeStatus
+	ID        uuid.UUID
+	ServiceID uuid.UUID
+	Region    string
+	HostID    uuid.UUID
+	// VolumeSizing carries status + desired + observed and the predicates the
+	// resize pass and the ledger are written against (Drifting, CaughtUp,
+	// Committed) — the same ones the downlink and the CLI use.
+	domain.VolumeSizing
 }
 
 type stateSnapshot struct {
@@ -227,13 +225,11 @@ func newStateSnapshot(
 	}
 	for _, v := range volumes {
 		snap.volumes = append(snap.volumes, volume{
-			ID:                v.ID,
-			ServiceID:         v.ServiceID,
-			Region:            v.Region,
-			HostID:            v.HostID.UUID,
-			DesiredSizeBytes:  v.DesiredSizeBytes,
-			ObservedSizeBytes: v.ObservedSizeBytes.Int64,
-			Status:            domain.VolumeStatus(v.Status),
+			ID:           v.ID,
+			ServiceID:    v.ServiceID,
+			Region:       v.Region,
+			HostID:       v.HostID.UUID,
+			VolumeSizing: storage.SizingOf(v),
 		})
 	}
 	return snap

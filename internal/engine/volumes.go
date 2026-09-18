@@ -16,46 +16,68 @@ func (p *placer) planVolumes(snap stateSnapshot) []Intent {
 }
 
 // resizeVolumes drives the grow-only resize state machine, one volume at a
-// time, no coupling between volumes:
+// time, against the pass's ledger:
 //
-//	attached, desired > observed, host has room → resize_volume  (→ resizing)
-//	attached, desired > observed, no room       → hold; drift stays visible, retried every tick
-//	resizing, observed >= desired               → volume_resized (→ attached)
+//	attached,       drifting, delta fits   → resize_volume          (→ resizing)
+//	attached,       drifting, no room      → volume_resize_pending  (→ resize_pending)
+//	resize_pending, drifting, delta fits   → resize_volume          (→ resizing)
+//	resize_pending, caught up              → volume_resized         (→ attached; a revert)
+//	resizing,       caught up              → volume_resized         (→ attached)
 //
-// "Has room" is fits with a resize item: newLedger already subtracts every
-// placed volume's DESIRED size, so a bumped desired is a reservation the
-// moment it lands, and the grow fits iff the host isn't overcommitted (the
-// DiskReserve is its to use — see packItem.resize). An unhealthy host is
-// outside the ledger and holds too; a cordoned or draining one is in it and
-// grows normally — the volume is staying on it regardless.
+// "Fits" is fits with a resize item whose disk is the grow DELTA: the ledger
+// already charges Committed() (what's on disk, or desired once approved), so
+// the delta is exactly what the grow still has to find, and a resize item
+// may take the DiskReserve — see packItem.resize. An approved grow charges
+// its delta onto the ledger at once, so a second grow on the same host this
+// tick is judged against it. An unhealthy host is outside the ledger and
+// holds; a cordoned or draining one is in it and grows normally — the volume
+// is staying on it regardless.
 //
-// There is no failed exit. Waiting is the only outcome for a grow that doesn't
-// fit: the operator sees desired > observed on an attached volume, and the
-// pass re-evaluates on every tick until the host has room.
+// There is no failed exit. resize_pending is the only outcome for a grow
+// that doesn't fit: the pass re-evaluates it every tick until the host has
+// room, and `volume revert` is the operator's way out.
 //
-// A never-observed volume (ObservedSizeBytes 0) doesn't drift: the downlink
-// hands the agent desired as its first size, so there is nothing to approve.
+// A never-reported volume has nothing to classify: the downlink hands the
+// agent desired as its first size.
 func (p *placer) resizeVolumes(snap stateSnapshot, led ledger) []Intent {
 	var intents []Intent
 	for _, v := range snap.volumes {
+		if !v.Reported() {
+			continue
+		}
 		switch {
-		case v.Status == domain.VolumeResizing && v.ObservedSizeBytes >= v.DesiredSizeBytes:
+		case v.Status == domain.VolumeResizing && v.CaughtUp(),
+			v.Status == domain.VolumeResizePending && v.CaughtUp():
 			intents = append(intents, Intent{Kind: IntentVolumeResized, VolumeID: v.ID})
 			slog.Info("reconcile -> volume resized",
-				"volume", v.ID, "host", v.HostID, "bytes", v.ObservedSizeBytes)
+				"volume", v.ID, "host", v.HostID, "from", v.Status, "bytes", v.Observed)
 
-		case v.Status == domain.VolumeAttached && v.ObservedSizeBytes > 0 && v.DesiredSizeBytes > v.ObservedSizeBytes:
+		case v.Status == domain.VolumeAttached && v.Drifting(),
+			v.Status == domain.VolumeResizePending && v.Drifting():
 			hl := led[v.HostID]
-			if hl == nil || !p.fits(packItem{id: v.ID, region: v.Region, resize: true}, hl) {
-				slog.Debug("reconcile -> volume grow waiting for host space",
-					"volume", v.ID, "host", v.HostID,
-					"desired", v.DesiredSizeBytes, "observed", v.ObservedSizeBytes)
+			if hl == nil {
+				// Unhealthy host: no ledger to judge against, and nothing the
+				// agent could do anyway — leave the status alone.
+				slog.Debug("reconcile -> volume grow waiting for host",
+					"volume", v.ID, "host", v.HostID, "desired", v.Desired, "observed", v.Observed)
 				continue
 			}
-			intents = append(intents, Intent{Kind: IntentResizeVolume, VolumeID: v.ID})
-			slog.Info("reconcile -> volume grow approved",
-				"volume", v.ID, "host", v.HostID,
-				"desired", v.DesiredSizeBytes, "observed", v.ObservedSizeBytes)
+			item := packItem{id: v.ID, region: v.Region, disk: v.GrowDelta(), resize: true}
+			if p.fits(item, hl) {
+				led.commit(item, v.HostID)
+				intents = append(intents, Intent{Kind: IntentResizeVolume, VolumeID: v.ID})
+				slog.Info("reconcile -> volume grow approved",
+					"volume", v.ID, "host", v.HostID, "desired", v.Desired, "observed", v.Observed)
+				continue
+			}
+			if v.Status == domain.VolumeResizePending {
+				slog.Debug("reconcile -> volume grow still waiting for host space",
+					"volume", v.ID, "host", v.HostID, "desired", v.Desired, "observed", v.Observed)
+				continue
+			}
+			intents = append(intents, Intent{Kind: IntentVolumeResizePending, VolumeID: v.ID})
+			slog.Info("reconcile -> volume grow waiting for host space",
+				"volume", v.ID, "host", v.HostID, "desired", v.Desired, "observed", v.Observed)
 		}
 	}
 	return intents

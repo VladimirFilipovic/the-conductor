@@ -284,17 +284,15 @@ func (a *AgentAPI) hostState(ctx context.Context, hostID uuid.UUID) (*agentpb.Ho
 	return state, sha256.Sum256(b), nil
 }
 
-// volumeTargetSize is the size the agent should have on disk. The engine is
-// the capacity gate for a grow: a bumped desired size stays invisible to the
-// agent until the reconciler flips the volume to resizing, so an agent never
-// grows a disk the host can't hold. Outside a resize the agent is told what it
-// already has; a never-observed volume (fresh placement) takes desired as its
-// first size.
+// volumeTargetSize is the size the agent should have on disk: the volume's
+// committed bytes — the very same number the engine's ledger charges the host
+// (domain.VolumeSizing.Committed), so the agent is never told to hold more
+// than the placer accounts for. The engine is the capacity gate for a grow: a
+// bumped desired size stays invisible to the agent (attached, resize_pending)
+// until the reconciler flips the volume to resizing. A never-observed volume
+// (fresh placement) takes desired as its first size.
 func volumeTargetSize(v db.Volume) int64 {
-	if domain.VolumeStatus(v.Status) == domain.VolumeResizing || !v.ObservedSizeBytes.Valid {
-		return v.DesiredSizeBytes
-	}
-	return v.ObservedSizeBytes.Int64
+	return storage.SizingOf(v).Committed()
 }
 
 func (a *AgentAPI) register(s *agentSession) {

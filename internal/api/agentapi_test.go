@@ -182,6 +182,7 @@ func TestVolumeTargetSizeGatesGrowOnResizing(t *testing.T) {
 	}{
 		{"fresh placement takes desired", db.Volume{Status: "attached", DesiredSizeBytes: 4}, 4},
 		{"attached with drift keeps what it has", db.Volume{Status: "attached", DesiredSizeBytes: 8, ObservedSizeBytes: observed(4)}, 4},
+		{"resize_pending keeps what it has", db.Volume{Status: "resize_pending", DesiredSizeBytes: 8, ObservedSizeBytes: observed(4)}, 4},
 		{"resizing unlocks desired", db.Volume{Status: "resizing", DesiredSizeBytes: 8, ObservedSizeBytes: observed(4)}, 8},
 		{"converged reports observed", db.Volume{Status: "attached", DesiredSizeBytes: 8, ObservedSizeBytes: observed(8)}, 8},
 	}

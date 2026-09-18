@@ -29,12 +29,13 @@ import (
 //     whole row — "revision unchanged" is the only check that catches ANY
 //     interleaved write, including ABA (crash + restart lands back on the same
 //     phase, but not the same revision).
-//   - Commit-time predicate (AssignReplicaHost, AcquireVolumeLease,
-//     MarkVolumeResizing, MarkVolumeAttached): the question isn't "did the
-//     row change" but "is the decision still right" — capacity, host
-//     readiness, lease liveness, resize drift are re-checked in the UPDATE's
-//     WHERE, so concurrent placements that all fit don't abort each other the
-//     way a version proxy would.
+//   - Commit-time predicate (AssignReplicaHost, AcquireVolumeLease, and the
+//     three volume flips MarkVolumeResizePending / MarkVolumeResizing /
+//     MarkVolumeAttached): the question isn't "did the row change" but "is
+//     the decision still right" — capacity, host readiness, lease liveness,
+//     resize drift or catch-up are re-checked in the UPDATE's WHERE, so
+//     concurrent placements that all fit don't abort each other the way a
+//     version proxy would.
 //   - Phase guard (FreezeReplica): the decision depends on restart_count
 //     alone, which only grows, so any interleaved Sensor write leaves it
 //     valid — a revision CAS would only lose races (the Sensor bumps revision
@@ -48,6 +49,7 @@ type ReconcileTx interface {
 	CreateReplica(ctx context.Context, spec storage.ReplicaSpec) (db.Replica, error)
 	AssignReplicaHost(ctx context.Context, replicaID, hostID uuid.UUID) error
 	AssignVolumeHost(ctx context.Context, volumeID, hostID uuid.UUID) error
+	MarkVolumeResizePending(ctx context.Context, volumeID uuid.UUID) error
 	MarkVolumeResizing(ctx context.Context, volumeID uuid.UUID) error
 	MarkVolumeAttached(ctx context.Context, volumeID uuid.UUID) error
 	AcquireVolumeLease(ctx context.Context, volumeID, replicaID uuid.UUID, expiresAt time.Time) error
@@ -178,7 +180,11 @@ func (a *Actuator) commit(ctx context.Context, tx ReconcileTx, it Intent) error 
 
 	// One row each, and always on different ticks (the agent grows the disk
 	// in between), so they never share a tx. The status flip is what the
-	// downlink keys on: resizing unlocks the new desired size for the agent.
+	// downlink keys on: resizing unlocks the new desired size for the agent;
+	// resize_pending is bookkeeping only — the agent keeps what it has.
+	case IntentVolumeResizePending:
+		return tx.MarkVolumeResizePending(ctx, it.VolumeID)
+
 	case IntentResizeVolume:
 		return tx.MarkVolumeResizing(ctx, it.VolumeID)
 

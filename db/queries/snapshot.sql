@@ -57,10 +57,13 @@ WHERE r.phase <> 'reaped'
 -- placement pins and leases. Keyed by (service_id, region) against the stateful
 -- rows of SnapshotDesired. DISTINCT collapses a service shared across multiple
 -- environments (the lease is re-checked inside the reconcile tx regardless).
+-- Ordered by id so that when two grows compete for one host's room, the same
+-- one wins every tick instead of flapping with the planner's row order.
 SELECT DISTINCT v.* FROM volumes v
 JOIN environment_services es ON es.service_id = v.service_id
 JOIN deployments d           ON d.environment_service_id = es.id
-WHERE d.is_current;
+WHERE d.is_current
+ORDER BY v.id;
 
 -- name: ListHealthyHosts :many
 -- Hosts alive this pass, operator status included: the placer's ledger holds

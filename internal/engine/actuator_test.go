@@ -76,6 +76,10 @@ func (t *recordingTx) AssignVolumeHost(_ context.Context, volumeID, hostID uuid.
 	return t.record("AssignVolumeHost %s -> %s", volumeID, hostID)
 }
 
+func (t *recordingTx) MarkVolumeResizePending(_ context.Context, volumeID uuid.UUID) error {
+	return t.record("MarkVolumeResizePending %s", volumeID)
+}
+
 func (t *recordingTx) MarkVolumeResizing(_ context.Context, volumeID uuid.UUID) error {
 	return t.record("MarkVolumeResizing %s", volumeID)
 }
@@ -187,6 +191,11 @@ func TestApplyIntentTxMapping(t *testing.T) {
 			name:   "place_volume binds the volume host",
 			intent: Intent{Kind: IntentPlaceVolume, VolumeID: vol, HostID: hostID},
 			want:   []string{fmt.Sprintf("AssignVolumeHost %s -> %s", vol, hostID)},
+		},
+		{
+			name:   "volume_resize_pending parks the grow",
+			intent: Intent{Kind: IntentVolumeResizePending, VolumeID: vol},
+			want:   []string{fmt.Sprintf("MarkVolumeResizePending %s", vol)},
 		},
 		{
 			name:   "resize_volume approves the grow",

@@ -30,9 +30,10 @@ type hostLedger struct {
 	cpu  int64
 	mem  int64
 	// disk is what's left of the volume budget (DiskBytes · volume-budget)
-	// after every placed volume. The grow-only-resize reserve is subtracted at
-	// fit time, not here, because resizes may dip into it while new volumes
-	// may not — so disk can legitimately sit below the reserve line.
+	// after every placed volume's committed bytes. The grow-only-resize
+	// reserve is subtracted at fit time, not here, because resizes may dip
+	// into it while new volumes may not — so disk can legitimately sit below
+	// the reserve line.
 	disk  int64
 	slots map[replicaSlot]int
 }
@@ -68,9 +69,12 @@ func (p *placer) newLedger(snap stateSnapshot) ledger {
 			hl.slots[r.Slot]++
 		}
 	}
+	// Committed, not desired: a requested-but-unapproved grow is not a
+	// reservation, so it never blocks another volume from landing here. It
+	// becomes one the tick the engine approves it (resizing → desired).
 	for _, v := range snap.volumes {
 		if hl := led[v.HostID]; hl != nil {
-			hl.disk -= v.DesiredSizeBytes
+			hl.disk -= v.Committed()
 		}
 	}
 	return led
@@ -105,10 +109,10 @@ type packItem struct {
 	// replacement (hostless after host death) skips the headroom reserve —
 	// the reserve exists exactly for them.
 	replacement bool
-	// resize is a grow on a volume already placed on the host. Its demand is
-	// ALREADY in the ledger (newLedger subtracts every placed volume's desired
-	// size), so fitting it means the host isn't overcommitted, and it may eat
-	// the whole DiskReserve — that reserve exists exactly for grows.
+	// resize is a grow on a volume already placed on the host. disk is the
+	// grow DELTA — Committed() already charged what is on disk — and it may
+	// eat the whole DiskReserve, because that reserve exists exactly for
+	// grows. cpu/mem are not its concern: the replica is already running.
 	resize bool
 	// spread applies the anti-affinity constraint; volumes never spread
 	// (stateful services run one replica, nothing to spread).
@@ -156,7 +160,7 @@ func (p *placer) scarcityWeights(snap stateSnapshot) regionWeights {
 		s.dMem += r.MemBytes
 	}
 	for _, v := range snap.volumes {
-		acc(v.Region).dDisk += v.DesiredSizeBytes
+		acc(v.Region).dDisk += v.Committed()
 	}
 	rw := make(regionWeights, len(byRegion))
 	for region, s := range byRegion {
@@ -249,29 +253,24 @@ func sortItems(items []packItem, refs map[string]reference) {
 }
 
 // fits is constraint 1: the item fits in every dimension after subtracting
-// the per-host reserve. Replacements skip the cpu/mem headroom; new volumes
-// never skip the disk reserve — it's held for grow-only resizes, which are the
-// one item allowed to dip into it.
+// the per-host reserve. One comparison for every item kind; what varies is
+// which reserves apply. Replacements and resizes skip the cpu/mem headroom
+// (a replacement earned its slot, a resize's replica is already running); a
+// resize also skips the disk reserve — it's held for exactly them, and new
+// volumes never dip into it.
 func (p *placer) fits(it packItem, hl *hostLedger) bool {
-	if it.resize {
-		// The grow's bytes are already subtracted; cpu/mem are not its concern.
-		return hl.disk >= 0
-	}
-	var rCPU, rMem int64
-	if !it.replacement {
+	var rCPU, rMem, rDisk int64
+	if !it.replacement && !it.resize {
 		rCPU = int64(p.cfg.Headroom * float64(hl.host.CPUMillicores))
 		rMem = int64(p.cfg.Headroom * float64(hl.host.MemBytes))
+	}
+	if !it.resize {
+		rDisk = int64(p.cfg.DiskReserve * float64(p.diskBudget(hl.host)))
 	}
 	if it.cpu > hl.cpu-rCPU || it.mem > hl.mem-rMem {
 		return false
 	}
-	if it.disk > 0 {
-		rDisk := int64(p.cfg.DiskReserve * float64(p.diskBudget(hl.host)))
-		if it.disk > hl.disk-rDisk {
-			return false
-		}
-	}
-	return true
+	return it.disk <= 0 || it.disk <= hl.disk-rDisk
 }
 
 // score is the dot product Σ_d w_d · (demand_d/cap_d) · (residual_d/cap_d):
@@ -455,7 +454,7 @@ func (p *placer) placeVolumes(snap stateSnapshot, led ledger) []Intent {
 			region: v.Region,
 			cpu:    cpu,
 			mem:    mem,
-			disk:   v.DesiredSizeBytes,
+			disk:   v.Desired,
 		})
 	}
 	if len(items) == 0 {
