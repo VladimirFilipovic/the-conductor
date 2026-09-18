@@ -35,6 +35,11 @@ import (
 //     readiness, lease liveness, resize drift are re-checked in the UPDATE's
 //     WHERE, so concurrent placements that all fit don't abort each other the
 //     way a version proxy would.
+//   - Phase guard (FreezeReplica): the decision depends on restart_count
+//     alone, which only grows, so any interleaved Sensor write leaves it
+//     valid — a revision CAS would only lose races (the Sensor bumps revision
+//     every report). The WHERE just refuses to overwrite a phase another
+//     owner already moved the row into (draining, replacing, terminal).
 //   - Unguarded (create, destroy, status flips): create mints a fresh row,
 //     destroy targets an already-terminal one, and deployment status has a
 //     single writer — nothing can invalidate these between snapshot and commit.
@@ -48,6 +53,7 @@ type ReconcileTx interface {
 	AcquireVolumeLease(ctx context.Context, volumeID, replicaID uuid.UUID, expiresAt time.Time) error
 	SetReplicaDesiredStatus(ctx context.Context, replicaID uuid.UUID, desiredStatus domain.ReplicaDesiredStatus) error
 	SetReplicaPhase(ctx context.Context, replicaID uuid.UUID, phase domain.ReplicaPhase, expectRevision int64) error
+	FreezeReplica(ctx context.Context, replicaID uuid.UUID) error
 	ReleaseVolumeLease(ctx context.Context, volumeID uuid.UUID) error
 	DeleteReplica(ctx context.Context, replicaID uuid.UUID) error
 	SetDeploymentStatus(ctx context.Context, deploymentID uuid.UUID, status domain.DeploymentStatus) error
@@ -181,6 +187,11 @@ func (a *Actuator) commit(ctx context.Context, tx ReconcileTx, it Intent) error 
 
 	case IntentDrain:
 		return tx.SetReplicaPhase(ctx, it.ReplicaID, domain.ReplicaPhaseDraining, it.Revision)
+
+	case IntentFreezeReplica:
+		// The row's own UPDATE fires replicas_changed, so the host's agent
+		// gets a HostState without this replica and tears the container down.
+		return tx.FreezeReplica(ctx, it.ReplicaID)
 
 	case IntentDestroy:
 		if it.VolumeID != uuid.Nil {

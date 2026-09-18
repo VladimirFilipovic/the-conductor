@@ -14,13 +14,20 @@ import (
 type IntentKind string
 
 const (
-	IntentCreate     IntentKind = "create"
-	IntentDrain      IntentKind = "drain"
-	IntentDestroy    IntentKind = "destroy"
-	IntentFail       IntentKind = "fail"
-	IntentAssignHost IntentKind = "assign_host"
-	IntentSkip       IntentKind = "skip"
-	IntentComplete   IntentKind = "complete"
+	IntentCreate  IntentKind = "create"
+	IntentDrain   IntentKind = "drain"
+	IntentDestroy IntentKind = "destroy"
+	IntentFail    IntentKind = "fail"
+	// IntentFreezeReplica parks one crash-looping replica of an ACTIVE
+	// deployment in failed: it keeps its slot (no replacement — a crash loop
+	// is almost always image/config, a clone would crash the same way), stops
+	// counting as healthy, and leaves the agent's HostState. The deployment
+	// stays active; degradation is read off healthy < desired. Contrast
+	// IntentFail, which is the rollout-in-flight verdict for the whole group.
+	IntentFreezeReplica IntentKind = "freeze_replica"
+	IntentAssignHost    IntentKind = "assign_host"
+	IntentSkip          IntentKind = "skip"
+	IntentComplete      IntentKind = "complete"
 	// IntentPlaceVolume binds a hostless volume to a host. Emitted only by the
 	// placer — the rules cascade knows lifecycle, not geometry.
 	IntentPlaceVolume IntentKind = "place_volume"
@@ -79,8 +86,19 @@ type replicaGroup struct {
 	// Stateful creates bind it onto the replica row, which is what lets the
 	// placer pin the replica to the volume's host and the actuator acquire the
 	// single-writer lease.
-	Volume           volume
-	TargetReplicas   []replica
+	Volume         volume
+	TargetReplicas []replica // current revision, live: what the cascade converges
+	// FrozenReplicas are current-revision replicas parked in failed by
+	// IntentFreezeReplica. They hold a slot but are not capacity, and the
+	// observation guard refuses their reports, so their restart_count is stuck
+	// above max forever — they MUST stay out of TargetReplicas or crashLooping
+	// would re-fire every tick, notAllHealthy would hold the group for good,
+	// newHealthOpenPastDeadline would fail the deployment and scale-down would
+	// drain a dead container. Exactly the rules that need to know about held
+	// slots read this bucket: ramp-up (no replacement), scale-down (first to
+	// go, straight to destroy), complete (a held slot is converged-but-
+	// degraded) and deploymentFrozen (cleanup under a failed deployment).
+	FrozenReplicas   []replica
 	OutgoingReplicas []replica
 	// ObservedAt is the snapshot's frozen "now", copied onto every group so
 	// time-based rules (progress deadline, drain window) stay pure functions of
@@ -124,18 +142,22 @@ func (r *Reconciler) Reconcile(snap stateSnapshot) []Intent {
 func buildReplicaGroups(snap stateSnapshot) []replicaGroup {
 	type replicaBucket struct {
 		target   []replica
+		frozen   []replica
 		outgoing []replica
 	}
 	replicaIndex := make(map[replicaSlot]replicaBucket, len(snap.replicas))
 	for _, r := range snap.replicas {
 		b := replicaIndex[r.Slot]
+		switch {
 		// A drained current replica (scale-down excess) is retiring, not
 		// converging: bucket it as outgoing so it flows through drain/reap like a
 		// superseded one, instead of holding the health gate forever.
-		if r.Current && r.DrainedAt.IsZero() {
-			b.target = append(b.target, r)
-		} else {
+		case !r.Current || !r.DrainedAt.IsZero():
 			b.outgoing = append(b.outgoing, r)
+		case failedPhase(r):
+			b.frozen = append(b.frozen, r)
+		default:
+			b.target = append(b.target, r)
 		}
 		replicaIndex[r.Slot] = b
 	}
@@ -157,6 +179,7 @@ func buildReplicaGroups(snap stateSnapshot) []replicaGroup {
 			Desired:          d,
 			Volume:           volumeIndex[volumeKey{d.ServiceID, d.Slot.Region}],
 			TargetReplicas:   b.target,
+			FrozenReplicas:   b.frozen,
 			OutgoingReplicas: b.outgoing,
 			ObservedAt:       snap.observedAt,
 		})
@@ -169,6 +192,7 @@ func buildReplicaGroups(snap stateSnapshot) []replicaGroup {
 		groups = append(groups, replicaGroup{
 			Desired:          desiredState{Slot: slot},
 			TargetReplicas:   b.target,
+			FrozenReplicas:   b.frozen,
 			OutgoingReplicas: b.outgoing,
 			ObservedAt:       snap.observedAt,
 		})
@@ -226,7 +250,7 @@ func logRuleFired(rg replicaGroup, ruleName string, out []Intent) {
 
 var rollingCascade = []rule{
 	deploymentFrozen,          // status failed → hold everything until unlock
-	crashLooping,              // restart_count > restart_max → fail, freeze
+	crashLooping,              // restart_count > restart_max → fail the rollout, or freeze the replica if active
 	anyHostlessReplicas,       // target lost its host → re-place
 	newHealthOpenPastDeadline, // health gate open too long → fail (stalled)
 	notAllHealthy,             // newest not yet healthy, within deadline → hold
@@ -270,32 +294,54 @@ var deploymentFrozen = rule{
 		return rg.Desired.Status == domain.DeploymentFailed
 	},
 	then: func(rg replicaGroup) []Intent {
+		// Frozen replicas under a failed deployment are dead containers
+		// squatting on reservations that nothing below can ever recreate.
+		if len(rg.FrozenReplicas) == 0 {
+			return []Intent{{Kind: IntentSkip, Group: rg.Desired.Slot}}
+		}
+		return destroyAll(rg.FrozenReplicas)
+	},
+}
+
+// crashLooping: a target replica blew through its restart budget. What that
+// means depends on where the deployment is. Mid-rollout (any status but
+// active) the offender is the canary or its batch, so the revision itself is
+// suspect: fail the whole deployment and let deploymentFrozen hold it. Under
+// an ACTIVE deployment the revision was proven healthy once, so one bad
+// replica is a local fault: freeze just the offenders and keep serving from
+// the rest. Nothing replaces a frozen replica automatically — a clone of a
+// bad image crashes the same way — the operator restarts or deletes it.
+var crashLooping = rule{
+	name: "crashLooping",
+	when: func(rg replicaGroup) bool {
+		return slices.ContainsFunc(rg.TargetReplicas, func(r replica) bool { return overRestartBudget(rg, r) })
+	},
+	then: func(rg replicaGroup) []Intent {
+		if rg.Desired.Status != domain.DeploymentActive {
+			return []Intent{{Kind: IntentFail, Group: rg.Desired.Slot, DeploymentID: rg.Desired.DeploymentID}}
+		}
 		var intents []Intent
 		for _, r := range rg.TargetReplicas {
-			if failedPhase(r) {
-				intents = append(intents, Intent{Kind: IntentDestroy, ReplicaID: r.ID, VolumeID: r.VolumeID})
+			if overRestartBudget(rg, r) {
+				intents = append(intents, Intent{Kind: IntentFreezeReplica, Group: rg.Desired.Slot, ReplicaID: r.ID})
 			}
-		}
-		if len(intents) == 0 {
-			return []Intent{{Kind: IntentSkip, Group: rg.Desired.Slot}}
 		}
 		return intents
 	},
 }
 
-var crashLooping = rule{
-	name: "crashLooping",
-	when: func(rg replicaGroup) bool {
-		for _, r := range rg.TargetReplicas {
-			if r.RestartCount > rg.Desired.RestartMax {
-				return true
-			}
-		}
-		return false
-	},
-	then: func(rg replicaGroup) []Intent {
-		return []Intent{{Kind: IntentFail, Group: rg.Desired.Slot, DeploymentID: rg.Desired.DeploymentID}}
-	},
+func overRestartBudget(rg replicaGroup, r replica) bool {
+	return r.RestartCount > rg.Desired.RestartMax
+}
+
+// destroyAll reclaims dead rows: no drain window (nothing serves), lease
+// released alongside for stateful ones.
+func destroyAll(rs []replica) []Intent {
+	intents := make([]Intent, len(rs))
+	for i, r := range rs {
+		intents[i] = Intent{Kind: IntentDestroy, ReplicaID: r.ID, VolumeID: r.VolumeID}
+	}
+	return intents
 }
 
 var anyHostlessReplicas = rule{
@@ -356,12 +402,15 @@ var notAllHealthy = rule{
 var rollingRampUp = rule{
 	name: "rollingRampUp",
 	when: func(rg replicaGroup) bool {
-		return healthyTargets(rg) < rg.Desired.Replicas
+		return heldSlots(rg) < rg.Desired.Replicas
 	},
 	then: func(rg replicaGroup) []Intent {
 		// notAllHealthy above guarantees every existing target is healthy here,
 		// so zero healthy means zero targets: the revision is unproven → canary.
-		n := rg.Desired.Replicas - healthyTargets(rg)
+		// Frozen replicas hold their slots, so the deficit is what's left after
+		// them — but they don't prove anything, so a group that is all-frozen
+		// still canaries its first live replica.
+		n := rg.Desired.Replicas - heldSlots(rg)
 		if healthyTargets(rg) == 0 {
 			n = 1
 		}
@@ -396,14 +445,28 @@ func healthyTargets(rg replicaGroup) int32 {
 	return n
 }
 
+// heldSlots is what stands against desired when deciding whether to create:
+// serving capacity plus the slots frozen replicas keep. A frozen replica is
+// not capacity, but minting a replacement for it would be minting a second
+// copy of a crash loop — the slot stays taken until an operator restarts or
+// deletes it (a delete makes the deficit visible here and a replacement
+// follows: the manual "replace once").
+func heldSlots(rg replicaGroup) int32 {
+	return healthyTargets(rg) + int32(len(rg.FrozenReplicas))
+}
+
 var rollingScaleDown = rule{
 	name: "rollingScaleDown",
 	when: func(rg replicaGroup) bool {
-		return len(rg.TargetReplicas) > int(rg.Desired.Replicas)
+		return len(rg.TargetReplicas)+len(rg.FrozenReplicas) > int(rg.Desired.Replicas)
 	},
 	then: func(rg replicaGroup) []Intent {
-		n := len(rg.TargetReplicas) - int(rg.Desired.Replicas)
-		intents := make([]Intent, n)
+		n := len(rg.TargetReplicas) + len(rg.FrozenReplicas) - int(rg.Desired.Replicas)
+		// Frozen replicas are the excess nobody misses: dead containers with no
+		// traffic to bleed, so they go first and straight to destroy — no drain
+		// window. Only what's left of the excess costs a live replica.
+		intents := destroyAll(rg.FrozenReplicas[:min(n, len(rg.FrozenReplicas))])
+		n -= len(intents)
 		// Replicas on a draining host go first: they are why the excess exists.
 		// Then newest-first: oldest replicas have the longest healthy history,
 		// so shrinking sacrifices the least-established ones.
@@ -416,8 +479,8 @@ var rollingScaleDown = rule{
 			}
 			return b.CreatedAt.Compare(a.CreatedAt)
 		})
-		for i := range intents {
-			intents[i] = Intent{Kind: IntentDrain, ReplicaID: sortedReplicas[i].ID, Revision: sortedReplicas[i].Revision}
+		for _, r := range sortedReplicas[:n] {
+			intents = append(intents, Intent{Kind: IntentDrain, ReplicaID: r.ID, Revision: r.Revision})
 		}
 		return intents
 	},
@@ -432,7 +495,10 @@ var rolloutComplete = rule{
 		if rg.Desired.Status == domain.DeploymentActive {
 			return false
 		}
-		return healthyTargets(rg) == rg.Desired.Replicas && len(rg.OutgoingReplicas) == 0
+		// heldSlots, not healthyTargets: a rollback onto a revision that still
+		// carries a frozen replica converges as active-but-degraded, the same
+		// state the freeze left it in — never as a rollout stuck in draining.
+		return heldSlots(rg) == rg.Desired.Replicas && len(rg.OutgoingReplicas) == 0
 	},
 	then: func(rg replicaGroup) []Intent {
 		return []Intent{{Kind: IntentComplete, Group: rg.Desired.Slot, DeploymentID: rg.Desired.DeploymentID}}
@@ -525,10 +591,12 @@ func drainWindowElapsed(rp replica, now time.Time) bool {
 var recreateRampUp = rule{
 	name: "recreateRampUp",
 	when: func(rg replicaGroup) bool {
-		return len(rg.OutgoingReplicas) == 0 && healthyTargets(rg) < rg.Desired.Replicas
+		// heldSlots: a frozen stateful replica still holds the volume lease, so
+		// a replacement would lose AcquireVolumeLease every tick anyway.
+		return len(rg.OutgoingReplicas) == 0 && heldSlots(rg) < rg.Desired.Replicas
 	},
 	then: func(rg replicaGroup) []Intent {
-		n := rg.Desired.Replicas - healthyTargets(rg)
+		n := rg.Desired.Replicas - heldSlots(rg)
 		intents := make([]Intent, n)
 		for i := range intents {
 			// Stateful create binds the slot's volume onto the replica row,

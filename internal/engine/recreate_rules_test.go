@@ -99,6 +99,14 @@ func TestRecreateRampUpRule(t *testing.T) {
 			},
 			want: true,
 		},
+		{
+			name: "frozen replica holds slot and lease: no replacement to contest it",
+			in: replicaGroup{
+				Desired:        desiredState{Replicas: 1, Stateful: true},
+				FrozenReplicas: []replica{{ID: uuid.New(), Phase: domain.ReplicaPhaseFailed}},
+			},
+			want: false,
+		},
 	}
 
 	for _, tt := range tests {

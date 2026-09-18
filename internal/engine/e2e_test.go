@@ -400,6 +400,18 @@ func (t *memTx) SetReplicaPhase(_ context.Context, replicaID uuid.UUID, phase do
 	return nil
 }
 
+// FreezeReplica mirrors the SQL phase guard: live phases only, no revision CAS.
+func (t *memTx) FreezeReplica(_ context.Context, replicaID uuid.UUID) error {
+	r := t.s.replica(replicaID)
+	if r == nil || r.phase == domain.ReplicaPhaseDraining || r.phase == domain.ReplicaPhaseReplacing || r.phase.Terminal() {
+		return storage.ErrConflict
+	}
+	r.phase = domain.ReplicaPhaseFailed
+	r.healthy = false
+	r.revision++
+	return nil
+}
+
 func (t *memTx) ReleaseVolumeLease(_ context.Context, volumeID uuid.UUID) error {
 	delete(t.s.leases, volumeID)
 	return nil
@@ -579,7 +591,8 @@ func (m *memStore) ListReplicasByHost(_ context.Context, hostID uuid.UUID) ([]db
 	defer m.mu.Unlock()
 	var out []db.Replica
 	for _, r := range m.replicas {
-		if r.hostID == hostID && r.phase != domain.ReplicaPhaseReaped {
+		// Same filter as ListReplicasByHost: terminal rows never reach an agent.
+		if r.hostID == hostID && !r.phase.Terminal() {
 			out = append(out, db.Replica{ID: r.id, Phase: string(r.phase)})
 		}
 	}

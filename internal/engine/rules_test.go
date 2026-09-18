@@ -65,28 +65,95 @@ func TestDeploymentFrozenHolds(t *testing.T) {
 	}
 }
 
-// The one action frozen takes: failed targets are dead containers squatting on
-// host reservations, and nothing below frozen can ever recreate them — destroy
-// them. Live targets stay held, and the skip is dropped when there are destroys.
-func TestDeploymentFrozenReapsFailedTargets(t *testing.T) {
+// The one action frozen takes: frozen (current, failed) replicas are dead
+// containers squatting on host reservations, and nothing below frozen can ever
+// recreate them — destroy them. Live targets stay held, and the skip is
+// dropped when there are destroys.
+func TestDeploymentFrozenReapsFrozenReplicas(t *testing.T) {
 	slot := replicaSlot{uuid.New(), "eu-west"}
+	vol := uuid.New()
 	dead1 := replica{ID: uuid.New(), Phase: domain.ReplicaPhaseFailed}
-	dead2 := replica{ID: uuid.New(), Phase: domain.ReplicaPhaseFailed}
+	dead2 := replica{ID: uuid.New(), Phase: domain.ReplicaPhaseFailed, VolumeID: vol}
 	alive := replica{ID: uuid.New(), Phase: domain.ReplicaPhaseActive, Healthy: true}
 	failedOutgoing := replica{ID: uuid.New(), Phase: domain.ReplicaPhaseFailed}
 
 	got := deploymentFrozen.then(replicaGroup{
 		Desired:          desiredState{Slot: slot, Status: domain.DeploymentFailed},
-		TargetReplicas:   []replica{dead1, alive, dead2},
+		TargetReplicas:   []replica{alive},
+		FrozenReplicas:   []replica{dead1, dead2},
 		OutgoingReplicas: []replica{failedOutgoing}, // outgoing stays frozen too — old side may still serve
 	})
 
 	want := []Intent{
 		{Kind: IntentDestroy, ReplicaID: dead1.ID},
-		{Kind: IntentDestroy, ReplicaID: dead2.ID},
+		{Kind: IntentDestroy, ReplicaID: dead2.ID, VolumeID: vol}, // lease rides along for release
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("deploymentFrozen.then() = %v, want %v", got, want)
+	}
+}
+
+// buildReplicaGroups sorts every replica into exactly one of three buckets.
+// Failed is the axis that matters here: a failed CURRENT replica is frozen (it
+// holds a slot), a failed outgoing one is just outgoing (reapFailedOutgoing
+// owns it), and a drained current one is outgoing regardless of phase.
+func TestBuildReplicaGroupsBucketsFrozen(t *testing.T) {
+	slot := replicaSlot{uuid.New(), "eu-west"}
+	dep := uuid.New()
+	now := time.Unix(1_000_000, 0)
+	live := replica{ID: uuid.New(), Slot: slot, Current: true, Phase: domain.ReplicaPhaseActive}
+	frozen := replica{ID: uuid.New(), Slot: slot, Current: true, Phase: domain.ReplicaPhaseFailed}
+	drainedFailed := replica{ID: uuid.New(), Slot: slot, Current: true, Phase: domain.ReplicaPhaseFailed, DrainedAt: now}
+	oldFailed := replica{ID: uuid.New(), Slot: slot, Current: false, Phase: domain.ReplicaPhaseFailed}
+	oldLive := replica{ID: uuid.New(), Slot: slot, Current: false, Phase: domain.ReplicaPhaseActive}
+
+	groups := buildReplicaGroups(stateSnapshot{
+		observedAt: now,
+		desired:    []desiredState{{Slot: slot, DeploymentID: dep}},
+		replicas:   []replica{live, frozen, drainedFailed, oldFailed, oldLive},
+	})
+	if len(groups) != 1 {
+		t.Fatalf("groups = %d, want 1", len(groups))
+	}
+	g := groups[0]
+	ids := func(rs []replica) []uuid.UUID {
+		out := make([]uuid.UUID, len(rs))
+		for i, r := range rs {
+			out[i] = r.ID
+		}
+		return out
+	}
+	if got := ids(g.TargetReplicas); !reflect.DeepEqual(got, []uuid.UUID{live.ID}) {
+		t.Errorf("targets = %v, want only the live current replica", got)
+	}
+	if got := ids(g.FrozenReplicas); !reflect.DeepEqual(got, []uuid.UUID{frozen.ID}) {
+		t.Errorf("frozen = %v, want only the failed current undrained replica", got)
+	}
+	if got := ids(g.OutgoingReplicas); !reflect.DeepEqual(got, []uuid.UUID{drainedFailed.ID, oldFailed.ID, oldLive.ID}) {
+		t.Errorf("outgoing = %v, want drained + superseded regardless of phase", got)
+	}
+}
+
+// Frozen replicas are out of TargetReplicas, and every gate that reads only
+// targets must be blind to them — otherwise the frozen restart_count (stuck
+// above max, the observation guard refuses updates) would re-trip crashLooping
+// each tick, notAllHealthy would hold forever and the deadline rule would fail
+// the deployment.
+func TestTargetOnlyGatesIgnoreFrozen(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	frozen := replica{
+		ID: uuid.New(), Phase: domain.ReplicaPhaseFailed, Healthy: false,
+		RestartCount: 99, CreatedAt: now.Add(-time.Hour), // no HealthChecksPassedAt: never went healthy
+	}
+	rg := replicaGroup{
+		Desired:        desiredState{Status: domain.DeploymentActive, Replicas: 1, RestartMax: 3, ProgressDeadline: 60},
+		FrozenReplicas: []replica{frozen},
+		ObservedAt:     now,
+	}
+	for _, rl := range []rule{crashLooping, anyHostlessReplicas, newHealthOpenPastDeadline, notAllHealthy} {
+		if rl.when(rg) {
+			t.Errorf("%s fired on a group whose only replica is frozen", rl.name)
+		}
 	}
 }
 
@@ -140,6 +207,54 @@ func TestCrashloopRule(t *testing.T) {
 			got := crashLooping.when(tt.in)
 			if got != tt.want {
 				t.Errorf("crashLooping.when() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// The verdict depends on where the deployment is: mid-rollout the revision is
+// suspect (fail the group); once active it was proven, so only the offenders
+// freeze — each one, and none of the well-behaved ones.
+func TestCrashloopVerdictByDeploymentStatus(t *testing.T) {
+	slot := replicaSlot{uuid.New(), "eu-west"}
+	dep := uuid.New()
+	ok := replica{ID: uuid.New(), RestartCount: 1, Healthy: true}
+	bad1 := replica{ID: uuid.New(), RestartCount: 4}
+	bad2 := replica{ID: uuid.New(), RestartCount: 9}
+	targets := []replica{ok, bad1, bad2}
+
+	tests := []struct {
+		name   string
+		status domain.DeploymentStatus
+		want   []Intent
+	}{
+		{
+			name:   "active: freeze exactly the offenders",
+			status: domain.DeploymentActive,
+			want: []Intent{
+				{Kind: IntentFreezeReplica, Group: slot, ReplicaID: bad1.ID},
+				{Kind: IntentFreezeReplica, Group: slot, ReplicaID: bad2.ID},
+			},
+		},
+		{
+			name:   "pending rollout: fail the deployment",
+			status: domain.DeploymentPending,
+			want:   []Intent{{Kind: IntentFail, Group: slot, DeploymentID: dep}},
+		},
+		{
+			name:   "draining rollout: fail the deployment",
+			status: domain.DeploymentDraining,
+			want:   []Intent{{Kind: IntentFail, Group: slot, DeploymentID: dep}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := crashLooping.then(replicaGroup{
+				Desired:        desiredState{Slot: slot, DeploymentID: dep, Status: tt.status, RestartMax: 3},
+				TargetReplicas: targets,
+			})
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("crashLooping.then() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -629,6 +744,24 @@ func TestRollingRampUpRule(t *testing.T) {
 			},
 			want: true,
 		},
+		{
+			name: "frozen replica holds its slot: no replacement",
+			in: replicaGroup{
+				Desired:        desiredState{Replicas: 2},
+				TargetReplicas: []replica{healthy},
+				FrozenReplicas: []replica{{ID: uuid.New(), Phase: domain.ReplicaPhaseFailed}},
+			},
+			want: false,
+		},
+		{
+			name: "frozen slot plus a real deficit still fires for the deficit",
+			in: replicaGroup{
+				Desired:        desiredState{Replicas: 3},
+				TargetReplicas: []replica{healthy},
+				FrozenReplicas: []replica{{ID: uuid.New(), Phase: domain.ReplicaPhaseFailed}},
+			},
+			want: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -717,6 +850,47 @@ func TestRollingRampUpCanaryCreatesOne(t *testing.T) {
 	}
 }
 
+// A frozen slot is subtracted from the deficit but proves nothing: with a
+// healthy sibling the rest comes up in a batch, with every live replica gone
+// (only frozen left) the first replacement is a canary.
+func TestRollingRampUpDeficitExcludesFrozenSlots(t *testing.T) {
+	slot := replicaSlot{uuid.New(), "eu-west"}
+	healthy := replica{ID: uuid.New(), Healthy: true}
+	frozen := replica{ID: uuid.New(), Phase: domain.ReplicaPhaseFailed}
+
+	tests := []struct {
+		name string
+		in   replicaGroup
+		want []Intent
+	}{
+		{
+			name: "proven version: deficit minus the frozen slot, in one batch",
+			in: replicaGroup{
+				Desired:        desiredState{Slot: slot, Replicas: 4},
+				TargetReplicas: []replica{healthy},
+				FrozenReplicas: []replica{frozen},
+			},
+			want: []Intent{{Kind: IntentCreate, Group: slot}, {Kind: IntentCreate, Group: slot}},
+		},
+		{
+			name: "only frozen left: canary",
+			in: replicaGroup{
+				Desired:        desiredState{Slot: slot, Replicas: 3},
+				FrozenReplicas: []replica{frozen},
+			},
+			want: []Intent{{Kind: IntentCreate, Group: slot}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := rollingRampUp.then(tt.in)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("rollingRampUp.then() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRollingScaleDownRule(t *testing.T) {
 	healthy := replica{ID: uuid.New(), Healthy: true}
 
@@ -749,6 +923,15 @@ func TestRollingScaleDownRule(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			name: "frozen replicas count toward the excess (they hold slots)",
+			in: replicaGroup{
+				Desired:        desiredState{Replicas: 1},
+				TargetReplicas: []replica{healthy},
+				FrozenReplicas: []replica{{ID: uuid.New(), Phase: domain.ReplicaPhaseFailed}},
+			},
+			want: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -780,6 +963,52 @@ func TestRollingScaleDownDrainsNewestFirst(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("rollingScaleDown.then() = %v, want %v", got, want)
+	}
+}
+
+// Shrinking spends the excess on frozen replicas first — destroyed outright,
+// there is no traffic to drain off a dead container — and only what remains
+// of the excess costs a live replica (newest first). A scale-down that fits
+// entirely in the frozen set drains nobody.
+func TestRollingScaleDownDestroysFrozenBeforeDrainingLive(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	vol := uuid.New()
+	old := replica{ID: uuid.New(), Healthy: true, CreatedAt: now.Add(-3 * time.Hour)}
+	newest := replica{ID: uuid.New(), Healthy: true, CreatedAt: now.Add(-1 * time.Hour), Revision: 4}
+	frozen1 := replica{ID: uuid.New(), Phase: domain.ReplicaPhaseFailed}
+	frozen2 := replica{ID: uuid.New(), Phase: domain.ReplicaPhaseFailed, VolumeID: vol}
+
+	tests := []struct {
+		name    string
+		desired int32
+		want    []Intent
+	}{
+		{
+			name:    "excess fits in frozen: destroy only, no drain",
+			desired: 3,
+			want:    []Intent{{Kind: IntentDestroy, ReplicaID: frozen1.ID}},
+		},
+		{
+			name:    "excess spans both: all frozen destroyed, then newest live drained",
+			desired: 1,
+			want: []Intent{
+				{Kind: IntentDestroy, ReplicaID: frozen1.ID},
+				{Kind: IntentDestroy, ReplicaID: frozen2.ID, VolumeID: vol},
+				{Kind: IntentDrain, ReplicaID: newest.ID, Revision: 4},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := rollingScaleDown.then(replicaGroup{
+				Desired:        desiredState{Replicas: tt.desired},
+				TargetReplicas: []replica{old, newest},
+				FrozenReplicas: []replica{frozen1, frozen2},
+			})
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("rollingScaleDown.then() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -823,6 +1052,15 @@ func TestRolloutComplete(t *testing.T) {
 				TargetReplicas: []replica{healthy},
 			},
 			want: false,
+		},
+		{
+			name: "frozen slot counts as converged (rollback onto a degraded revision completes)",
+			in: replicaGroup{
+				Desired:        desiredState{Status: domain.DeploymentDraining, Replicas: 2},
+				TargetReplicas: []replica{healthy},
+				FrozenReplicas: []replica{{ID: uuid.New(), Phase: domain.ReplicaPhaseFailed}},
+			},
+			want: true,
 		},
 	}
 

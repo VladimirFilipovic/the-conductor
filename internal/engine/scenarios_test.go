@@ -171,6 +171,10 @@ func (s *sim) apply(intents []Intent) {
 			s.replicas = slices.DeleteFunc(s.replicas, func(r replica) bool { return r.ID == it.ReplicaID })
 		case IntentFail:
 			s.slotDesired(it.Group).Status = domain.DeploymentFailed
+		case IntentFreezeReplica:
+			r := s.replicaByID(it.ReplicaID)
+			r.Phase = domain.ReplicaPhaseFailed
+			r.Healthy = false
 		case IntentComplete:
 			s.slotDesired(it.Group).Status = domain.DeploymentActive
 		case IntentAssignHost:
@@ -203,6 +207,23 @@ func (s *sim) crashPastBudget(slot replicaSlot) {
 		if s.replicas[i].Slot == slot && s.replicas[i].Current {
 			s.replicas[i].RestartCount = max + 1
 		}
+	}
+}
+
+// crashReplicaPastBudget is the same event for one replica: what a bad host
+// or a poisoned config on a single container looks like under a fleet that
+// is otherwise fine.
+func (s *sim) crashReplicaPastBudget(id uuid.UUID) {
+	r := s.replicaByID(id)
+	r.RestartCount = s.slotDesired(r.Slot).RestartMax + 1
+	r.Healthy = false
+	r.Phase = domain.ReplicaPhaseStarting
+}
+
+func (s *sim) assertPhase(id uuid.UUID, want domain.ReplicaPhase) {
+	s.t.Helper()
+	if got := s.replicaByID(id).Phase; got != want {
+		s.t.Fatalf("replica %s phase = %s, want %s", id, got, want)
 	}
 }
 
@@ -605,6 +626,155 @@ func TestScenarioFlappingReplicaOnlyHolds(t *testing.T) {
 	s.markHealthy()
 	s.tickExpect() // recovered: steady state
 	s.assertFleet(slot, v1, 2)
+}
+
+// --- frozen replica: crash loop under an ACTIVE deployment ---
+
+// One replica of a serving fleet blows its restart budget. The deployment is
+// not failed — it was proven — so the offender is frozen alone and the group
+// runs degraded: no replacement (a clone would crash the same way), no drain
+// of the survivor, status stays active. Scaling down spends the excess on the
+// frozen replica first (destroy, no drain window); scaling back up only mints
+// a new one once the frozen slot is gone.
+func TestScenarioActiveCrashLoopDegrades(t *testing.T) {
+	s := newSim(t)
+	slot := replicaSlot{uuid.New(), "eu-west"}
+	v1 := uuid.New()
+	s.declare(slot, v1, 2, false, domain.DeploymentActive)
+	ids := s.seedHealthy(slot, v1, 2)
+
+	s.crashReplicaPastBudget(ids[1])
+	frozen := s.tickExpect(IntentFreezeReplica)
+	if frozen[0].ReplicaID != ids[1] {
+		t.Fatalf("froze %s, want the offender %s", frozen[0].ReplicaID, ids[1])
+	}
+	s.assertStatus(slot, domain.DeploymentActive)
+	s.assertPhase(ids[1], domain.ReplicaPhaseFailed)
+	s.tickExpect() // degraded steady state: no create, no drain, no fail
+	s.tickExpect()
+	s.assertFleet(slot, v1, 2)
+
+	s.scale(slot, 1)
+	gone := s.tickExpect(IntentDestroy) // the frozen one is the excess
+	if gone[0].ReplicaID != ids[1] {
+		t.Fatalf("scale-down destroyed %s, want the frozen %s", gone[0].ReplicaID, ids[1])
+	}
+	s.assertFleet(slot, v1, 1)
+	s.tickExpect()
+
+	s.scale(slot, 2)
+	s.tickExpect(IntentCreate) // proven version, real deficit: one replacement
+	s.markHealthy()
+	s.tickExpect()
+	s.assertFleet(slot, v1, 2)
+	s.assertStatus(slot, domain.DeploymentActive)
+}
+
+// The manual "replace once": deleting the frozen row (DELETE /v1/replicas/{id})
+// is the only automatic replacement path — the deficit becomes visible and
+// rampUp fills it.
+func TestScenarioFrozenReplicaDeletedIsReplaced(t *testing.T) {
+	s := newSim(t)
+	slot := replicaSlot{uuid.New(), "eu-west"}
+	v1 := uuid.New()
+	s.declare(slot, v1, 2, false, domain.DeploymentActive)
+	ids := s.seedHealthy(slot, v1, 2)
+
+	s.crashReplicaPastBudget(ids[0])
+	s.tickExpect(IntentFreezeReplica)
+	s.tickExpect()
+
+	s.vanish(ids[0])
+	s.tickExpect(IntentCreate)
+	s.markHealthy()
+	s.tickExpect()
+	s.assertFleet(slot, v1, 2)
+}
+
+// A redeploy thaws by supersession: the frozen replica turns outgoing and
+// reapFailedOutgoing reclaims it, while v2 rolls out through the ordinary
+// canary path. The frozen row never blocks completion.
+func TestScenarioFrozenReplicaRedeployReaps(t *testing.T) {
+	s := newSim(t)
+	slot := replicaSlot{uuid.New(), "eu-west"}
+	v1 := uuid.New()
+	s.declare(slot, v1, 2, false, domain.DeploymentActive)
+	ids := s.seedHealthy(slot, v1, 2)
+	s.crashReplicaPastBudget(ids[1])
+	s.tickExpect(IntentFreezeReplica)
+
+	v2 := s.deployNew(slot)
+	s.tickExpect(IntentCreate) // v2 canary; the live v1 keeps serving
+	s.markHealthy()
+	s.tickExpect(IntentCreate) // proven: batch the rest
+	s.markHealthy()
+	drains := s.tickExpect(IntentDrain) // only the LIVE v1 drains; the frozen one is terminal
+	if drains[0].ReplicaID != ids[0] {
+		t.Fatalf("drained %s, want the live v1 %s", drains[0].ReplicaID, ids[0])
+	}
+	reaps := s.tickExpect(IntentDestroy) // reapFailedOutgoing: frozen v1 reclaimed during the drain window
+	if reaps[0].ReplicaID != ids[1] {
+		t.Fatalf("reaped %s, want the frozen v1 %s", reaps[0].ReplicaID, ids[1])
+	}
+	s.advance(simDrainSeconds*time.Second + time.Second)
+	s.tickExpect(IntentDestroy)
+	s.tickExpect(IntentComplete)
+	s.assertStatus(slot, domain.DeploymentActive)
+	s.assertFleet(slot, v2, 2)
+	s.assertFleet(slot, v1, 0)
+}
+
+// Rolling back onto a revision that still carries a frozen replica must not
+// strand the deployment in draining: the held slot counts as converged, so
+// the rollback completes into the same active-but-degraded state the freeze
+// left behind.
+func TestScenarioRollbackOntoFrozenCompletesDegraded(t *testing.T) {
+	s := newSim(t)
+	slot := replicaSlot{uuid.New(), "eu-west"}
+	v1 := uuid.New()
+	s.declare(slot, v1, 2, false, domain.DeploymentActive)
+	ids := s.seedHealthy(slot, v1, 2)
+	s.crashReplicaPastBudget(ids[1])
+	s.tickExpect(IntentFreezeReplica)
+
+	s.deployNew(slot)
+	s.tickExpect(IntentCreate) // v2 canary
+	s.crashPastBudget(slot)    // canary crashloops → rollout verdict, not a freeze
+	s.tickExpect(IntentFail)
+	s.tickExpect(IntentSkip) // frozen deployment: v1 (live + frozen) untouched
+
+	s.rollbackTo(slot, v1)
+	s.tickExpect(IntentDrain) // retire the v2 canary
+	s.advance(simDrainSeconds*time.Second + time.Second)
+	s.tickExpect(IntentDestroy)
+	s.tickExpect(IntentComplete)
+	s.assertStatus(slot, domain.DeploymentActive)
+	s.assertPhase(ids[1], domain.ReplicaPhaseFailed) // still frozen, still degraded
+	s.assertFleet(slot, v1, 2)
+	s.tickExpect()
+}
+
+// Stateful: the frozen replica keeps the volume lease with its slot, so
+// recreate never mints a replacement that would lose AcquireVolumeLease every
+// tick. Deleting the row frees both.
+func TestScenarioStatefulFrozenHoldsLease(t *testing.T) {
+	s := newSim(t)
+	slot := replicaSlot{uuid.New(), "eu-west"}
+	v1 := uuid.New()
+	s.declare(slot, v1, 1, true, domain.DeploymentActive)
+	ids := s.seedHealthy(slot, v1, 1)
+
+	s.crashReplicaPastBudget(ids[0])
+	s.tickExpect(IntentFreezeReplica)
+	s.assertStatus(slot, domain.DeploymentActive)
+	s.tickExpect() // no create: slot and lease still held
+	s.tickExpect()
+
+	s.vanish(ids[0])
+	s.tickExpect(IntentCreate)
+	s.markHealthy()
+	s.tickExpect()
+	s.assertFleet(slot, v1, 1)
 }
 
 // --- wiring smoke ---

@@ -96,6 +96,10 @@ func (t *recordingTx) SetReplicaPhase(_ context.Context, replicaID uuid.UUID, ph
 	return t.record("SetReplicaPhase %s %s rev=%d", replicaID, phase, expectRevision)
 }
 
+func (t *recordingTx) FreezeReplica(_ context.Context, replicaID uuid.UUID) error {
+	return t.record("FreezeReplica %s", replicaID)
+}
+
 func (t *recordingTx) ReleaseVolumeLease(_ context.Context, volumeID uuid.UUID) error {
 	return t.record("ReleaseVolumeLease %s", volumeID)
 }
@@ -216,6 +220,11 @@ func TestApplyIntentTxMapping(t *testing.T) {
 			name:   "fail freezes the deployment",
 			intent: Intent{Kind: IntentFail, Group: slot, DeploymentID: dep},
 			want:   []string{fmt.Sprintf("SetDeploymentStatus %s failed", dep)},
+		},
+		{
+			name:   "freeze_replica parks one row, no CAS, no status flip",
+			intent: Intent{Kind: IntentFreezeReplica, Group: slot, ReplicaID: rep},
+			want:   []string{fmt.Sprintf("FreezeReplica %s", rep)},
 		},
 		{
 			name:   "complete activates and asserts the served revision",
