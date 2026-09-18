@@ -5,7 +5,8 @@
 -- The fleet is intentionally heterogeneous and multi-region so bin-packing under
 -- CPU/RAM/disk/region constraints (orchestration-engine.md) has real choices to
 -- make: a mix of small/medium/large boxes per region, plus one cordoned host so
--- placement has to skip an otherwise-viable candidate.
+-- placement has to skip an otherwise-viable candidate. host_healthy takes its
+-- default (true); the first heartbeat or its absence owns it from there.
 --
 -- Idempotent: re-running upserts by hostname and refreshes the heartbeat, so a
 -- re-seed keeps the fleet looking alive without churning host ids (replicas
@@ -14,18 +15,18 @@
 INSERT INTO hosts (region, hostname, cpu_millicores, mem_bytes, disk_bytes, labels, status, last_heartbeat)
 VALUES
 	-- us-east-1: full size ladder — somewhere for everything to land.
-	('us-east-1', 'ue1-small-1',  2000,  pg_size_bytes('4GB'),  pg_size_bytes('80GB'),  '{"class":"small","arch":"amd64"}',  'ready', now()),
-	('us-east-1', 'ue1-medium-1', 4000,  pg_size_bytes('16GB'), pg_size_bytes('200GB'), '{"class":"medium","arch":"amd64"}', 'ready', now()),
-	('us-east-1', 'ue1-large-1',  8000,  pg_size_bytes('32GB'), pg_size_bytes('500GB'), '{"class":"large","arch":"amd64"}',  'ready', now()),
+	('us-east-1', 'ue1-small-1',  2000,  pg_size_bytes('4GB'),  pg_size_bytes('80GB'),  '{"class":"small","arch":"amd64"}',  'open', now()),
+	('us-east-1', 'ue1-medium-1', 4000,  pg_size_bytes('16GB'), pg_size_bytes('200GB'), '{"class":"medium","arch":"amd64"}', 'open', now()),
+	('us-east-1', 'ue1-large-1',  8000,  pg_size_bytes('32GB'), pg_size_bytes('500GB'), '{"class":"large","arch":"amd64"}',  'open', now()),
 
 	-- us-west-2: bigger boxes only — forces region-aware placement when a service
 	-- pins us-west and asks for a small footprint.
-	('us-west-2', 'uw2-medium-1', 4000,  pg_size_bytes('16GB'), pg_size_bytes('200GB'), '{"class":"medium","arch":"amd64"}', 'ready', now()),
-	('us-west-2', 'uw2-large-1',  8000,  pg_size_bytes('32GB'), pg_size_bytes('500GB'), '{"class":"large","arch":"arm64"}',  'ready', now()),
+	('us-west-2', 'uw2-medium-1', 4000,  pg_size_bytes('16GB'), pg_size_bytes('200GB'), '{"class":"medium","arch":"amd64"}', 'open', now()),
+	('us-west-2', 'uw2-large-1',  8000,  pg_size_bytes('32GB'), pg_size_bytes('500GB'), '{"class":"large","arch":"arm64"}',  'open', now()),
 
 	-- eu-west-1: small region, and one host cordoned (drained for maintenance) so
 	-- the scheduler must avoid an otherwise-fitting candidate.
-	('eu-west-1', 'ew1-small-1',  2000,  pg_size_bytes('4GB'),  pg_size_bytes('80GB'),  '{"class":"small","arch":"arm64"}',  'ready',    now()),
+	('eu-west-1', 'ew1-small-1',  2000,  pg_size_bytes('4GB'),  pg_size_bytes('80GB'),  '{"class":"small","arch":"arm64"}',  'open',     now()),
 	('eu-west-1', 'ew1-medium-1', 4000,  pg_size_bytes('16GB'), pg_size_bytes('200GB'), '{"class":"medium","arch":"arm64"}', 'cordoned', now())
 ON CONFLICT (hostname) DO UPDATE SET
 	region         = EXCLUDED.region,

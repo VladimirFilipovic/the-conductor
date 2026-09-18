@@ -11,6 +11,7 @@ import (
 
 	"conductor/internal/config"
 	"conductor/internal/domain"
+	"conductor/internal/storage/db"
 
 	"github.com/google/uuid"
 )
@@ -338,5 +339,33 @@ func TestScaleDownExcessReapsThroughCascade(t *testing.T) {
 	want := []Intent{{Kind: IntentDestroy, ReplicaID: excess.ID}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Reconcile() = %v, want %v", got, want)
+	}
+}
+
+// host_draining from the snapshot query is raw host state; the engine's
+// replica.HostDraining means "leaves with the host", which a volume-pinned
+// replica never does. Without this narrowing the recreate cascade would see
+// a stateful replica as departing capacity and surge a second writer onto
+// the volume.
+func TestSnapshotHostDrainingIgnoresVolumePinned(t *testing.T) {
+	hostID := uuid.New()
+	rows := []db.ListActiveReplicasRow{
+		{ID: pinnedID(1), HostID: uuid.NullUUID{UUID: hostID, Valid: true}, HostDraining: true},
+		{ID: pinnedID(2), HostID: uuid.NullUUID{UUID: hostID, Valid: true}, HostDraining: true,
+			VolumeID: uuid.NullUUID{UUID: pinnedID(9), Valid: true}},
+	}
+	snap := newStateSnapshot(nil, rows, []db.Host{
+		{ID: hostID, Status: string(domain.HostDraining), HostHealthy: true},
+		{ID: pinnedID(3), Status: string(domain.HostOpen), HostHealthy: true},
+	}, nil)
+
+	if !snap.replicas[0].HostDraining {
+		t.Error("stateless replica on a draining host not marked as leaving")
+	}
+	if snap.replicas[1].HostDraining {
+		t.Error("volume-pinned replica marked as leaving with its host")
+	}
+	if snap.hosts[0].Open || !snap.hosts[1].Open {
+		t.Errorf("host Open = %v/%v, want false/true for draining/open", snap.hosts[0].Open, snap.hosts[1].Open)
 	}
 }

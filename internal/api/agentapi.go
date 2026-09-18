@@ -39,9 +39,9 @@ const (
 type AgentAPIStore interface {
 	ListReplicasByHost(ctx context.Context, hostID uuid.UUID) ([]db.Replica, error)
 	ListVolumesByHost(ctx context.Context, hostID uuid.UUID) ([]db.Volume, error)
-	// ListAgentHosts is agent discovery: every host, scheduling status
-	// ignored — a notready host's agent must still enroll and heartbeat,
-	// or a demoted host could never heal back to ready.
+	// ListAgentHosts is agent discovery: every host, health and status
+	// ignored — an unhealthy host's agent must still enroll and heartbeat,
+	// or a demoted host could never heal back.
 	ListAgentHosts(ctx context.Context) ([]db.Host, error)
 }
 
@@ -362,7 +362,7 @@ func (a *AgentAPI) Session(stream agentpb.AgentAPI_SessionServer) error {
 func (a *AgentAPI) applyUplink(ctx context.Context, hostID uuid.UUID, msg *agentpb.AgentMessage) error {
 	switch m := msg.Msg.(type) {
 	case *agentpb.AgentMessage_Heartbeat:
-		return a.observed.RecordHeartbeat(ctx, hostID, m.Heartbeat.Status)
+		return a.observed.RecordHeartbeat(ctx, hostID)
 	case *agentpb.AgentMessage_Observation:
 		o := m.Observation
 		replicaID, err := uuid.Parse(o.ReplicaId)

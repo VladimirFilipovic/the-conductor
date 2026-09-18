@@ -8,24 +8,34 @@ WHERE phase <> 'reaped'
 ORDER BY created_at;
 
 -- Operator takes a host out of scheduling while its replicas keep running.
--- Only agent-owned states may be cordoned: a draining host is already leaving
--- and re-labelling it would erase that intent. rows = 0 means "not applicable".
+-- Only an open host can be cordoned: a draining host is already leaving and
+-- re-labelling it would erase that intent. rows = 0 means "not applicable".
 -- name: CordonHost :execrows
 UPDATE hosts SET status = 'cordoned'
-WHERE id = @host_id AND status IN ('ready', 'notready');
+WHERE id = @host_id AND status = 'open';
 
--- Operator hands a host back to scheduling; it returns as 'ready' and the next
--- heartbeat (or its absence) corrects that within one sweep. Draining is
--- included so an evacuation can be called off — without this a drained host
--- had no way back except SQL.
+-- Operator hands a host back to scheduling. Draining is included so an
+-- evacuation can be called off — without this a drained host had no way back
+-- except SQL. Health is untouched: it belongs to the heartbeat.
 -- name: UncordonHost :execrows
-UPDATE hosts SET status = 'ready'
+UPDATE hosts SET status = 'open', drain_started_at = NULL
 WHERE id = @host_id AND status IN ('cordoned', 'draining');
 
--- Operator evacuates a host: the reconciler drains its replicas elsewhere.
+-- Operator evacuates a host: the reconciler surges replacements elsewhere and
+-- scales the host's stateless replicas down; the watchdog cordons the host
+-- once they are gone. drain_started_at is the stalled-drain clock.
 -- name: DrainHost :execrows
-UPDATE hosts SET status = 'draining'
+UPDATE hosts SET status = 'draining', drain_started_at = @now
 WHERE id = @host_id AND status <> 'draining';
+
+-- Live replicas per host for the roster the operator UI shows: how much is
+-- still on a draining host is the drain's progress bar. Terminal phases hold
+-- nothing on the host.
+-- name: ListHostReplicaCounts :many
+SELECT host_id, count(*) AS replicas
+FROM replicas
+WHERE host_id IS NOT NULL AND phase NOT IN ('reaped', 'failed')
+GROUP BY host_id;
 
 -- Register-or-refresh in one statement: the heartbeat re-creates the row if
 -- it vanished (a dev schema rebuild while the apiserver kept running), so an

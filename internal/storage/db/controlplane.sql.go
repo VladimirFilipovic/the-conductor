@@ -15,12 +15,12 @@ import (
 
 const cordonHost = `-- name: CordonHost :execrows
 UPDATE hosts SET status = 'cordoned'
-WHERE id = $1 AND status IN ('ready', 'notready')
+WHERE id = $1 AND status = 'open'
 `
 
 // Operator takes a host out of scheduling while its replicas keep running.
-// Only agent-owned states may be cordoned: a draining host is already leaving
-// and re-labelling it would erase that intent. rows = 0 means "not applicable".
+// Only an open host can be cordoned: a draining host is already leaving and
+// re-labelling it would erase that intent. rows = 0 means "not applicable".
 func (q *Queries) CordonHost(ctx context.Context, hostID uuid.UUID) (int64, error) {
 	result, err := q.db.ExecContext(ctx, cordonHost, hostID)
 	if err != nil {
@@ -50,13 +50,20 @@ func (q *Queries) DeregisterApiserverInstance(ctx context.Context, id uuid.UUID)
 }
 
 const drainHost = `-- name: DrainHost :execrows
-UPDATE hosts SET status = 'draining'
-WHERE id = $1 AND status <> 'draining'
+UPDATE hosts SET status = 'draining', drain_started_at = $1
+WHERE id = $2 AND status <> 'draining'
 `
 
-// Operator evacuates a host: the reconciler drains its replicas elsewhere.
-func (q *Queries) DrainHost(ctx context.Context, hostID uuid.UUID) (int64, error) {
-	result, err := q.db.ExecContext(ctx, drainHost, hostID)
+type DrainHostParams struct {
+	Now    sql.NullTime `json:"now"`
+	HostID uuid.UUID    `json:"host_id"`
+}
+
+// Operator evacuates a host: the reconciler surges replacements elsewhere and
+// scales the host's stateless replicas down; the watchdog cordons the host
+// once they are gone. drain_started_at is the stalled-drain clock.
+func (q *Queries) DrainHost(ctx context.Context, arg DrainHostParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, drainHost, arg.Now, arg.HostID)
 	if err != nil {
 		return 0, err
 	}
@@ -121,6 +128,44 @@ func (q *Queries) ListEnvironmentRows(ctx context.Context, arg ListEnvironmentRo
 	for rows.Next() {
 		var i ListEnvironmentRowsRow
 		if err := rows.Scan(&i.ID, &i.ProjectName, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listHostReplicaCounts = `-- name: ListHostReplicaCounts :many
+SELECT host_id, count(*) AS replicas
+FROM replicas
+WHERE host_id IS NOT NULL AND phase NOT IN ('reaped', 'failed')
+GROUP BY host_id
+`
+
+type ListHostReplicaCountsRow struct {
+	HostID   uuid.NullUUID `json:"host_id"`
+	Replicas int64         `json:"replicas"`
+}
+
+// Live replicas per host for the roster the operator UI shows: how much is
+// still on a draining host is the drain's progress bar. Terminal phases hold
+// nothing on the host.
+func (q *Queries) ListHostReplicaCounts(ctx context.Context) ([]ListHostReplicaCountsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listHostReplicaCounts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListHostReplicaCountsRow
+	for rows.Next() {
+		var i ListHostReplicaCountsRow
+		if err := rows.Scan(&i.HostID, &i.Replicas); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -361,7 +406,7 @@ func (q *Queries) TopologyDesiredRegions(ctx context.Context, arg TopologyDesire
 }
 
 const topologyHosts = `-- name: TopologyHosts :many
-SELECT id, region, hostname, cpu_millicores, mem_bytes, disk_bytes, labels, status, last_heartbeat, created_at FROM hosts
+SELECT id, region, hostname, cpu_millicores, mem_bytes, disk_bytes, labels, status, last_heartbeat, created_at, host_healthy, drain_started_at FROM hosts
 WHERE ($1::text = '' OR region = $1)
 ORDER BY region, hostname
 `
@@ -386,6 +431,8 @@ func (q *Queries) TopologyHosts(ctx context.Context, region string) ([]Host, err
 			&i.Status,
 			&i.LastHeartbeat,
 			&i.CreatedAt,
+			&i.HostHealthy,
+			&i.DrainStartedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -610,14 +657,13 @@ func (q *Queries) TopologyServices(ctx context.Context, arg TopologyServicesPara
 }
 
 const uncordonHost = `-- name: UncordonHost :execrows
-UPDATE hosts SET status = 'ready'
+UPDATE hosts SET status = 'open', drain_started_at = NULL
 WHERE id = $1 AND status IN ('cordoned', 'draining')
 `
 
-// Operator hands a host back to scheduling; it returns as 'ready' and the next
-// heartbeat (or its absence) corrects that within one sweep. Draining is
-// included so an evacuation can be called off — without this a drained host
-// had no way back except SQL.
+// Operator hands a host back to scheduling. Draining is included so an
+// evacuation can be called off — without this a drained host had no way back
+// except SQL. Health is untouched: it belongs to the heartbeat.
 func (q *Queries) UncordonHost(ctx context.Context, hostID uuid.UUID) (int64, error) {
 	result, err := q.db.ExecContext(ctx, uncordonHost, hostID)
 	if err != nil {

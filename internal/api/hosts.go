@@ -12,24 +12,34 @@ import (
 	"github.com/google/uuid"
 )
 
+// hostJSON carries both owners of a host's state side by side: Healthy is
+// what the heartbeat says, Status what the operator asked for. A drain in
+// flight also shows when it started and how much is still on the host, so a
+// stalled one is visible without reading engine logs.
 type hostJSON struct {
-	ID            uuid.UUID  `json:"id"`
-	Hostname      string     `json:"hostname"`
-	Region        string     `json:"region"`
-	Status        string     `json:"status"`
-	LastHeartbeat *time.Time `json:"last_heartbeat"`
-	CPUMillicores int32      `json:"cpu_millicores"`
-	MemBytes      int64      `json:"mem_bytes"`
-	DiskBytes     int64      `json:"disk_bytes"`
+	ID             uuid.UUID  `json:"id"`
+	Hostname       string     `json:"hostname"`
+	Region         string     `json:"region"`
+	Healthy        bool       `json:"host_healthy"`
+	Status         string     `json:"status"`
+	DrainStartedAt *time.Time `json:"drain_started_at"`
+	ReplicasOnHost int64      `json:"replicas_on_host"`
+	LastHeartbeat  *time.Time `json:"last_heartbeat"`
+	CPUMillicores  int32      `json:"cpu_millicores"`
+	MemBytes       int64      `json:"mem_bytes"`
+	DiskBytes      int64      `json:"disk_bytes"`
 }
 
-func hostsJSON(hosts []db.Host) []hostJSON {
+func hostsJSON(hosts []db.Host, replicas map[uuid.UUID]int64) []hostJSON {
 	out := make([]hostJSON, len(hosts))
 	for i, h := range hosts {
 		out[i] = hostJSON{
-			ID: h.ID, Hostname: h.Hostname, Region: h.Region, Status: h.Status,
-			LastHeartbeat: nullTime(h.LastHeartbeat),
-			CPUMillicores: h.CpuMillicores, MemBytes: h.MemBytes, DiskBytes: h.DiskBytes,
+			ID: h.ID, Hostname: h.Hostname, Region: h.Region,
+			Healthy: h.HostHealthy, Status: h.Status,
+			DrainStartedAt: nullTime(h.DrainStartedAt),
+			ReplicasOnHost: replicas[h.ID],
+			LastHeartbeat:  nullTime(h.LastHeartbeat),
+			CPUMillicores:  h.CpuMillicores, MemBytes: h.MemBytes, DiskBytes: h.DiskBytes,
 		}
 	}
 	return out
@@ -41,7 +51,12 @@ func (o *OperatorAPI) listHosts(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, hostsJSON(hosts))
+	counts, err := o.store.ListHostReplicaCounts(r.Context())
+	if err != nil {
+		writeInternalError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, hostsJSON(hosts, counts))
 }
 
 // hostTransition adapts one operator write: 400 for a bad id, 409 when the

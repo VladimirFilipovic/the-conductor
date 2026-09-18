@@ -25,10 +25,12 @@ type ReplicaObservation struct {
 // sensorQuerier is the observed-state slice of Querier: what agent reports and
 // the staleness sweep write back onto the fleet.
 type sensorQuerier interface {
-	RecordHostHeartbeat(ctx context.Context, hostID uuid.UUID, observedAt time.Time, status string) error
-	MarkStaleHostsNotReady(ctx context.Context, lastHeartbeatBefore time.Time) (int64, error)
+	RecordHostHeartbeat(ctx context.Context, hostID uuid.UUID, observedAt time.Time) error
+	MarkStaleHostsUnhealthy(ctx context.Context, lastHeartbeatBefore time.Time) (int64, error)
 	ListDeadHosts(ctx context.Context, lastHeartbeatBefore time.Time) ([]db.Host, error)
 	MarkHostDown(ctx context.Context, hostID uuid.UUID, lastHeartbeatBefore time.Time) error
+	CompleteDrainedHosts(ctx context.Context) ([]db.Host, error)
+	ListStalledDrains(ctx context.Context, startedBefore time.Time) ([]db.Host, error)
 	RecordReplicaObservation(ctx context.Context, obs ReplicaObservation) (bool, error)
 	ListReplicasByHost(ctx context.Context, hostID uuid.UUID) ([]db.Replica, error)
 	ListVolumesByHost(ctx context.Context, hostID uuid.UUID) ([]db.Volume, error)
@@ -36,16 +38,15 @@ type sensorQuerier interface {
 	RenewVolumeLease(ctx context.Context, replicaID uuid.UUID, expiresAt time.Time) error
 }
 
-func (q querier) RecordHostHeartbeat(ctx context.Context, hostID uuid.UUID, observedAt time.Time, status string) error {
+func (q querier) RecordHostHeartbeat(ctx context.Context, hostID uuid.UUID, observedAt time.Time) error {
 	return q.queries.RecordHostHeartbeat(ctx, db.RecordHostHeartbeatParams{
 		HostID:     hostID,
 		ObservedAt: sql.NullTime{Time: observedAt, Valid: true},
-		Status:     status,
 	})
 }
 
-func (q querier) MarkStaleHostsNotReady(ctx context.Context, lastHeartbeatBefore time.Time) (int64, error) {
-	return q.queries.MarkStaleHostsNotReady(ctx, sql.NullTime{Time: lastHeartbeatBefore, Valid: true})
+func (q querier) MarkStaleHostsUnhealthy(ctx context.Context, lastHeartbeatBefore time.Time) (int64, error) {
+	return q.queries.MarkStaleHostsUnhealthy(ctx, sql.NullTime{Time: lastHeartbeatBefore, Valid: true})
 }
 
 func (q querier) ListDeadHosts(ctx context.Context, lastHeartbeatBefore time.Time) ([]db.Host, error) {
@@ -57,6 +58,16 @@ func (q querier) MarkHostDown(ctx context.Context, hostID uuid.UUID, lastHeartbe
 		HostID:              hostID,
 		LastHeartbeatBefore: sql.NullTime{Time: lastHeartbeatBefore, Valid: true},
 	})
+}
+
+// CompleteDrainedHosts cordons every draining host with no stateless replica
+// left on it and returns them, so the sweep can log each finished drain.
+func (q querier) CompleteDrainedHosts(ctx context.Context) ([]db.Host, error) {
+	return q.queries.CompleteDrainedHosts(ctx)
+}
+
+func (q querier) ListStalledDrains(ctx context.Context, startedBefore time.Time) ([]db.Host, error) {
+	return q.queries.ListStalledDrains(ctx, sql.NullTime{Time: startedBefore, Valid: true})
 }
 
 // RecordReplicaObservation applies an agent report to the replica row. Zero

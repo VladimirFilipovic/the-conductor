@@ -20,7 +20,7 @@ type fakeObservedStateStore struct {
 	// (replica already in a terminal/orchestrator-owned phase).
 	dropObservations bool
 
-	heartbeats   []string // "host@time status"
+	heartbeats   []string // "host@time"
 	observations []storage.ReplicaObservation
 	renewals     []string // "replica until time"
 	volumeSizes  []string // "volume=bytes"
@@ -31,8 +31,8 @@ func (f *fakeObservedStateStore) RecordVolumeObservedSize(_ context.Context, vol
 	return nil
 }
 
-func (f *fakeObservedStateStore) RecordHostHeartbeat(_ context.Context, hostID uuid.UUID, observedAt time.Time, status string) error {
-	f.heartbeats = append(f.heartbeats, hostID.String()+"@"+observedAt.UTC().Format(time.RFC3339)+" "+status)
+func (f *fakeObservedStateStore) RecordHostHeartbeat(_ context.Context, hostID uuid.UUID, observedAt time.Time) error {
+	f.heartbeats = append(f.heartbeats, hostID.String()+"@"+observedAt.UTC().Format(time.RFC3339))
 	return nil
 }
 
@@ -65,28 +65,12 @@ func pinnedID(n byte) uuid.UUID {
 // skewed agent clock must not keep a dead host alive.
 func TestRecordHeartbeatStampsIngestClock(t *testing.T) {
 	store := &fakeObservedStateStore{}
-	if err := newTestObserved(store).RecordHeartbeat(context.Background(), pinnedID(1), "ready"); err != nil {
+	if err := newTestObserved(store).RecordHeartbeat(context.Background(), pinnedID(1)); err != nil {
 		t.Fatalf("RecordHeartbeat: %v", err)
 	}
-	want := pinnedID(1).String() + "@2026-01-01T12:00:00Z ready"
+	want := pinnedID(1).String() + "@2026-01-01T12:00:00Z"
 	if len(store.heartbeats) != 1 || store.heartbeats[0] != want {
 		t.Fatalf("heartbeats = %v, want [%s]", store.heartbeats, want)
-	}
-}
-
-// Agent-unreportable host statuses are rejected before they can hit the
-// hosts.status CHECK (unknown value) or overwrite operator-owned desired
-// state (cordoned/draining).
-func TestRecordHeartbeatRejectsUnreportableStatus(t *testing.T) {
-	store := &fakeObservedStateStore{}
-	in := newTestObserved(store)
-	for _, status := range []string{"up", "cordoned", "draining", ""} {
-		if err := in.RecordHeartbeat(context.Background(), pinnedID(1), status); err == nil {
-			t.Errorf("status %q accepted from agent", status)
-		}
-	}
-	if len(store.heartbeats) != 0 {
-		t.Fatalf("unreportable heartbeat reached the store: %v", store.heartbeats)
 	}
 }
 

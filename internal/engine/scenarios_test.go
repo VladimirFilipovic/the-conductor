@@ -110,6 +110,7 @@ func (s *sim) ensureHost(region string) {
 		CPUMillicores: 1 << 20,
 		MemBytes:      1 << 40,
 		DiskBytes:     1 << 40,
+		Open:          true,
 	})
 }
 
@@ -638,5 +639,73 @@ func TestScenarioMixedSnapshot(t *testing.T) {
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("tick intents = %v, want %v", got, want)
+	}
+}
+
+// drainHostOf is the operator's drain seen from the snapshot: every listed
+// replica now sits on a draining host.
+func (s *sim) drainHostOf(ids ...uuid.UUID) {
+	for _, id := range ids {
+		s.replicaByID(id).HostDraining = true
+	}
+}
+
+// Host drain is surge-then-shrink through the ordinary rolling rules: the
+// replicas on the draining host stop counting as capacity, so ramp-up builds
+// their replacements (canary first) while they keep serving; only once every
+// replacement is healthy does scale-down retire them — draining-host first.
+// The group never dips below desired.
+func TestDrainHostEvacuatesStatelessSurgeFirst(t *testing.T) {
+	s := newSim(t)
+	slot := replicaSlot{uuid.New(), "eu"}
+	dep := uuid.New()
+	s.declare(slot, dep, 3, false, domain.DeploymentActive)
+	old := s.seedHealthy(slot, dep, 3)
+	s.drainHostOf(old...)
+
+	s.tickExpect(IntentCreate) // canary: no counted capacity, version re-proven with one
+	s.tickExpect(IntentSkip)   // notAllHealthy holds on the booting canary
+	s.markHealthy()
+	s.tickExpect(IntentCreate, IntentCreate) // the rest of the deficit in one batch
+	s.tickExpect(IntentSkip)
+	s.markHealthy()
+
+	drains := s.tickExpect(IntentDrain, IntentDrain, IntentDrain)
+	for _, it := range drains {
+		if !slices.Contains(old, it.ReplicaID) {
+			t.Fatalf("scale-down drained %s, a fresh replacement — must retire the draining host's replicas", it.ReplicaID)
+		}
+	}
+	var serving int
+	for _, r := range s.replicas {
+		if r.Healthy && !r.HostDraining && r.DrainedAt.IsZero() {
+			serving++
+		}
+	}
+	if serving != 3 {
+		t.Fatalf("serving replacements after evacuation = %d, want 3", serving)
+	}
+
+	s.advance(simDrainSeconds*time.Second + time.Second)
+	s.tickExpect(IntentDestroy, IntentDestroy, IntentDestroy)
+	s.tickExpect()
+}
+
+// A single replica on a draining host still gets a replacement before it is
+// retired: the count of desired is never the count of what is leaving.
+func TestDrainHostSingleReplicaSurgesBeforeRetiring(t *testing.T) {
+	s := newSim(t)
+	slot := replicaSlot{uuid.New(), "eu"}
+	dep := uuid.New()
+	s.declare(slot, dep, 1, false, domain.DeploymentActive)
+	old := s.seedHealthy(slot, dep, 1)
+	s.drainHostOf(old...)
+
+	s.tickExpect(IntentCreate)
+	s.tickExpect(IntentSkip)
+	s.markHealthy()
+	drain := s.tickExpect(IntentDrain)
+	if drain[0].ReplicaID != old[0] {
+		t.Fatalf("drained %s, want the draining host's replica %s", drain[0].ReplicaID, old[0])
 	}
 }

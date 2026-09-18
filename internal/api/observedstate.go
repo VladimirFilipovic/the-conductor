@@ -15,7 +15,7 @@ import (
 // AgentAPI. Consumer-side view: the concrete *storage.PostgresClient satisfies
 // it; tests substitute fakes.
 type ObservedStateStore interface {
-	RecordHostHeartbeat(ctx context.Context, hostID uuid.UUID, observedAt time.Time, status string) error
+	RecordHostHeartbeat(ctx context.Context, hostID uuid.UUID, observedAt time.Time) error
 	// RecordReplicaObservation applies one agent report; false means the write
 	// lost to a terminal/orchestrator-owned phase and was dropped as stale.
 	RecordReplicaObservation(ctx context.Context, obs storage.ReplicaObservation) (bool, error)
@@ -49,13 +49,11 @@ func (o *ObservedState) WithClock(now func() time.Time) *ObservedState {
 
 // RecordHeartbeat ingests a host agent's liveness ping. The observation time
 // is stamped here, not taken from the agent — a skewed agent clock must not
-// be able to keep a dead host looking alive.
+// be able to keep a dead host looking alive. The beat carries nothing else:
+// a host's health IS the beat, and its status belongs to the operator.
 // TODO: agent auth — validation guards against buggy agents, not spoofed ones.
-func (o *ObservedState) RecordHeartbeat(ctx context.Context, hostID uuid.UUID, status string) error {
-	if !domain.HostStatus(status).AgentReportable() {
-		return fmt.Errorf("observedstate: host status %q is not agent-reportable", status)
-	}
-	return o.store.RecordHostHeartbeat(ctx, hostID, o.now(), status)
+func (o *ObservedState) RecordHeartbeat(ctx context.Context, hostID uuid.UUID) error {
+	return o.store.RecordHostHeartbeat(ctx, hostID, o.now())
 }
 
 // ObserveReplica ingests one agent-reported replica state. Stale reports

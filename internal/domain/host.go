@@ -1,29 +1,24 @@
 package domain
 
-// HostStatus is a host's scheduling status. String-underlying to map onto the
-// text column; keep in lockstep with the CHECK on hosts.status.
+// HostStatus is the operator's intent for a host — one owner, one column.
+// Liveness is a separate observed column (hosts.host_healthy) the heartbeat
+// and the watchdog own, so a heartbeat can never overwrite a cordon and a
+// silent drain stays a drain. Schedulable for free placement is
+// host_healthy AND HostOpen. String-underlying to map onto the text column;
+// keep in lockstep with the CHECK on hosts.status.
 type HostStatus string
 
 const (
-	HostReady    HostStatus = "ready"    // accepting placements
-	HostNotReady HostStatus = "notready" // alive but not schedulable (agent-reported or swept stale)
-	HostDraining HostStatus = "draining" // operator: evacuate replicas, then cordon
-	HostCordoned HostStatus = "cordoned" // operator: no new placements
+	HostOpen     HostStatus = "open"     // accepting placements
+	HostCordoned HostStatus = "cordoned" // no new placements; existing replicas stay
+	HostDraining HostStatus = "draining" // evacuating stateless replicas, then cordoned
 )
 
 // Valid reports whether s is a known status — guard before writing one back.
 func (s HostStatus) Valid() bool {
 	switch s {
-	case HostReady, HostNotReady, HostDraining, HostCordoned:
+	case HostOpen, HostCordoned, HostDraining:
 		return true
 	}
 	return false
-}
-
-// AgentReportable reports whether a heartbeat may carry this status. Draining
-// and cordoned are operator-owned desired state: a heartbeat must never be able
-// to lift a cordon, and an unknown value would trip the CHECK on every beat
-// until the live host is falsely swept as stale.
-func (s HostStatus) AgentReportable() bool {
-	return s == HostReady || s == HostNotReady
 }

@@ -25,8 +25,9 @@ func (p *placer) planVolumes(snap stateSnapshot) []Intent {
 // "Has room" is fits with a resize item: newLedger already subtracts every
 // placed volume's DESIRED size, so a bumped desired is a reservation the
 // moment it lands, and the grow fits iff the host isn't overcommitted (the
-// DiskReserve is its to use — see packItem.resize). A host outside the ledger
-// (notready, cordoned) holds too: no new work lands on it, a grow included.
+// DiskReserve is its to use — see packItem.resize). An unhealthy host is
+// outside the ledger and holds too; a cordoned or draining one is in it and
+// grows normally — the volume is staying on it regardless.
 //
 // There is no failed exit. Waiting is the only outcome for a grow that doesn't
 // fit: the operator sees desired > observed on an attached volume, and the

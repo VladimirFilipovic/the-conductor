@@ -40,7 +40,7 @@ func TestTopologyBuildsTree(t *testing.T) {
 				DepVersion: 2, IsCurrent: false, DeploymentID: pinnedID(7), EsID: esID,
 			},
 		},
-		hosts: []db.Host{{ID: hostID, Hostname: "h1", Region: "us-east-1", Status: "ready"}},
+		hosts: []db.Host{{ID: hostID, Hostname: "h1", Region: "us-east-1", HostHealthy: true, Status: "open"}},
 	}
 	api := NewOperatorAPI(store, &fakeDesired{})
 

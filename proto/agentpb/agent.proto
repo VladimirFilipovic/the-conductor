@@ -37,9 +37,11 @@ message Hello {
 }
 
 // Heartbeat is the liveness ping; the server stamps its own observation time
-// (an agent's skewed clock must not keep a dead host alive).
+// (an agent's skewed clock must not keep a dead host alive). It carries no
+// payload: the beat itself is the host's health, and scheduling status is
+// operator intent the agent has no say in.
 message Heartbeat {
-  string status = 1; // "ready" | "notready"
+  reserved 1; // was `status` — the server never let it override anything
 }
 
 // ReplicaObservation mirrors storage.ReplicaObservation.

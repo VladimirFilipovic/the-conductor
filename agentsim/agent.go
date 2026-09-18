@@ -262,7 +262,7 @@ func (a *Agent) report(stream agentpb.AgentAPI_SessionClient) error {
 		return nil
 	}
 	msgs := []*agentpb.AgentMessage{{Msg: &agentpb.AgentMessage_Heartbeat{
-		Heartbeat: &agentpb.Heartbeat{Status: "ready"},
+		Heartbeat: &agentpb.Heartbeat{},
 	}}}
 	for id, c := range a.containers {
 		msgs = append(msgs, &agentpb.AgentMessage{Msg: &agentpb.AgentMessage_Observation{
@@ -301,8 +301,8 @@ func (a *Agent) KillHost() {
 	a.mu.Unlock()
 }
 
-// RecoverHost resumes reporting. The next heartbeat moves the host
-// notready → ready and the placer starts considering it again.
+// RecoverHost resumes reporting. The next heartbeat marks the host healthy
+// again and the placer starts considering it.
 func (a *Agent) RecoverHost() {
 	a.mu.Lock()
 	a.hostDown = false

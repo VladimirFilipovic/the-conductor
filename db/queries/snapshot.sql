@@ -36,10 +36,15 @@ WHERE d.is_current;
 -- converge toward, the rest are the old revision to drain. Filtering on
 -- d.is_current here would hide the outgoing replicas and leak them as orphans
 -- nothing ever reaps. Reaped replicas are terminal and excluded.
-SELECT r.*, d.environment_service_id, es.service_id, d.version, d.is_current, d.drain_seconds
+-- host_draining rides along so the rolling cascade can treat a replica whose
+-- host is being evacuated as capacity that is leaving (LEFT JOIN: a hostless
+-- replica has no host to be draining).
+SELECT r.*, d.environment_service_id, es.service_id, d.version, d.is_current, d.drain_seconds,
+       coalesce(h.status = 'draining', false)::bool AS host_draining
 FROM replicas r
 JOIN deployments d           ON d.id = r.deployment_id
 JOIN environment_services es ON es.id = d.environment_service_id
+LEFT JOIN hosts h            ON h.id = r.host_id
 WHERE r.phase <> 'reaped'
   AND EXISTS (
     SELECT 1 FROM deployments c
@@ -57,7 +62,10 @@ JOIN environment_services es ON es.service_id = v.service_id
 JOIN deployments d           ON d.environment_service_id = es.id
 WHERE d.is_current;
 
--- name: ListSchedulableHosts :many
--- Hosts eligible to receive placements this pass: 'ready' only (notready,
--- draining, cordoned are skipped). All regions — the Engine buckets by region.
-SELECT * FROM hosts WHERE status = 'ready';
+-- name: ListHealthyHosts :many
+-- Hosts alive this pass, operator status included: the placer's ledger holds
+-- every healthy host (a volume-pinned replica must be able to return to its
+-- volume's host even while that host is cordoned or draining) and filters on
+-- status = 'open' only for free placement. All regions — the Engine buckets
+-- by region.
+SELECT * FROM hosts WHERE host_healthy;

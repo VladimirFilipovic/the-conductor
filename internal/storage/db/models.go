@@ -58,16 +58,18 @@ type EnvironmentService struct {
 }
 
 type Host struct {
-	ID            uuid.UUID       `json:"id"`
-	Region        string          `json:"region"`
-	Hostname      string          `json:"hostname"`
-	CpuMillicores int32           `json:"cpu_millicores"`
-	MemBytes      int64           `json:"mem_bytes"`
-	DiskBytes     int64           `json:"disk_bytes"`
-	Labels        json.RawMessage `json:"labels"`
-	Status        string          `json:"status"`
-	LastHeartbeat sql.NullTime    `json:"last_heartbeat"`
-	CreatedAt     time.Time       `json:"created_at"`
+	ID             uuid.UUID       `json:"id"`
+	Region         string          `json:"region"`
+	Hostname       string          `json:"hostname"`
+	CpuMillicores  int32           `json:"cpu_millicores"`
+	MemBytes       int64           `json:"mem_bytes"`
+	DiskBytes      int64           `json:"disk_bytes"`
+	Labels         json.RawMessage `json:"labels"`
+	Status         string          `json:"status"`
+	LastHeartbeat  sql.NullTime    `json:"last_heartbeat"`
+	CreatedAt      time.Time       `json:"created_at"`
+	HostHealthy    bool            `json:"host_healthy"`
+	DrainStartedAt sql.NullTime    `json:"drain_started_at"`
 }
 
 type Project struct {

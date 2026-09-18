@@ -189,17 +189,28 @@ func (m *memStore) ListActiveReplicas(context.Context) ([]db.ListActiveReplicasR
 			Version:              d.version,
 			IsCurrent:            d.isCurrent,
 			DrainSeconds:         d.drainSeconds,
+			HostDraining:         m.hostStatus(r.hostID) == string(domain.HostDraining),
 		})
 	}
 	return rows, nil
 }
 
-func (m *memStore) ListSchedulableHosts(context.Context) ([]db.Host, error) {
+// hostStatus is the LEFT JOIN in ListActiveReplicas: "" for a hostless replica.
+func (m *memStore) hostStatus(hostID uuid.UUID) string {
+	for _, h := range m.hosts {
+		if h.ID == hostID {
+			return h.Status
+		}
+	}
+	return ""
+}
+
+func (m *memStore) ListHealthyHosts(context.Context) ([]db.Host, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var out []db.Host
 	for _, h := range m.hosts {
-		if h.Status == "ready" {
+		if h.HostHealthy {
 			out = append(out, h)
 		}
 	}
@@ -305,8 +316,9 @@ func (t *memTx) CreateReplica(_ context.Context, spec storage.ReplicaSpec) (db.R
 	return db.Replica{ID: r.id}, nil
 }
 
-// AssignReplicaHost mirrors the predicated reservation: host ready and
-// capacity re-checked at commit time, failed replicas consuming nothing.
+// AssignReplicaHost mirrors the predicated reservation: host healthy and open
+// (or the replica volume-pinned) and capacity re-checked at commit time,
+// failed replicas consuming nothing.
 func (t *memTx) AssignReplicaHost(_ context.Context, replicaID, hostID uuid.UUID) error {
 	r := t.s.replica(replicaID)
 	if r == nil {
@@ -318,7 +330,7 @@ func (t *memTx) AssignReplicaHost(_ context.Context, replicaID, hostID uuid.UUID
 			h = &t.s.hosts[i]
 		}
 	}
-	if h == nil || h.Status != "ready" {
+	if h == nil || !h.HostHealthy || (h.Status != string(domain.HostOpen) && r.volumeID == uuid.Nil) {
 		return storage.ErrConflict
 	}
 	var cpu, mem int64
@@ -417,7 +429,7 @@ var _ ReconcileTx = (*memTx)(nil)
 
 // --- WatchdogStore ------------------------------------------------------------
 
-func (m *memStore) RecordHostHeartbeat(_ context.Context, hostID uuid.UUID, observedAt time.Time, status string) error {
+func (m *memStore) RecordHostHeartbeat(_ context.Context, hostID uuid.UUID, observedAt time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i := range m.hosts {
@@ -426,21 +438,19 @@ func (m *memStore) RecordHostHeartbeat(_ context.Context, hostID uuid.UUID, obse
 			continue
 		}
 		h.LastHeartbeat.Time, h.LastHeartbeat.Valid = observedAt, true
-		if h.Status == "ready" || h.Status == "notready" {
-			h.Status = status
-		}
+		h.HostHealthy = true
 	}
 	return nil
 }
 
-func (m *memStore) MarkStaleHostsNotReady(_ context.Context, before time.Time) (int64, error) {
+func (m *memStore) MarkStaleHostsUnhealthy(_ context.Context, before time.Time) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var n int64
 	for i := range m.hosts {
 		h := &m.hosts[i]
-		if h.Status == "ready" && h.LastHeartbeat.Valid && h.LastHeartbeat.Time.Before(before) {
-			h.Status = "notready"
+		if h.HostHealthy && h.LastHeartbeat.Valid && h.LastHeartbeat.Time.Before(before) {
+			h.HostHealthy = false
 			n++
 		}
 	}
@@ -452,7 +462,7 @@ func (m *memStore) ListDeadHosts(_ context.Context, before time.Time) ([]db.Host
 	defer m.mu.Unlock()
 	var out []db.Host
 	for _, h := range m.hosts {
-		if (h.Status != "ready" && h.Status != "notready") || !h.LastHeartbeat.Valid || !h.LastHeartbeat.Time.Before(before) {
+		if !h.LastHeartbeat.Valid || !h.LastHeartbeat.Time.Before(before) {
 			continue
 		}
 		// Level-triggered like the SQL EXISTS: only hosts still holding
@@ -477,10 +487,10 @@ func (m *memStore) MarkHostDown(_ context.Context, hostID uuid.UUID, before time
 		// Staleness re-check mirrors the SQL predicate: a heartbeat that landed
 		// after the sweep's list keeps the host up and its replicas bound.
 		h := &m.hosts[i]
-		if (h.Status != "ready" && h.Status != "notready") || !h.LastHeartbeat.Valid || !h.LastHeartbeat.Time.Before(before) {
+		if !h.LastHeartbeat.Valid || !h.LastHeartbeat.Time.Before(before) {
 			return nil
 		}
-		h.Status = "notready"
+		h.HostHealthy = false
 	}
 	for _, r := range m.replicas {
 		if r.hostID != hostID || r.phase.Terminal() || !r.drainedAt.IsZero() {
@@ -492,6 +502,58 @@ func (m *memStore) MarkHostDown(_ context.Context, hostID uuid.UUID, before time
 		r.revision++
 	}
 	return nil
+}
+
+// CompleteDrainedHosts mirrors the SQL NOT EXISTS: a drain ends when no
+// stateless replica short of terminal is bound to the host.
+func (m *memStore) CompleteDrainedHosts(context.Context) ([]db.Host, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var done []db.Host
+	for i := range m.hosts {
+		h := &m.hosts[i]
+		if h.Status != string(domain.HostDraining) {
+			continue
+		}
+		holding := false
+		for _, r := range m.replicas {
+			if r.hostID == h.ID && r.volumeID == uuid.Nil && !r.phase.Terminal() {
+				holding = true
+				break
+			}
+		}
+		if holding {
+			continue
+		}
+		h.Status = string(domain.HostCordoned)
+		h.DrainStartedAt = sql.NullTime{}
+		done = append(done, *h)
+	}
+	return done, nil
+}
+
+func (m *memStore) ListStalledDrains(_ context.Context, before time.Time) ([]db.Host, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []db.Host
+	for _, h := range m.hosts {
+		if h.Status == string(domain.HostDraining) && h.DrainStartedAt.Time.Before(before) {
+			out = append(out, h)
+		}
+	}
+	return out, nil
+}
+
+// drainHost is the operator's POST /v1/hosts/{id}/drain.
+func (m *memStore) drainHost(hostID uuid.UUID, now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.hosts {
+		if m.hosts[i].ID == hostID {
+			m.hosts[i].Status = string(domain.HostDraining)
+			m.hosts[i].DrainStartedAt = sql.NullTime{Time: now, Valid: true}
+		}
+	}
 }
 
 func (m *memStore) RecordReplicaObservation(_ context.Context, obs storage.ReplicaObservation) (bool, error) {
@@ -587,7 +649,7 @@ func (l *loop) tick() {
 	}
 }
 
-// addHost adds one ready host; every scenario runs in one region on machines
+// addHost adds one healthy open host; every scenario runs in one region on machines
 // that differ only in disk (the stateful scenarios need room for volumes).
 func (l *loop) addHost(disk int64) uuid.UUID {
 	const region = "eu-west-1"
@@ -596,7 +658,8 @@ func (l *loop) addHost(disk int64) uuid.UUID {
 	id := uuid.New()
 	l.ms.hosts = append(l.ms.hosts, db.Host{
 		ID: id, Region: region, Hostname: "host-" + id.String()[:8],
-		CpuMillicores: cpu, MemBytes: mem, DiskBytes: disk, Status: "ready",
+		CpuMillicores: cpu, MemBytes: mem, DiskBytes: disk,
+		HostHealthy: true, Status: string(domain.HostOpen),
 	})
 	return id
 }
@@ -652,7 +715,7 @@ func (l *loop) agentConverge() {
 	l.t.Helper()
 	ctx := context.Background()
 	for _, h := range l.ms.hosts {
-		if h.Status != "ready" {
+		if !h.HostHealthy {
 			continue
 		}
 		for _, v := range l.ms.volumes {
@@ -775,10 +838,10 @@ func TestE2EHostDeathReplacement(t *testing.T) {
 
 	// Anti-affinity spread the pair; find who lives where.
 	ctx := context.Background()
-	if err := l.ms.RecordHostHeartbeat(ctx, hostA, l.clock.Now(), "ready"); err != nil {
+	if err := l.ms.RecordHostHeartbeat(ctx, hostA, l.clock.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if err := l.ms.RecordHostHeartbeat(ctx, hostB, l.clock.Now(), "ready"); err != nil {
+	if err := l.ms.RecordHostHeartbeat(ctx, hostB, l.clock.Now()); err != nil {
 		t.Fatal(err)
 	}
 	var onA []uuid.UUID
@@ -794,7 +857,7 @@ func TestE2EHostDeathReplacement(t *testing.T) {
 
 	// Host A dies: B keeps heartbeating, A goes silent past the deadline.
 	l.clock.advance(hostDeadAfter + 5*time.Second)
-	if err := l.ms.RecordHostHeartbeat(ctx, hostB, l.clock.Now(), "ready"); err != nil {
+	if err := l.ms.RecordHostHeartbeat(ctx, hostB, l.clock.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if err := l.watchdog.sweepStaleHosts(ctx); err != nil {
@@ -950,5 +1013,158 @@ func TestE2EVolumeResizeGrowOnly(t *testing.T) {
 	}
 	if r := l.replicasOf(v1)[0]; r.hostID != hostID || !r.healthy {
 		t.Fatalf("replica disturbed by resize: host=%s healthy=%v", r.hostID, r.healthy)
+	}
+}
+
+// servingReplicas counts the deployment's replicas still able to take
+// traffic: healthy and not reaped. A drained replica keeps serving until its
+// window elapses, so it counts — that is the point of graceful.
+func (l *loop) servingReplicas(dep uuid.UUID) int {
+	n := 0
+	for _, r := range l.replicasOf(dep) {
+		if r.healthy && r.phase != domain.ReplicaPhaseReaped {
+			n++
+		}
+	}
+	return n
+}
+
+// Operator drain, end to end: the replica on the drained host gets a
+// replacement on the survivor BEFORE it is retired, capacity never dips below
+// desired, and once the host holds nothing stateless the sweep cordons it.
+// The host stays healthy throughout — draining is intent, not illness.
+func TestE2EHostDrainEvacuation(t *testing.T) {
+	l := newLoop(t)
+	slot := replicaSlot{uuid.New(), "eu-west-1"}
+	serviceID := uuid.New()
+	hostA := l.addHost(1 << 30)
+	hostB := l.addHost(1 << 30)
+	ctx := context.Background()
+
+	v1 := l.deploy(slot, serviceID, 2, false)
+	l.rollout(v1)
+
+	var lost *memReplica
+	for _, r := range l.replicasOf(v1) {
+		if r.hostID == hostA {
+			lost = r
+		}
+	}
+	if lost == nil {
+		t.Fatal("anti-affinity left host A empty; nothing to drain")
+	}
+
+	l.ms.drainHost(hostA, l.clock.Now())
+	converged := false
+	for range 10 {
+		l.tick()
+		if n := l.servingReplicas(v1); n < 2 {
+			t.Fatalf("capacity dipped to %d during drain (replicas=%v)", n, l.describeReplicas())
+		}
+		l.agentConverge()
+		if err := l.watchdog.sweepStaleHosts(ctx); err != nil {
+			t.Fatalf("sweep: %v", err)
+		}
+		if l.ms.hostStatus(hostA) == string(domain.HostCordoned) {
+			converged = true
+			break
+		}
+	}
+	if !converged {
+		t.Fatalf("drain never completed: host A %s, replicas=%v", l.ms.hostStatus(hostA), l.describeReplicas())
+	}
+
+	if l.ms.replica(lost.id) != nil {
+		t.Fatalf("drained replica %s still exists in phase %s", lost.id, l.ms.replica(lost.id).phase)
+	}
+	reps := l.replicasOf(v1)
+	if len(reps) != 2 {
+		t.Fatalf("v1 replicas = %d, want 2", len(reps))
+	}
+	for _, r := range reps {
+		if r.hostID != hostB || !r.healthy {
+			t.Fatalf("replica %s on %s healthy=%v, want healthy on survivor %s", r.id, r.hostID, r.healthy, hostB)
+		}
+	}
+	for _, h := range l.ms.hosts {
+		if h.ID == hostA && (!h.HostHealthy || h.DrainStartedAt.Valid) {
+			t.Fatalf("host A after drain: healthy=%v drain_started_at=%v, want healthy with the clock cleared", h.HostHealthy, h.DrainStartedAt)
+		}
+	}
+	if got := l.ms.deployment(v1).status; got != string(domain.DeploymentActive) {
+		t.Fatalf("deployment status = %s, want active (a drain is not a rollout)", got)
+	}
+}
+
+// A draining host that dies is downed like any other — its replicas are freed
+// and re-placed — but the drain survives the death: status stays draining, so
+// when the host heartbeats back nothing lands on it and the sweep can still
+// close the drain out to cordoned.
+func TestE2EDrainingHostDeathKeepsDrain(t *testing.T) {
+	l := newLoop(t)
+	slot := replicaSlot{uuid.New(), "eu-west-1"}
+	serviceID := uuid.New()
+	hostA := l.addHost(1 << 30)
+	hostB := l.addHost(1 << 30)
+	ctx := context.Background()
+
+	v1 := l.deploy(slot, serviceID, 2, false)
+	l.rollout(v1)
+	for _, h := range []uuid.UUID{hostA, hostB} {
+		if err := l.ms.RecordHostHeartbeat(ctx, h, l.clock.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	l.ms.drainHost(hostA, l.clock.Now())
+
+	// A goes silent past the death window before the evacuation even starts.
+	l.clock.advance(hostDeadAfter + 5*time.Second)
+	if err := l.ms.RecordHostHeartbeat(ctx, hostB, l.clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.watchdog.sweepStaleHosts(ctx); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	var a db.Host
+	for _, h := range l.ms.hosts {
+		if h.ID == hostA {
+			a = h
+		}
+	}
+	if a.HostHealthy || a.Status != string(domain.HostDraining) {
+		t.Fatalf("dead draining host: healthy=%v status=%s, want unhealthy and still draining", a.HostHealthy, a.Status)
+	}
+	for _, r := range l.replicasOf(v1) {
+		if r.hostID == hostA {
+			t.Fatalf("replica %s still bound to the dead host", r.id)
+		}
+	}
+
+	// Freed replicas re-place onto B; the sweep closes the drain the moment A
+	// holds nothing — it does not wait for A to come back.
+	l.tick()
+	l.agentConverge()
+	l.tick()
+	if err := l.watchdog.sweepStaleHosts(ctx); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if got := l.ms.hostStatus(hostA); got != string(domain.HostCordoned) {
+		t.Fatalf("host A status = %s, want cordoned once empty", got)
+	}
+	for _, r := range l.replicasOf(v1) {
+		if r.hostID != hostB || !r.healthy {
+			t.Fatalf("replica %s on %s healthy=%v, want healthy on B", r.id, r.hostID, r.healthy)
+		}
+	}
+
+	// A heartbeats back: healthy again, still cordoned — nothing returns to it.
+	if err := l.ms.RecordHostHeartbeat(ctx, hostA, l.clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	l.tick()
+	for _, r := range l.replicasOf(v1) {
+		if r.hostID == hostA {
+			t.Fatalf("replica %s placed back onto the cordoned host", r.id)
+		}
 	}
 }

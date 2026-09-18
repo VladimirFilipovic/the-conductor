@@ -14,10 +14,12 @@ import (
 )
 
 const listActiveReplicas = `-- name: ListActiveReplicas :many
-SELECT r.id, r.deployment_id, r.region, r.host_id, r.volume_id, r.cpu_millicores, r.mem_bytes, r.alloc_reason, r.desired_status, r.phase, r.healthy, r.restart_count, r.last_exit_reason, r.revision, r.created_at, r.updated_at, r.drained_at, r.health_checks_passed_at, d.environment_service_id, es.service_id, d.version, d.is_current, d.drain_seconds
+SELECT r.id, r.deployment_id, r.region, r.host_id, r.volume_id, r.cpu_millicores, r.mem_bytes, r.alloc_reason, r.desired_status, r.phase, r.healthy, r.restart_count, r.last_exit_reason, r.revision, r.created_at, r.updated_at, r.drained_at, r.health_checks_passed_at, d.environment_service_id, es.service_id, d.version, d.is_current, d.drain_seconds,
+       coalesce(h.status = 'draining', false)::bool AS host_draining
 FROM replicas r
 JOIN deployments d           ON d.id = r.deployment_id
 JOIN environment_services es ON es.id = d.environment_service_id
+LEFT JOIN hosts h            ON h.id = r.host_id
 WHERE r.phase <> 'reaped'
   AND EXISTS (
     SELECT 1 FROM deployments c
@@ -50,6 +52,7 @@ type ListActiveReplicasRow struct {
 	Version              int32          `json:"version"`
 	IsCurrent            bool           `json:"is_current"`
 	DrainSeconds         int32          `json:"drain_seconds"`
+	HostDraining         bool           `json:"host_draining"`
 }
 
 // Observed fleet for every service that has a current deployment — INCLUDING
@@ -59,6 +62,9 @@ type ListActiveReplicasRow struct {
 // converge toward, the rest are the old revision to drain. Filtering on
 // d.is_current here would hide the outgoing replicas and leak them as orphans
 // nothing ever reaps. Reaped replicas are terminal and excluded.
+// host_draining rides along so the rolling cascade can treat a replica whose
+// host is being evacuated as capacity that is leaving (LEFT JOIN: a hostless
+// replica has no host to be draining).
 func (q *Queries) ListActiveReplicas(ctx context.Context) ([]ListActiveReplicasRow, error) {
 	rows, err := q.db.QueryContext(ctx, listActiveReplicas)
 	if err != nil {
@@ -92,6 +98,7 @@ func (q *Queries) ListActiveReplicas(ctx context.Context) ([]ListActiveReplicasR
 			&i.Version,
 			&i.IsCurrent,
 			&i.DrainSeconds,
+			&i.HostDraining,
 		); err != nil {
 			return nil, err
 		}
@@ -152,14 +159,17 @@ func (q *Queries) ListActiveVolumes(ctx context.Context) ([]Volume, error) {
 	return items, nil
 }
 
-const listSchedulableHosts = `-- name: ListSchedulableHosts :many
-SELECT id, region, hostname, cpu_millicores, mem_bytes, disk_bytes, labels, status, last_heartbeat, created_at FROM hosts WHERE status = 'ready'
+const listHealthyHosts = `-- name: ListHealthyHosts :many
+SELECT id, region, hostname, cpu_millicores, mem_bytes, disk_bytes, labels, status, last_heartbeat, created_at, host_healthy, drain_started_at FROM hosts WHERE host_healthy
 `
 
-// Hosts eligible to receive placements this pass: 'ready' only (notready,
-// draining, cordoned are skipped). All regions — the Engine buckets by region.
-func (q *Queries) ListSchedulableHosts(ctx context.Context) ([]Host, error) {
-	rows, err := q.db.QueryContext(ctx, listSchedulableHosts)
+// Hosts alive this pass, operator status included: the placer's ledger holds
+// every healthy host (a volume-pinned replica must be able to return to its
+// volume's host even while that host is cordoned or draining) and filters on
+// status = 'open' only for free placement. All regions — the Engine buckets
+// by region.
+func (q *Queries) ListHealthyHosts(ctx context.Context) ([]Host, error) {
+	rows, err := q.db.QueryContext(ctx, listHealthyHosts)
 	if err != nil {
 		return nil, err
 	}
@@ -178,6 +188,8 @@ func (q *Queries) ListSchedulableHosts(ctx context.Context) ([]Host, error) {
 			&i.Status,
 			&i.LastHeartbeat,
 			&i.CreatedAt,
+			&i.HostHealthy,
+			&i.DrainStartedAt,
 		); err != nil {
 			return nil, err
 		}

@@ -20,14 +20,29 @@ type fakeWatchdogStore struct {
 	// apiserver, so the sweep must never render a death verdict.
 	apiserverStarted time.Time
 
-	notReadyCutoffs []time.Time
-	deadCutoffs     []time.Time
-	downed          []uuid.UUID
+	// drained is what CompleteDrainedHosts reports as finished.
+	drained []db.Host
+
+	notReadyCutoffs  []time.Time
+	deadCutoffs      []time.Time
+	stalledCutoffs   []time.Time
+	downed           []uuid.UUID
+	drainCompletions int
 }
 
-func (f *fakeWatchdogStore) MarkStaleHostsNotReady(_ context.Context, before time.Time) (int64, error) {
+func (f *fakeWatchdogStore) MarkStaleHostsUnhealthy(_ context.Context, before time.Time) (int64, error) {
 	f.notReadyCutoffs = append(f.notReadyCutoffs, before)
 	return 0, nil
+}
+
+func (f *fakeWatchdogStore) CompleteDrainedHosts(context.Context) ([]db.Host, error) {
+	f.drainCompletions++
+	return f.drained, nil
+}
+
+func (f *fakeWatchdogStore) ListStalledDrains(_ context.Context, before time.Time) ([]db.Host, error) {
+	f.stalledCutoffs = append(f.stalledCutoffs, before)
+	return nil, nil
 }
 
 func (f *fakeWatchdogStore) ListDeadHosts(_ context.Context, before time.Time) ([]db.Host, error) {
@@ -57,7 +72,7 @@ func TestSweepMarksStaleHostsDown(t *testing.T) {
 	if err := newTestWatchdog(store, now).sweepStaleHosts(context.Background()); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
-	wantNotReady := now.Add(-hostNotReadyAfter)
+	wantNotReady := now.Add(-hostUnhealthyAfter)
 	if len(store.notReadyCutoffs) != 1 || !store.notReadyCutoffs[0].Equal(wantNotReady) {
 		t.Fatalf("notready cutoff = %v, want %v", store.notReadyCutoffs, wantNotReady)
 	}
@@ -105,5 +120,27 @@ func TestSweepStartupGraceSkipsDeathPass(t *testing.T) {
 	sweep("apiserver past grace")
 	if len(store.downed) != 1 {
 		t.Fatal("death pass still skipped after the grace window elapsed")
+	}
+}
+
+// Drains settle on every sweep — including inside the apiserver's startup
+// grace, since a drain's end is read off replica rows, not heartbeats — and
+// the stalled check uses the drainStalledAfter cutoff.
+func TestSweepSettlesDrainsEvenDuringGrace(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	store := &fakeWatchdogStore{drained: []db.Host{{ID: pinnedID(1), Hostname: "h1"}}}
+
+	if err := newTestWatchdog(store, now).sweepStaleHosts(context.Background()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if store.drainCompletions != 1 {
+		t.Fatalf("CompleteDrainedHosts calls = %d, want 1 even with no live apiserver", store.drainCompletions)
+	}
+	want := now.Add(-drainStalledAfter)
+	if len(store.stalledCutoffs) != 1 || !store.stalledCutoffs[0].Equal(want) {
+		t.Fatalf("stalled cutoff = %v, want %v", store.stalledCutoffs, want)
+	}
+	if len(store.deadCutoffs) != 0 {
+		t.Fatal("death pass ran with no live apiserver")
 	}
 }

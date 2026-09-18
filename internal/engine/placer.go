@@ -76,8 +76,11 @@ func (p *placer) newLedger(snap stateSnapshot) ledger {
 	return led
 }
 
-// schedulable reports whether hostID is a real, currently schedulable host —
-// non-nil and present in this pass's ledger (down/cordoned hosts never enter it).
+// schedulable reports whether hostID is a real, live host — non-nil and
+// present in this pass's ledger (unhealthy hosts never enter it). Operator
+// status is not checked here: this is the volume-pinned path, and a pinned
+// replica must be able to return to its volume's host while that host is
+// cordoned or draining. Free placement filters on Open in pick.
 func (led ledger) schedulable(hostID uuid.UUID) bool {
 	return hostID != uuid.Nil && led[hostID] != nil
 }
@@ -296,7 +299,7 @@ func (p *placer) score(it packItem, hl *hostLedger, w weights) float64 {
 func (p *placer) pick(it packItem, led ledger, rw regionWeights) (uuid.UUID, bool) {
 	var feasible []*hostLedger
 	for _, hl := range led {
-		if hl.host.Region == it.region && p.fits(it, hl) {
+		if hl.host.Open && hl.host.Region == it.region && p.fits(it, hl) {
 			feasible = append(feasible, hl)
 		}
 	}

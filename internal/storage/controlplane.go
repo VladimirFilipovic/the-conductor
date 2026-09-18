@@ -20,6 +20,7 @@ type controlPlaneQuerier interface {
 	CordonHost(ctx context.Context, hostID uuid.UUID) (bool, error)
 	UncordonHost(ctx context.Context, hostID uuid.UUID) (bool, error)
 	DrainHost(ctx context.Context, hostID uuid.UUID) (bool, error)
+	ListHostReplicaCounts(ctx context.Context) (map[uuid.UUID]int64, error)
 
 	UpsertApiserverInstance(ctx context.Context, id uuid.UUID, startedAt, now time.Time) error
 	DeregisterApiserverInstance(ctx context.Context, id uuid.UUID) error
@@ -57,8 +58,25 @@ func (q querier) UncordonHost(ctx context.Context, hostID uuid.UUID) (bool, erro
 }
 
 func (q querier) DrainHost(ctx context.Context, hostID uuid.UUID) (bool, error) {
-	n, err := q.queries.DrainHost(ctx, hostID)
+	n, err := q.queries.DrainHost(ctx, db.DrainHostParams{
+		HostID: hostID,
+		Now:    sql.NullTime{Time: time.Now(), Valid: true},
+	})
 	return n > 0, err
+}
+
+// ListHostReplicaCounts is live (non-terminal) replicas per host; hosts with
+// none are absent from the map.
+func (q querier) ListHostReplicaCounts(ctx context.Context) (map[uuid.UUID]int64, error) {
+	rows, err := q.queries.ListHostReplicaCounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[uuid.UUID]int64, len(rows))
+	for _, r := range rows {
+		out[r.HostID.UUID] = r.Replicas
+	}
+	return out, nil
 }
 
 func (q querier) UpsertApiserverInstance(ctx context.Context, id uuid.UUID, startedAt, now time.Time) error {

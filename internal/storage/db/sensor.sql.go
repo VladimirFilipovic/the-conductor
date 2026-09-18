@@ -13,14 +13,67 @@ import (
 	"github.com/google/uuid"
 )
 
-const listAgentHosts = `-- name: ListAgentHosts :many
-SELECT id, region, hostname, cpu_millicores, mem_bytes, disk_bytes, labels, status, last_heartbeat, created_at FROM hosts
+const completeDrainedHosts = `-- name: CompleteDrainedHosts :many
+UPDATE hosts SET status = 'cordoned', drain_started_at = NULL
+WHERE status = 'draining'
+  AND NOT EXISTS (
+      SELECT 1 FROM replicas r
+      WHERE r.host_id = hosts.id
+        AND r.volume_id IS NULL
+        AND r.phase NOT IN ('reaped', 'failed')
+  )
+RETURNING id, region, hostname, cpu_millicores, mem_bytes, disk_bytes, labels, status, last_heartbeat, created_at, host_healthy, drain_started_at
 `
 
-// Agent discovery: every host an agent could run on. Scheduling status is
-// deliberately ignored — an agent lives on the machine regardless, and a
-// notready host's agent must be able to enroll and heartbeat or a demoted
-// host could never heal back to ready.
+// A drain is done when nothing that can leave is left: stateless replicas
+// gone past reap (a drained one still runs until the window elapses, so it
+// counts). Stateful replicas are pinned to their volume and never move, so
+// they don't hold the drain open — the host lands in 'cordoned' with them
+// still on it, for the operator to migrate by hand. Fleet-wide, one statement.
+func (q *Queries) CompleteDrainedHosts(ctx context.Context) ([]Host, error) {
+	rows, err := q.db.QueryContext(ctx, completeDrainedHosts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Host
+	for rows.Next() {
+		var i Host
+		if err := rows.Scan(
+			&i.ID,
+			&i.Region,
+			&i.Hostname,
+			&i.CpuMillicores,
+			&i.MemBytes,
+			&i.DiskBytes,
+			&i.Labels,
+			&i.Status,
+			&i.LastHeartbeat,
+			&i.CreatedAt,
+			&i.HostHealthy,
+			&i.DrainStartedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAgentHosts = `-- name: ListAgentHosts :many
+SELECT id, region, hostname, cpu_millicores, mem_bytes, disk_bytes, labels, status, last_heartbeat, created_at, host_healthy, drain_started_at FROM hosts
+`
+
+// Agent discovery: every host an agent could run on. Health and status are
+// deliberately ignored — an agent lives on the machine regardless, and an
+// unhealthy host's agent must be able to enroll and heartbeat or a demoted
+// host could never heal back.
 func (q *Queries) ListAgentHosts(ctx context.Context) ([]Host, error) {
 	rows, err := q.db.QueryContext(ctx, listAgentHosts)
 	if err != nil {
@@ -41,6 +94,8 @@ func (q *Queries) ListAgentHosts(ctx context.Context) ([]Host, error) {
 			&i.Status,
 			&i.LastHeartbeat,
 			&i.CreatedAt,
+			&i.HostHealthy,
+			&i.DrainStartedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -56,9 +111,8 @@ func (q *Queries) ListAgentHosts(ctx context.Context) ([]Host, error) {
 }
 
 const listDeadHosts = `-- name: ListDeadHosts :many
-SELECT hosts.id, hosts.region, hosts.hostname, hosts.cpu_millicores, hosts.mem_bytes, hosts.disk_bytes, hosts.labels, hosts.status, hosts.last_heartbeat, hosts.created_at FROM hosts
-WHERE status IN ('ready', 'notready')
-  AND last_heartbeat IS NOT NULL
+SELECT hosts.id, hosts.region, hosts.hostname, hosts.cpu_millicores, hosts.mem_bytes, hosts.disk_bytes, hosts.labels, hosts.status, hosts.last_heartbeat, hosts.created_at, hosts.host_healthy, hosts.drain_started_at FROM hosts
+WHERE last_heartbeat IS NOT NULL
   AND last_heartbeat < $1
   AND EXISTS (
       SELECT 1 FROM replicas r
@@ -69,8 +123,8 @@ WHERE status IN ('ready', 'notready')
 `
 
 // Second staleness threshold: hosts silent long enough to be declared dead,
-// listed for MarkHostDown. Includes notready (the first threshold already
-// demoted them) but not cordoned/draining — those are operator desired state.
+// listed for MarkHostDown. Operator status is irrelevant here: a draining or
+// cordoned host that dies still holds replicas nobody else will free.
 // The EXISTS keeps the list level-triggered and self-quieting: once a host's
 // replicas are freed it stops matching, so an already-downed host isn't
 // re-marked every sweep.
@@ -94,6 +148,8 @@ func (q *Queries) ListDeadHosts(ctx context.Context, lastHeartbeatBefore sql.Nul
 			&i.Status,
 			&i.LastHeartbeat,
 			&i.CreatedAt,
+			&i.HostHealthy,
+			&i.DrainStartedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -157,6 +213,51 @@ func (q *Queries) ListReplicasByHost(ctx context.Context, hostID uuid.NullUUID) 
 	return items, nil
 }
 
+const listStalledDrains = `-- name: ListStalledDrains :many
+SELECT id, region, hostname, cpu_millicores, mem_bytes, disk_bytes, labels, status, last_heartbeat, created_at, host_healthy, drain_started_at FROM hosts
+WHERE status = 'draining' AND drain_started_at < $1
+ORDER BY drain_started_at
+`
+
+// Drains in flight longer than the caller's window: nothing acts on them,
+// the sweep only makes the stall visible (a region out of capacity, a
+// replacement that never turns healthy).
+func (q *Queries) ListStalledDrains(ctx context.Context, startedBefore sql.NullTime) ([]Host, error) {
+	rows, err := q.db.QueryContext(ctx, listStalledDrains, startedBefore)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Host
+	for rows.Next() {
+		var i Host
+		if err := rows.Scan(
+			&i.ID,
+			&i.Region,
+			&i.Hostname,
+			&i.CpuMillicores,
+			&i.MemBytes,
+			&i.DiskBytes,
+			&i.Labels,
+			&i.Status,
+			&i.LastHeartbeat,
+			&i.CreatedAt,
+			&i.HostHealthy,
+			&i.DrainStartedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listVolumesByHost = `-- name: ListVolumesByHost :many
 SELECT id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at FROM volumes
 WHERE host_id = $1
@@ -204,9 +305,8 @@ func (q *Queries) ListVolumesByHost(ctx context.Context, hostID uuid.NullUUID) (
 
 const markHostDown = `-- name: MarkHostDown :exec
 WITH downed AS (
-    UPDATE hosts SET status = 'notready'
+    UPDATE hosts SET host_healthy = false
     WHERE hosts.id = $1
-      AND hosts.status IN ('ready', 'notready')
       AND hosts.last_heartbeat IS NOT NULL
       AND hosts.last_heartbeat < $2
     RETURNING hosts.id
@@ -234,9 +334,10 @@ type MarkHostDownParams struct {
 // observation guard below owns it, so a partitioned-but-alive agent can't
 // resurrect a freed replica. Already-draining replicas keep their host
 // binding: they're retiring on the drain window regardless, and unassigning
-// them would erase the drain state.
+// them would erase the drain state. status is not touched: a draining host
+// that dies is still draining when it comes back.
 // The WHERE re-asserts staleness: a heartbeat landing between the sweep's
-// ListStaleHosts and this write refreshes last_heartbeat, so the recovered
+// ListDeadHosts and this write refreshes last_heartbeat, so the recovered
 // host matches nothing and keeps its replicas — downing rides on the
 // predicate, not on the sweep's possibly-stale list.
 func (q *Queries) MarkHostDown(ctx context.Context, arg MarkHostDownParams) error {
@@ -244,21 +345,22 @@ func (q *Queries) MarkHostDown(ctx context.Context, arg MarkHostDownParams) erro
 	return err
 }
 
-const markStaleHostsNotReady = `-- name: MarkStaleHostsNotReady :execrows
+const markStaleHostsUnhealthy = `-- name: MarkStaleHostsUnhealthy :execrows
 UPDATE hosts
-SET status = 'notready'
-WHERE status = 'ready'
+SET host_healthy = false
+WHERE host_healthy
   AND last_heartbeat IS NOT NULL
   AND last_heartbeat < $1
 `
 
 // First staleness threshold: a briefly-silent host stops receiving NEW work
-// (placer skips notready) but keeps its replicas — cheap and reversible, the
-// next heartbeat flips it straight back to ready. One fleet-wide statement,
-// no per-host loop. NULL last_heartbeat is excluded: a host that never
-// enrolled an agent (seeded dev fleet) isn't stale, it's static.
-func (q *Queries) MarkStaleHostsNotReady(ctx context.Context, lastHeartbeatBefore sql.NullTime) (int64, error) {
-	result, err := q.db.ExecContext(ctx, markStaleHostsNotReady, lastHeartbeatBefore)
+// (the placer's ledger holds healthy hosts only) but keeps its replicas —
+// cheap and reversible, the next heartbeat flips it straight back. One
+// fleet-wide statement, no per-host loop. NULL last_heartbeat is excluded: a
+// host that never enrolled an agent (seeded dev fleet) isn't stale, it's
+// static.
+func (q *Queries) MarkStaleHostsUnhealthy(ctx context.Context, lastHeartbeatBefore sql.NullTime) (int64, error) {
+	result, err := q.db.ExecContext(ctx, markStaleHostsUnhealthy, lastHeartbeatBefore)
 	if err != nil {
 		return 0, err
 	}
@@ -269,13 +371,12 @@ const recordHostHeartbeat = `-- name: RecordHostHeartbeat :exec
 
 UPDATE hosts
 SET last_heartbeat = $1,
-    status = CASE WHEN status IN ('ready', 'notready') THEN $2 ELSE status END
-WHERE id = $3
+    host_healthy = true
+WHERE id = $2
 `
 
 type RecordHostHeartbeatParams struct {
 	ObservedAt sql.NullTime `json:"observed_at"`
-	Status     string       `json:"status"`
 	HostID     uuid.UUID    `json:"host_id"`
 }
 
@@ -283,12 +384,10 @@ type RecordHostHeartbeatParams struct {
 // plus the watchdog sweep that turns silence into scheduling signal. The reconcile
 // loop never writes observed state and ingest/watchdog never write desired state —
 // these queries are the whole boundary.
-// Ingest a host agent's liveness ping. Status only moves between the
-// agent-owned states (ready/notready): a heartbeat must never un-cordon a host
-// an operator cordoned or is draining — those are desired-state decisions, not
-// observations.
+// Ingest a host agent's liveness ping. Only observed state moves: status is
+// operator intent and a heartbeat must never un-cordon or un-drain a host.
 func (q *Queries) RecordHostHeartbeat(ctx context.Context, arg RecordHostHeartbeatParams) error {
-	_, err := q.db.ExecContext(ctx, recordHostHeartbeat, arg.ObservedAt, arg.Status, arg.HostID)
+	_, err := q.db.ExecContext(ctx, recordHostHeartbeat, arg.ObservedAt, arg.HostID)
 	return err
 }
 

@@ -336,11 +336,14 @@ var newHealthOpenPastDeadline = rule{
 // not yet healthy (and within progress_deadline — past it, newHealthOpenPastDeadline
 // has already failed the deploy). Gates ramp-up/scale-down/complete until the
 // whole target set is healthy. Emits an explicit skip so the group's held state
-// is legible downstream instead of an ambiguous empty result.
+// is legible downstream instead of an ambiguous empty result. Checks raw
+// health, not healthyTargets: a healthy replica on a draining host is not
+// capacity, but it is not a rollout in flight either — holding on it would
+// deadlock the evacuation before its replacement is ever created.
 var notAllHealthy = rule{
 	name: "notAllHealthy",
 	when: func(rg replicaGroup) bool {
-		return healthyTargets(rg) < int32(len(rg.TargetReplicas))
+		return slices.ContainsFunc(rg.TargetReplicas, func(rp replica) bool { return !rp.Healthy })
 	},
 	then: func(rg replicaGroup) []Intent { return []Intent{{Kind: IntentSkip, Group: rg.Desired.Slot}} },
 }
@@ -378,10 +381,15 @@ var rollingRampUp = rule{
 	},
 }
 
+// healthyTargets is the group's serving capacity. A replica leaving with its
+// draining host is not capacity: not counting it makes rollingRampUp surge
+// the replacement first, and rollingScaleDown (below notAllHealthy) can only
+// retire it once that replacement is healthy — the host evacuates without the
+// group ever dipping below desired.
 func healthyTargets(rg replicaGroup) int32 {
 	var n int32
 	for _, rp := range rg.TargetReplicas {
-		if rp.Healthy {
+		if rp.Healthy && !rp.HostDraining {
 			n++
 		}
 	}
@@ -396,9 +404,16 @@ var rollingScaleDown = rule{
 	then: func(rg replicaGroup) []Intent {
 		n := len(rg.TargetReplicas) - int(rg.Desired.Replicas)
 		intents := make([]Intent, n)
-		// Drain newest-first: oldest replicas have the longest healthy history,
+		// Replicas on a draining host go first: they are why the excess exists.
+		// Then newest-first: oldest replicas have the longest healthy history,
 		// so shrinking sacrifices the least-established ones.
 		sortedReplicas := slices.SortedStableFunc(slices.Values(rg.TargetReplicas), func(a, b replica) int {
+			if a.HostDraining != b.HostDraining {
+				if a.HostDraining {
+					return -1
+				}
+				return 1
+			}
 			return b.CreatedAt.Compare(a.CreatedAt)
 		})
 		for i := range intents {

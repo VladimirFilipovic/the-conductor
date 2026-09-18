@@ -65,6 +65,11 @@ type replica struct {
 	// Current mirrors the deployment's is_current: true for the revision to
 	// converge toward, false for an outgoing revision to drain.
 	Current bool
+	// HostDraining: this replica leaves with its host. True only for a
+	// stateless replica on a host the operator is draining — a volume-pinned
+	// one cannot follow its host out (the volume stays), so the recreate
+	// cascade must never see it as departing and surge a second writer.
+	HostDraining bool
 }
 
 type host struct {
@@ -73,6 +78,10 @@ type host struct {
 	CPUMillicores int32
 	MemBytes      int64
 	DiskBytes     int64
+	// Open: operator status allows free placement. Every host in the snapshot
+	// is healthy; a cordoned/draining one is here only so a volume-pinned
+	// replica can return to it.
+	Open bool
 }
 
 type volume struct {
@@ -109,9 +118,10 @@ type SnapshotReader interface {
 	// Includes replicas still under a superseded deployment (an in-flight
 	// rollout); IsCurrent splits the new revision from the outgoing one.
 	ListActiveReplicas(ctx context.Context) ([]db.ListActiveReplicasRow, error)
-	// ListSchedulableHosts returns 'ready' hosts across all regions; the caller
-	// buckets by region for bin-packing.
-	ListSchedulableHosts(ctx context.Context) ([]db.Host, error)
+	// ListHealthyHosts returns every heartbeating host across all regions,
+	// operator status included; the placer filters on status for free
+	// placement and buckets by region for bin-packing.
+	ListHealthyHosts(ctx context.Context) ([]db.Host, error)
 	// ListActiveVolumes returns the disks of services with a current deployment,
 	// keyed by (service_id, region) against the stateful rows of SnapshotDesired.
 	ListActiveVolumes(ctx context.Context) ([]db.Volume, error)
@@ -144,7 +154,7 @@ func snapshotFrom(ctx context.Context, r SnapshotReader) (stateSnapshot, error) 
 	if err != nil {
 		return stateSnapshot{}, err
 	}
-	hosts, err := r.ListSchedulableHosts(ctx)
+	hosts, err := r.ListHealthyHosts(ctx)
 	if err != nil {
 		return stateSnapshot{}, err
 	}
@@ -202,6 +212,7 @@ func newStateSnapshot(
 			Revision:             r.Revision,
 			Version:              r.Version,
 			Current:              r.IsCurrent,
+			HostDraining:         r.HostDraining && !r.VolumeID.Valid,
 		})
 	}
 	for _, h := range hosts {
@@ -211,6 +222,7 @@ func newStateSnapshot(
 			CPUMillicores: h.CpuMillicores,
 			MemBytes:      h.MemBytes,
 			DiskBytes:     h.DiskBytes,
+			Open:          domain.HostStatus(h.Status) == domain.HostOpen,
 		})
 	}
 	for _, v := range volumes {

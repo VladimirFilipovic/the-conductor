@@ -18,7 +18,8 @@ VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING *;
 
 -- Reserve a replica onto a host — the predicated reservation. The WHERE
--- carries the real invariant (host ready, capacity still sufficient in every
+-- carries the real invariant (host healthy and open — or the replica is
+-- volume-pinned, which may return to a cordoned/draining host — capacity still sufficient in every
 -- dimension) instead of a version proxy: the old hosts.revision CAS aborted on
 -- ANY occupancy change, so two same-pass placements onto one half-empty host
 -- conflicted even when both fit. Summing live replicas makes the check
@@ -30,7 +31,7 @@ RETURNING *;
 -- it would block a re-place exactly when one is needed. (The in-memory placer
 -- counts them anyway; being more conservative than the belt is safe.)
 --
--- rows-affected = 0 means the replica vanished, the host stopped being ready,
+-- rows-affected = 0 means the replica vanished, the host stopped being eligible,
 -- or the demand genuinely no longer fits — all the same answer: drop the
 -- placement, next tick recomputes. Concurrency note: the check-and-write is
 -- atomic against writers of THIS replica row; placement itself stays
@@ -43,7 +44,8 @@ WHERE replicas.id = $1
   AND EXISTS (
     SELECT 1 FROM hosts h
     WHERE h.id = $2
-      AND h.status = 'ready'
+      AND h.host_healthy
+      AND (h.status = 'open' OR replicas.volume_id IS NOT NULL)
       AND (SELECT coalesce(sum(r.cpu_millicores), 0) FROM replicas r
            WHERE r.host_id = h.id AND r.phase NOT IN ('reaped', 'failed'))
           + replicas.cpu_millicores <= h.cpu_millicores

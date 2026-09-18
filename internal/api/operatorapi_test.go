@@ -33,6 +33,7 @@ type fakeOperatorStore struct {
 	desired      []db.TopologyDesiredRegionsRow
 	replicas     []db.TopologyReplicasRow
 	hosts        []db.Host
+	hostReplicas map[uuid.UUID]int64
 	served       []db.TopologyServedRow
 	projectSvcs  []db.ListProjectServicesRow
 	replicaIDs   []uuid.UUID
@@ -78,6 +79,12 @@ func (f *fakeOperatorStore) TopologyReplicas(_ context.Context, _ storage.Topolo
 
 func (f *fakeOperatorStore) TopologyHosts(_ context.Context, _ string) ([]db.Host, error) {
 	return f.hosts, nil
+}
+
+func (f *fakeOperatorStore) ListAgentHosts(context.Context) ([]db.Host, error) { return f.hosts, nil }
+
+func (f *fakeOperatorStore) ListHostReplicaCounts(context.Context) (map[uuid.UUID]int64, error) {
+	return f.hostReplicas, nil
 }
 
 func (f *fakeOperatorStore) TopologyServed(_ context.Context, _ storage.TopologyFilter) ([]db.TopologyServedRow, error) {

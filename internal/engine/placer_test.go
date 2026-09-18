@@ -28,7 +28,7 @@ func flatPlacement() config.Placement {
 }
 
 func testHost(n byte, region string, cpu int32, mem, disk int64) host {
-	return host{ID: pinnedID(n), Region: region, CPUMillicores: cpu, MemBytes: mem, DiskBytes: disk}
+	return host{ID: pinnedID(n), Region: region, CPUMillicores: cpu, MemBytes: mem, DiskBytes: disk, Open: true}
 }
 
 func hostlessReplica(n byte, slot replicaSlot, cpu int32, mem int64, phase domain.ReplicaPhase) replica {
@@ -456,5 +456,47 @@ func TestVolumeSteadyStates(t *testing.T) {
 				t.Fatalf("intents = %v, want none", got)
 			}
 		})
+	}
+}
+
+// Free placement lands only on open hosts: a cordoned or draining host is in
+// the ledger (its residual capacity still matters for the volume-pinned path)
+// but pick never chooses it, even when it is the roomier candidate.
+func TestPickSkipsClosedHosts(t *testing.T) {
+	region := "eu"
+	slot := replicaSlot{uuid.New(), region}
+	closed := testHost(1, region, 10_000, 1<<30, 0)
+	closed.Open = false
+	open := testHost(2, region, 1000, 1<<30, 0)
+	r := hostlessReplica(10, slot, 100, 100, domain.ReplicaPhasePending)
+
+	p := placer{cfg: flatPlacement()}
+	got := placedHosts(t, p.placeHostless(stateSnapshot{hosts: []host{closed, open}, replicas: []replica{r}}, assignIntents(r)))
+	if got[r.ID] != open.ID {
+		t.Fatalf("placed on %s, want the open host %s", got[r.ID], open.ID)
+	}
+
+	got = placedHosts(t, p.placeHostless(stateSnapshot{hosts: []host{closed}, replicas: []replica{r}}, assignIntents(r)))
+	if _, ok := got[r.ID]; ok {
+		t.Fatal("placed onto a closed host when it was the only candidate")
+	}
+}
+
+// A volume-pinned replica goes back to its volume's host regardless of that
+// host's operator status — the disk is there and nowhere else — as long as
+// the host is alive (in the ledger).
+func TestPinnedReplicaReturnsToDrainingHost(t *testing.T) {
+	region := "eu"
+	slot := replicaSlot{uuid.New(), region}
+	volHost := testHost(2, region, 1000, 1<<30, 1<<30)
+	volHost.Open = false
+	vol := volume{ID: pinnedID(40), ServiceID: uuid.New(), Region: region, HostID: volHost.ID, DesiredSizeBytes: 1 << 20}
+	r := hostlessReplica(10, slot, 100, 100, domain.ReplicaPhaseReplacing)
+	r.VolumeID = vol.ID
+
+	p := placer{cfg: flatPlacement()}
+	got := placedHosts(t, p.placeHostless(stateSnapshot{hosts: []host{volHost}, replicas: []replica{r}, volumes: []volume{vol}}, assignIntents(r)))
+	if got[r.ID] != volHost.ID {
+		t.Fatalf("pinned replica placed on %s, want its draining volume host %s", got[r.ID], volHost.ID)
 	}
 }

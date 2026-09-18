@@ -180,6 +180,10 @@ func (o *OperatorAPI) readTopology(ctx context.Context, filter storage.TopologyF
 	if err != nil {
 		return topologyJSON{}, err
 	}
+	hostReplicas, err := o.store.ListHostReplicaCounts(ctx)
+	if err != nil {
+		return topologyJSON{}, err
+	}
 	served, err := o.store.TopologyServed(ctx, filter)
 	if err != nil {
 		return topologyJSON{}, err
@@ -187,7 +191,7 @@ func (o *OperatorAPI) readTopology(ctx context.Context, filter storage.TopologyF
 
 	return topologyJSON{
 		Tree:   buildTree(projects, environments, buildServiceNodes(services, desired, replicas)),
-		Hosts:  hostsJSON(hosts),
+		Hosts:  hostsJSON(hosts, hostReplicas),
 		Served: servedRowsJSON(served),
 	}, nil
 }

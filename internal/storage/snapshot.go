@@ -17,11 +17,12 @@ type snapshotQuerier interface {
 	// Includes replicas still under a superseded deployment (an in-flight
 	// rollout); IsCurrent splits the new revision from the outgoing one.
 	ListActiveReplicas(ctx context.Context) ([]db.ListActiveReplicasRow, error)
-	// ListSchedulableHosts returns 'ready' hosts across all regions; the caller
-	// buckets by region for bin-packing.
-	ListSchedulableHosts(ctx context.Context) ([]db.Host, error)
+	// ListHealthyHosts returns every heartbeating host across all regions,
+	// operator status included; the placer filters on status for free
+	// placement and buckets by region for bin-packing.
+	ListHealthyHosts(ctx context.Context) ([]db.Host, error)
 	// ListAgentHosts returns every host an agent may attach as, regardless of
-	// schedulability — a cordoned or down host still has a session to serve.
+	// health or status — a cordoned or down host still has a session to serve.
 	ListAgentHosts(ctx context.Context) ([]db.Host, error)
 	// ListActiveVolumes returns the disks of services with a current deployment,
 	// keyed by (service_id, region) against the stateful rows of SnapshotDesired.
@@ -36,8 +37,8 @@ func (q querier) ListActiveReplicas(ctx context.Context) ([]db.ListActiveReplica
 	return q.queries.ListActiveReplicas(ctx)
 }
 
-func (q querier) ListSchedulableHosts(ctx context.Context) ([]db.Host, error) {
-	return q.queries.ListSchedulableHosts(ctx)
+func (q querier) ListHealthyHosts(ctx context.Context) ([]db.Host, error) {
+	return q.queries.ListHealthyHosts(ctx)
 }
 
 func (q querier) ListAgentHosts(ctx context.Context) ([]db.Host, error) {
