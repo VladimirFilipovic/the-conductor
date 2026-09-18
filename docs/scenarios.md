@@ -332,7 +332,10 @@ Model (v2, 2026-09-18):
   item. Odobren grow se odmah upiše u ledger — drugi grow na istom hostu u
   istom ticku vidi prvi (redosled po `id`).
 - **Novi status `resize_pending`** = tačno "grow tražen, host nema mesta".
-  Piše ga engine (`MarkVolumeResizePending`), nikad CLI.
+  Piše ga engine (`MarkVolumeResizePending`), nikad CLI. Važi i za nezdrav
+  host (van ledgera — ništa tu ne staje): grow se parkira, pa `revert` ostaje
+  dostupan dok je host dole, a settle grana ne treba ledger — revertovan volume
+  je `attached` već na sledećem ticku, ne kad se host vrati.
 - **Jedan grow u letu.** `update` prolazi samo za `pending` (neplasiran) ili
   `attached` **i konvergiran** (`observed == desired`, ili nikad javljeno);
   grow-only (`size > desired`).
@@ -405,6 +408,9 @@ Izmereno (2026-09-18 UTC, agentsim tick 1s, reconcile 2s; replika
   `attached` 15:29:20 (**3s** od diska)
 - stall 15:29:55 + `--size 70` → `resizing` 15:29:57, `ON DISK` 60GiB stoji
   4+ ticka; `volume_heal` 15:30:01 → `attached` 70GiB 15:30:03 (**2s**)
+
+Ponovljeno 17:15 UTC posle rebase-a na main (freeze/restart replika): isti
+ishodi, iste latencije (grow 3s, park 2s, revert 1s, heal 4s).
 
 Engine log: jedan INFO `volume grow waiting for host space` pri parkiranju,
 posle toga DEBUG `still waiting` po ticku; `volume grow approved` /

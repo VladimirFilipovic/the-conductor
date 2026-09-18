@@ -29,8 +29,11 @@ func (p *placer) planVolumes(snap stateSnapshot) []Intent {
 // the delta is exactly what the grow still has to find, and a resize item
 // may take the DiskReserve — see packItem.resize. An approved grow charges
 // its delta onto the ledger at once, so a second grow on the same host this
-// tick is judged against it. An unhealthy host is outside the ledger and
-// holds; a cordoned or draining one is in it and grows normally — the volume
+// tick is judged against it. An unhealthy host is outside the ledger, so a
+// grow there cannot fit and is parked like any other — that keeps `volume
+// revert` available while the host is down, and the settle branch needs no
+// ledger, so a revert lands as attached on the next tick regardless. A
+// cordoned or draining host is in the ledger and grows normally — the volume
 // is staying on it regardless.
 //
 // There is no failed exit. resize_pending is the only outcome for a grow
@@ -54,16 +57,11 @@ func (p *placer) resizeVolumes(snap stateSnapshot, led ledger) []Intent {
 
 		case v.Status == domain.VolumeAttached && v.Drifting(),
 			v.Status == domain.VolumeResizePending && v.Drifting():
+			// hl is nil for an unhealthy host: nothing fits there, so the grow
+			// parks and the operator keeps the revert exit.
 			hl := led[v.HostID]
-			if hl == nil {
-				// Unhealthy host: no ledger to judge against, and nothing the
-				// agent could do anyway — leave the status alone.
-				slog.Debug("reconcile -> volume grow waiting for host",
-					"volume", v.ID, "host", v.HostID, "desired", v.Desired, "observed", v.Observed)
-				continue
-			}
 			item := packItem{id: v.ID, region: v.Region, disk: v.GrowDelta(), resize: true}
-			if p.fits(item, hl) {
+			if hl != nil && p.fits(item, hl) {
 				led.commit(item, v.HostID)
 				intents = append(intents, Intent{Kind: IntentResizeVolume, VolumeID: v.ID})
 				slog.Info("reconcile -> volume grow approved",

@@ -124,9 +124,18 @@ func TestResizeVolumesStateMachine(t *testing.T) {
 			want:    nil,
 		},
 		{
-			name:    "volume on a host outside the ledger holds, status untouched",
+			// Unhealthy host: nothing fits, so the grow parks — the operator can
+			// still revert while the host is down.
+			name:    "drifting volume on a host outside the ledger is parked",
 			volumes: []volume{placedVolume(2, pinnedID(7), domain.VolumeAttached, 6*gib, 2*gib)},
-			want:    nil,
+			want:    []Intent{{Kind: IntentVolumeResizePending, VolumeID: pinnedID(2)}},
+		},
+		{
+			// The settle branch needs no ledger: a revert on a dead host lands
+			// as attached on the next tick, not when the host returns.
+			name:    "reverted volume on a host outside the ledger settles",
+			volumes: []volume{placedVolume(2, pinnedID(7), domain.VolumeResizePending, 2*gib, 2*gib)},
+			want:    []Intent{{Kind: IntentVolumeResized, VolumeID: pinnedID(2)}},
 		},
 		{
 			name:    "pending (hostless) volume is not a resize",
