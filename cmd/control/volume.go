@@ -21,10 +21,14 @@ are service-scoped, so no environment is needed).
 Subcommands:
   list                List the service's volumes.
   add --mount PATH    Attach a new volume (default 1 GiB; pass --size GiB).
-  update --size GiB   Grow the volume at --mount PATH (live, grow-only). The
-                      engine applies it once the host has room; until then
-                      list shows the volume attached with a pending grow, and
-                      update back to the on-disk size withdraws it.
+  update --size GiB   Grow the volume at --mount PATH (live, grow-only). One
+                      grow at a time: the engine approves it when the host has
+                      room (status resizing), otherwise parks it as
+                      resize_pending until space frees up.
+  revert --mount PATH Take back a grow the host could not hold: returns the
+                      size to what it was before update. Only while the volume
+                      is resize_pending — an approved grow (resizing) is
+                      already the agent's to finish.
   rm --mount PATH     Detach and delete the volume at the mount path.`
 
 // Sizes are entered in GiB on the CLI, stored as bytes in the control plane.
@@ -95,13 +99,21 @@ func cmdVolume(args []string) error {
 		switch {
 		case !vol.HostID.Valid:
 			fmt.Println("  not placed yet: the volume will be created at the new size")
-		case vol.ObservedSizeBytes.Valid && vol.DesiredSizeBytes == vol.ObservedSizeBytes.Int64:
-			fmt.Println("  matches what is on disk: pending grow withdrawn")
 		case out.WaitingForSpace:
-			fmt.Printf("  host is short %s of volume budget; the grow waits until space frees up (no action needed)\n", formatBytes(out.ShortfallBytes))
+			fmt.Printf("  host is short %s of volume budget; the grow waits as resize_pending until space frees up (volume revert takes it back)\n", formatBytes(out.ShortfallBytes))
 		default:
 			fmt.Println("  host has room: the grow starts on the next reconcile tick")
 		}
+		return nil
+	case "revert":
+		if *mount == "" {
+			return usageErr(volumeUsage, "volume revert requires --mount")
+		}
+		vol, err := proj.RevertVolume(ctx, t.Target, *mount)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("reverted volume at %s on service %q in project %s → %s (engine settles on next tick)\n", vol.MountPath, t.Service, t.Project, formatBytes(vol.DesiredSizeBytes))
 		return nil
 	case "rm", "remove", "delete":
 		if *mount == "" {
@@ -135,7 +147,7 @@ func renderVolumes(w *os.File, vols []db.Volume) {
 	fmt.Fprintln(tw, "MOUNT\tNAME\tREGION\tSIZE\tON DISK\tSTATUS")
 	for _, v := range vols {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			v.MountPath, v.Name, v.Region, formatBytes(v.DesiredSizeBytes), formatObserved(v), volumeStatusLabel(v))
+			v.MountPath, v.Name, v.Region, formatBytes(v.DesiredSizeBytes), formatObserved(v), v.Status)
 	}
 	_ = tw.Flush()
 }
@@ -145,17 +157,6 @@ func formatObserved(v db.Volume) string {
 		return "-"
 	}
 	return formatBytes(v.ObservedSizeBytes.Int64)
-}
-
-// volumeStatusLabel surfaces the one state the status column can't: attached
-// with desired above what's on disk is a grow the engine hasn't approved yet
-// (the host is out of room), which the operator should be able to see without
-// comparing two size columns.
-func volumeStatusLabel(v db.Volume) string {
-	if v.Status == "attached" && v.ObservedSizeBytes.Valid && v.DesiredSizeBytes > v.ObservedSizeBytes.Int64 {
-		return "attached (grow waiting for host space)"
-	}
-	return v.Status
 }
 
 // formatBytes renders GiB, the unit the CLI accepts; one decimal when the

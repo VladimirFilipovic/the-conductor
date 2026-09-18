@@ -2,11 +2,13 @@ package project
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"conductor/internal/config"
 	"conductor/internal/domain"
+	"conductor/internal/storage"
 	"conductor/internal/storage/db"
 	"conductor/internal/target"
 
@@ -58,21 +60,23 @@ func (s *Service) ListVolumes(ctx context.Context, t target.Target) ([]db.Volume
 // on the next tick or waits for host space.
 type ResizeOutcome struct {
 	Volume db.Volume
-	// WaitingForSpace: the host's volume budget can't absorb the new size right
-	// now. The request is kept — the engine re-checks every tick and approves
-	// the grow the moment the host has room (another volume leaves, disk is
-	// added); there is no failed state to clear.
+	// WaitingForSpace: the host's volume budget can't absorb the grow delta
+	// right now, so the engine will park the volume as resize_pending. The
+	// request is kept — the engine re-checks every tick and approves the grow
+	// the moment the host has room (another volume leaves, disk is added), and
+	// `volume revert` takes it back meanwhile; there is no failed state.
 	WaitingForSpace bool
 	// ShortfallBytes is how much room the host is missing; 0 when it fits.
 	ShortfallBytes int64
 }
 
-// ResizeVolume patches the desired size of the volume at mountPath; the reconcile
-// loop grows the disk to match (§4b grow-only). The floor is what's ON DISK,
-// not the previous desired: a desired below the observed size would never
-// converge (the agent never shrinks) and would sit as permanent drift, but
-// lowering a not-yet-approved grow back down to the disk is how an operator
-// takes back a request the host can't hold.
+// ResizeVolume requests a grow of the volume at mountPath; the reconcile loop
+// grows the disk to match (§4b grow-only). Only desired moves here — status is
+// the engine's — and only one grow may be in flight: the volume must be
+// unplaced, or attached and converged. A drifting volume the engine has not
+// classified yet (the tick between update and resize_pending/resizing) is
+// refused too, so the operator's second thought goes through revert, never a
+// second update that would lose the revert target.
 //
 // The space advisory is exactly that — advisory. It reuses the placer's
 // DiskBudget with the default knobs, so an engine started with a non-default
@@ -87,19 +91,21 @@ func (s *Service) ResizeVolume(ctx context.Context, t target.Target, mountPath s
 	if err != nil {
 		return ResizeOutcome{}, err
 	}
-	if sizeBytes == cur.DesiredSizeBytes {
+	sz := storage.SizingOf(cur)
+	if sz.Status != domain.VolumePending && sz.Status != domain.VolumeAttached {
+		return ResizeOutcome{}, fmt.Errorf("%w: volume at %q is %s; revert or wait for it to attach",
+			ErrInvalid, mountPath, sz.Status)
+	}
+	if sz.Drifting() {
+		return ResizeOutcome{}, fmt.Errorf("%w: volume at %q already has a grow requested (%d → %d bytes); revert first",
+			ErrInvalid, mountPath, sz.Observed, sz.Desired)
+	}
+	if sizeBytes == sz.Desired {
 		return ResizeOutcome{}, fmt.Errorf("%w: volume at %q is already %d bytes", ErrInvalid, mountPath, sizeBytes)
 	}
-	if cur.ObservedSizeBytes.Valid && sizeBytes < cur.ObservedSizeBytes.Int64 {
-		return ResizeOutcome{}, fmt.Errorf("%w: volume at %q has %d bytes on disk and resize is grow-only; %d requested",
-			ErrInvalid, mountPath, cur.ObservedSizeBytes.Int64, sizeBytes)
-	}
-	// While a grow is in flight the downlink hands the agent whatever desired
-	// says, so any change here would bypass the engine's disk gate. One resize
-	// at a time: wait for attached.
-	if cur.Status == string(domain.VolumeResizing) {
-		return ResizeOutcome{}, fmt.Errorf("%w: volume at %q is resizing to %d bytes; wait for it to attach",
-			ErrInvalid, mountPath, cur.DesiredSizeBytes)
+	if sizeBytes < sz.Desired {
+		return ResizeOutcome{}, fmt.Errorf("%w: volume at %q is %d bytes and resize is grow-only; %d requested",
+			ErrInvalid, mountPath, sz.Desired, sizeBytes)
 	}
 	vol, err := s.store.UpdateVolumeSize(ctx, id, mountPath, sizeBytes)
 	if err != nil {
@@ -109,17 +115,61 @@ func (s *Service) ResizeVolume(ctx context.Context, t target.Target, mountPath s
 	if !vol.HostID.Valid {
 		return out, nil // not placed yet: the placer sizes it at creation
 	}
-	c, err := s.store.HostVolumeCommitment(ctx, vol.HostID.UUID)
+	host, err := s.store.GetHost(ctx, vol.HostID.UUID)
 	if err != nil {
 		return out, err
 	}
-	// CommittedBytes already includes the size just written — the same
-	// "desired is a reservation" view the engine's ledger takes.
-	if budget := config.DefaultPlacement().DiskBudget(c.DiskBytes); c.CommittedBytes > budget {
+	onHost, err := s.store.ListVolumesByHost(ctx, host.ID)
+	if err != nil {
+		return out, err
+	}
+	// The same view the engine's ledger takes: every volume charges its
+	// Committed() bytes. The volume just updated still commits what's on disk
+	// (nothing is approved yet), so its grow delta is added explicitly — that
+	// delta is exactly the resize item the engine will try to fit.
+	var committed int64
+	for _, v := range onHost {
+		committed += storage.SizingOf(v).Committed()
+	}
+	need := committed + storage.SizingOf(vol).GrowDelta()
+	if budget := config.DefaultPlacement().DiskBudget(host.DiskBytes); need > budget {
 		out.WaitingForSpace = true
-		out.ShortfallBytes = c.CommittedBytes - budget
+		out.ShortfallBytes = need - budget
 	}
 	return out, nil
+}
+
+// RevertVolume takes back a grow the host could not hold: desired returns to
+// the size before `volume update`, once. Only a resize_pending volume
+// qualifies — resizing is already a promise to the agent, attached has
+// nothing outstanding, and a drifting volume the engine has not classified
+// yet needs one more tick. Status stays with the engine, which settles the
+// volume back to attached on its next tick (observed >= desired now holds).
+func (s *Service) RevertVolume(ctx context.Context, t target.Target, mountPath string) (db.Volume, error) {
+	id, err := serviceID(ctx, s.store, t)
+	if err != nil {
+		return db.Volume{}, err
+	}
+	cur, err := s.store.GetVolume(ctx, id, mountPath)
+	if err != nil {
+		return db.Volume{}, err
+	}
+	sz := storage.SizingOf(cur)
+	switch {
+	case sz.Status == domain.VolumeResizePending:
+	case sz.Status == domain.VolumeAttached && sz.Drifting():
+		return db.Volume{}, fmt.Errorf("%w: volume at %q has a grow the engine has not classified yet; retry in a moment",
+			ErrInvalid, mountPath)
+	default:
+		return db.Volume{}, fmt.Errorf("%w: volume at %q is %s; nothing to revert", ErrInvalid, mountPath, sz.Status)
+	}
+	vol, err := s.store.RevertVolumeSize(ctx, id, mountPath)
+	if errors.Is(err, storage.ErrNotFound) {
+		// The engine moved the volume between the two reads (approved it, or
+		// settled it) — the row exists, the state doesn't anymore.
+		return db.Volume{}, fmt.Errorf("%w: volume at %q changed state while reverting; retry", ErrInvalid, mountPath)
+	}
+	return vol, err
 }
 
 // RemoveVolume detaches and deletes the volume at mountPath. A volume still
@@ -140,7 +190,11 @@ type VolumeStore interface {
 	ListVolumesByService(ctx context.Context, projectName, service string) ([]db.Volume, error)
 	GetVolume(ctx context.Context, serviceID uuid.UUID, mountPath string) (db.Volume, error)
 	UpdateVolumeSize(ctx context.Context, serviceID uuid.UUID, mountPath string, sizeBytes int64) (db.Volume, error)
-	HostVolumeCommitment(ctx context.Context, hostID uuid.UUID) (db.HostVolumeCommitmentRow, error)
+	RevertVolumeSize(ctx context.Context, serviceID uuid.UUID, mountPath string) (db.Volume, error)
+	// GetHost + ListVolumesByHost feed the resize advisory: the host's disk
+	// and what its volumes already commit.
+	GetHost(ctx context.Context, hostID uuid.UUID) (db.Host, error)
+	ListVolumesByHost(ctx context.Context, hostID uuid.UUID) ([]db.Volume, error)
 	DeleteVolume(ctx context.Context, serviceID uuid.UUID, mountPath string) (db.Volume, error)
 }
 
