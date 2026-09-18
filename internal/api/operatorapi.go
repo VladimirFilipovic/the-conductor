@@ -39,13 +39,16 @@ type FleetReader interface {
 }
 
 // HostOperator holds the operator transitions no agent can report: host
-// scheduling state and the synthetic "row vanished" replica loss. The bool
-// results mean "the host was in a state the transition applies to".
+// scheduling state, the synthetic "row vanished" replica loss, and the thaw
+// of a frozen replica. The bool results mean "the host was in a state the
+// transition applies to"; RestartReplica says the same through
+// storage.ErrConflict, and storage.ErrNotFound for an unknown row.
 type HostOperator interface {
 	CordonHost(ctx context.Context, hostID uuid.UUID) (bool, error)
 	UncordonHost(ctx context.Context, hostID uuid.UUID) (bool, error)
 	DrainHost(ctx context.Context, hostID uuid.UUID) (bool, error)
 	DeleteReplica(ctx context.Context, replicaID uuid.UUID) error
+	RestartReplica(ctx context.Context, replicaID uuid.UUID) error
 }
 
 // OperatorAPIStore is what the OperatorAPI needs from storage;
@@ -82,6 +85,7 @@ func (o *OperatorAPI) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/replicas", o.listReplicas)
 	mux.HandleFunc("GET /v1/deployments/{id}/replicas", o.deploymentReplicas)
 	mux.HandleFunc("DELETE /v1/replicas/{id}", o.deleteReplica)
+	mux.HandleFunc("POST /v1/replicas/{id}/restart", o.restartReplica)
 
 	mux.HandleFunc("GET /v1/meta", o.meta)
 	mux.HandleFunc("GET /v1/topology", o.topology)

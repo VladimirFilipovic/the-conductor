@@ -253,9 +253,16 @@ func (a *AgentAPI) hostState(ctx context.Context, hostID uuid.UUID) (*agentpb.Ho
 	if err != nil {
 		return nil, [sha256.Size]byte{}, err
 	}
-	replicas := make([]*agentpb.Replica, len(rows))
-	for i, r := range rows {
-		replicas[i] = &agentpb.Replica{Id: r.ID.String(), Phase: r.Phase}
+	replicas := make([]*agentpb.Replica, 0, len(rows))
+	for _, r := range rows {
+		// The agent never learns the word "failed": a frozen replica is simply
+		// absent, which its agent reads as "tear the container down and stop
+		// reporting". The query already filters; this is the wire contract's
+		// own guard, so it holds for any store that feeds it.
+		if domain.ReplicaPhase(r.Phase) == domain.ReplicaPhaseFailed {
+			continue
+		}
+		replicas = append(replicas, &agentpb.Replica{Id: r.ID.String(), Phase: r.Phase})
 	}
 	slices.SortFunc(replicas, func(x, y *agentpb.Replica) int { return strings.Compare(x.Id, y.Id) })
 

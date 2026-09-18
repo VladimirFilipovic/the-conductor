@@ -1,9 +1,12 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
+
+	"conductor/internal/storage"
 
 	"github.com/google/uuid"
 )
@@ -41,5 +44,44 @@ func TestDeleteReplica(t *testing.T) {
 	}
 	if len(store.deleted) != 1 || store.deleted[0] != pinnedID(9) {
 		t.Errorf("deleted = %v, want [%s]", store.deleted, pinnedID(9))
+	}
+}
+
+// Restart maps the storage verdicts one-to-one: thawed → 200, unknown row →
+// 404, exists but not failed → 409, anything else → 500 with the cause kept
+// server-side.
+func TestRestartReplica(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		storeErr error
+		want     int
+	}{
+		{name: "bad id", path: "/v1/replicas/not-a-uuid/restart", want: http.StatusBadRequest},
+		{name: "thawed", path: "/v1/replicas/" + pinnedID(9).String() + "/restart", want: http.StatusOK},
+		{name: "unknown replica", path: "/v1/replicas/" + pinnedID(9).String() + "/restart", storeErr: storage.ErrNotFound, want: http.StatusNotFound},
+		{name: "not failed", path: "/v1/replicas/" + pinnedID(9).String() + "/restart", storeErr: storage.ErrConflict, want: http.StatusConflict},
+		{name: "storage failure", path: "/v1/replicas/" + pinnedID(9).String() + "/restart", storeErr: errors.New("boom"), want: http.StatusInternalServerError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &fakeOperatorStore{restartErr: tt.storeErr}
+			rec := do(t, NewOperatorAPI(store, &fakeDesired{}), http.MethodPost, tt.path, "")
+			if rec.Code != tt.want {
+				t.Fatalf("status = %d, want %d (body %s)", rec.Code, tt.want, rec.Body)
+			}
+			if tt.want == http.StatusBadRequest {
+				if len(store.restarted) != 0 {
+					t.Errorf("bad id reached the store: %v", store.restarted)
+				}
+				return
+			}
+			if len(store.restarted) != 1 || store.restarted[0] != pinnedID(9) {
+				t.Errorf("restarted = %v, want [%s]", store.restarted, pinnedID(9))
+			}
+			if tt.want == http.StatusInternalServerError && strings.Contains(rec.Body.String(), "boom") {
+				t.Errorf("driver text leaked to the client: %s", rec.Body)
+			}
+		})
 	}
 }

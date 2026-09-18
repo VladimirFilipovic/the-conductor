@@ -194,6 +194,33 @@ func TestVolumeTargetSizeGatesGrowOnResizing(t *testing.T) {
 	}
 }
 
+// A frozen (failed) replica leaves the HostState instead of travelling with a
+// phase the agent would have to interpret — and its disappearance is a
+// digest change, so the agent is woken to tear the container down.
+func TestHostStateHidesFailedReplicas(t *testing.T) {
+	store := &fakeAgentStore{script: []scriptedRead{
+		{rows: replicaRows("active", "active")},
+		{rows: replicaRows("active", "failed")},
+	}}
+	api := newTestAgentAPI(store)
+	ctx := context.Background()
+
+	_, before, err := api.hostState(ctx, pinnedID(1))
+	if err != nil {
+		t.Fatalf("hostState: %v", err)
+	}
+	state, after, err := api.hostState(ctx, pinnedID(1))
+	if err != nil {
+		t.Fatalf("hostState: %v", err)
+	}
+	if len(state.Replicas) != 1 || state.Replicas[0].Id != pinnedID(1).String() {
+		t.Fatalf("replicas = %v, want only the live one; the agent must never see 'failed'", state.Replicas)
+	}
+	if before == after {
+		t.Error("digest unchanged when a replica froze; the agent would keep restarting it")
+	}
+}
+
 // Volumes travel with the replicas, sorted, and a volume-only change is a
 // state change: the digest moves, the agent wakes.
 func TestHostStateCarriesVolumesAndDigestsThem(t *testing.T) {

@@ -47,6 +47,9 @@ type fakeOperatorStore struct {
 	transitionErr     error
 	transitioned      []uuid.UUID
 	deleted           []uuid.UUID
+	// Restart answers with restartErr (nil = thawed) and records the replica.
+	restartErr error
+	restarted  []uuid.UUID
 }
 
 func (f *fakeOperatorStore) ListProjectNames(_ context.Context, project string) ([]string, error) {
@@ -115,6 +118,11 @@ func (f *fakeOperatorStore) DrainHost(_ context.Context, hostID uuid.UUID) (bool
 func (f *fakeOperatorStore) DeleteReplica(_ context.Context, replicaID uuid.UUID) error {
 	f.deleted = append(f.deleted, replicaID)
 	return f.transitionErr
+}
+
+func (f *fakeOperatorStore) RestartReplica(_ context.Context, replicaID uuid.UUID) error {
+	f.restarted = append(f.restarted, replicaID)
+	return f.restartErr
 }
 
 // fakeDesired records what the handlers hand the project layer, and can answer

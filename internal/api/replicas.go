@@ -1,10 +1,12 @@
 package api
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
 
+	"conductor/internal/storage"
 	"conductor/internal/storage/db"
 
 	"github.com/google/uuid"
@@ -79,5 +81,31 @@ func (o *OperatorAPI) deleteReplica(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.Info("operatorapi -> replica deleted", "replica", replicaID)
+	writeJSON(w, http.StatusOK, okJSON{OK: true})
+}
+
+// restartReplica thaws a frozen (failed) replica: the row goes hostless
+// 'replacing' with a fresh restart budget and the reconciler re-places it
+// next tick — the same route a host death takes. Only failed replicas
+// qualify; a live one is 409, since restarting it is the agent's business,
+// not the control plane's.
+func (o *OperatorAPI) restartReplica(w http.ResponseWriter, r *http.Request) {
+	replicaID, ok := pathID(w, r, "replica")
+	if !ok {
+		return
+	}
+	err := o.store.RestartReplica(r.Context(), replicaID)
+	switch {
+	case errors.Is(err, storage.ErrNotFound):
+		writeError(w, http.StatusNotFound, errors.New("restart: no such replica"))
+		return
+	case errors.Is(err, storage.ErrConflict):
+		writeError(w, http.StatusConflict, errors.New("restart: replica is not failed"))
+		return
+	case err != nil:
+		writeInternalError(w, r, err)
+		return
+	}
+	slog.Info("operatorapi -> replica restart requested", "replica", replicaID)
 	writeJSON(w, http.StatusOK, okJSON{OK: true})
 }
