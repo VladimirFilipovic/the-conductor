@@ -17,6 +17,7 @@ import {
 import {
   phaseClass,
   deployStatusClass,
+  hostHealthClass,
   hostStatusClass,
   shortId,
   relativeTime,
@@ -96,7 +97,7 @@ const HOST_ACTS: Act[] = [
   {
     key: "host_recover",
     label: "Recover",
-    hint: "Agent resumes heartbeating; host returns to ready.",
+    hint: "Agent resumes heartbeating; host is healthy again.",
   },
   {
     key: "cordon_host",
@@ -106,7 +107,7 @@ const HOST_ACTS: Act[] = [
   {
     key: "drain_host",
     label: "Drain",
-    hint: "Engine evacuates replicas off this host.",
+    hint: "Stateless replicas get replacements elsewhere, then retire; host ends cordoned. Stateful stay.",
   },
 ];
 
@@ -407,10 +408,19 @@ function HostsPanel({ hosts, chaos }: { hosts: HostRow[]; chaos: ChaosFn }) {
             <div className="min-w-0 flex-1">
               <div className="mono truncate text-sm">{h.hostname}</div>
               <div className="mono text-[0.68rem] text-[var(--color-faint)]">
-                {h.region} · hb {relativeTime(h.last_heartbeat)}
+                {h.region} · hb {relativeTime(h.last_heartbeat)} ·{" "}
+                {h.replicas_on_host} repl
+                {h.status === "draining" && h.drain_started_at
+                  ? ` · draining since ${relativeTime(h.drain_started_at)}`
+                  : ""}
               </div>
             </div>
-            <Badge className={hostStatusClass(h.status)}>{h.status}</Badge>
+            <Badge className={hostHealthClass(h.host_healthy)}>
+              {h.host_healthy ? "healthy" : "unhealthy"}
+            </Badge>
+            {h.status !== "open" && (
+              <Badge className={hostStatusClass(h.status)}>{h.status}</Badge>
+            )}
             <ActionMenu
               items={toItems(HOST_ACTS, (a) => chaos(a, h.id, h.hostname))}
             />

@@ -30,14 +30,21 @@ export function deployStatusClass(status: string): string {
   return map[status] ?? NEUTRAL;
 }
 
+// Operator intent for the host. Health is a separate badge (hostHealthClass):
+// a draining host can be perfectly healthy, and an unhealthy one still open.
 export function hostStatusClass(status: string): string {
   const map: Record<string, string> = {
-    ready: "bg-emerald-500/10 text-emerald-700 border-emerald-400/40",
-    notready: "bg-red-500/10 text-red-700 border-red-400/40",
+    open: "bg-emerald-500/10 text-emerald-700 border-emerald-400/40",
     draining: "bg-orange-500/10 text-orange-700 border-orange-400/40",
     cordoned: "bg-zinc-500/10 text-zinc-600 border-zinc-400/40",
   };
   return map[status] ?? NEUTRAL;
+}
+
+export function hostHealthClass(healthy: boolean): string {
+  return healthy
+    ? "bg-emerald-500/10 text-emerald-700 border-emerald-400/40"
+    : "bg-red-500/10 text-red-700 border-red-400/40";
 }
 
 export function levelClass(level: string): string {

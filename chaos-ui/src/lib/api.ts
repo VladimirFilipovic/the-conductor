@@ -49,11 +49,17 @@ export interface ServiceNode {
   replicas: ReplicaRow[];
 }
 
+// Two owners, two fields: host_healthy is what the heartbeat says, status is
+// what the operator asked for (open | cordoned | draining). A drain in flight
+// also carries when it started and how much is still on the host.
 export interface HostRow {
   id: string;
   region: string;
   hostname: string;
+  host_healthy: boolean;
   status: string;
+  drain_started_at: string | null;
+  replicas_on_host: number;
   last_heartbeat: string | null;
   cpu_millicores: number;
   mem_bytes: number;
