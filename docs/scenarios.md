@@ -104,20 +104,121 @@ hostova (agenti još u backoff-u) → agenti nazad +39s → heartbeat vratio `re
 `hostless=0`, `active=2` tokom celog ciklusa — nijedna replika ni restartovana
 ni pomerena.
 
-## 4. Crash-loop replike — restart budžet
+## 4. Crash-loop replike u rollout-u — restart budžet obara deployment
 
 Zahtev: kontejner koji stalno umire ne sme da vrti sistem u krug zauvek.
+
+Važi **samo za rollout u toku** (deployment `pending`/`draining`): tu je
+prekršilac kanarinac ili njegov batch, pa je sumnjiva sama revizija. Za
+deployment koji je već `active` vidi 4b — tamo se zamrzava samo replika.
 
 - chaos `replica_crashloop <replica>` → restart_count raste svaki tick
 - kad pređe `restart_max`, reconciler-ovo `crashLooping` pravilo obara **ceo
   deployment** u `failed` i `deploymentFrozen` ga zamrzava: nema re-place-a,
-  nema zamene, replika ostaje da se vrti dok operator ne uradi redeploy/rollback
-- to je namerno: iscrpljen restart budžet je signal za čoveka, ne za automatiku
+  nema zamene, stara verzija (outgoing) nastavlja da služi
+- to je namerno: iscrpljen restart budžet u rollout-u je signal za čoveka, ne
+  za automatiku
 - chaos `replica_heal <replica>` posle toga vraća kontejner u normalan hod, ali
   deployment ostaje `failed` — jedini izlaz je `conductor up`/`rollback`
 
 Izmereno (kroz chaos-ui): restart_max=5 → deployment `failed` za ~6s; replika
 ostala `starting` sa restart_count u stotinama dok nije stigao sledeći deploy.
+(Merenje je pre 4b; kanarinac u rollout-u i danas ostaje da se vrti dok
+rollback/redeploy ne stigne — zamrzavanje replike je rezervisano za aktivan
+deployment.)
+
+## 4b. Crash-loop u aktivnom deploymentu — zamrzni repliku
+
+Zahtev: jedna loša replika u deploymentu koji je već `active` ne sme da obori
+ceo deployment niti da se vrti zauvek; ostatak grupe nastavlja da služi,
+degradiranost je vidljiva, operator bira šta dalje.
+
+Model: `crashLooping` gleda status deploymenta. Za `active` emituje
+`IntentFreezeReplica` **samo za prekršioce** (ne `IntentFail`). Actuator →
+`FreezeReplica`: `phase='failed', healthy=false` uz guard na fazu (kao
+`MarkHostDown`), **bez revision CAS-a** — sensor bumpuje `revision` svake
+sekunde pa bi CAS stalno gubio, a odluka zavisi samo od monotonog
+`restart_count`. Posledice zatvaraju krug:
+
+- `RecordReplicaObservation` odbija izveštaje za `failed` → `restart_count`
+  ostaje zaleđen na vrednosti koja je prešla max
+- `ListReplicasByHost` (+ guard u `hostState`) ne šalje `failed` agentu →
+  replika nestane iz `HostState`, agent obriše kontejner i prestane da
+  izveštava; agent nikad ne uči reč `failed`
+- snapshot je i dalje vidi (`phase<>'reaped'`), ali `buildReplicaGroups` je
+  stavlja u treću korpu `FrozenReplicas` — nije u `TargetReplicas`, pa je
+  `crashLooping`/`notAllHealthy`/`newHealthOpenPastDeadline` ne vide
+- **bez zamene**: `rollingRampUp`/`recreateRampUp` broje `healthy + frozen`
+  prema desired (`heldSlots`) — frozen drži slot; crash-loop je skoro uvek
+  image/config, klon bi crashovao isto. Stateful frozen replika drži i lease.
+- `rollingScaleDown` troši višak prvo na frozen (`destroy`, bez drain prozora),
+  pa tek onda draina žive newest-first
+- `rolloutComplete` isto broji `heldSlots`: rollback na reviziju sa zamrznutom
+  replikom završi kao `active` (degradiran), ne visi u `draining`
+- status deploymenta ostaje `active`; degradiranost je izvedena u read path-u:
+  `conductor status` piše `active (degraded)` kad `healthy < desired`, chaos-ui
+  badge isto (žuto `v1 · active · degraded`)
+
+Odmrzavanje (tri puta, svi postoje):
+
+1. `POST /v1/replicas/{id}/restart` (UI "Restart (thaw)", samo na `failed`) →
+   red ide u hostless `replacing`, `restart_count=0` → `anyHostlessReplicas` →
+   placer → `scheduling` → agent digne novi kontejner bez chaos moda
+2. `DELETE /v1/replicas/{id}` → red nestane, `rollingRampUp` vidi deficit →
+   nova replika (ručna "jedna zamena")
+3. `conductor up` / `rollback` → frozen postane outgoing, `reapFailedOutgoing`
+   je obriše bez drain prozora dok stara živa replika još draina
+
+Postavka (paralelan stack `-p freeze`, apiserver :27080, agentsim :27780):
+
+```bash
+mkdir demo && cd demo
+export CONDUCTOR_DATABASE_URL=postgres://conductor:conductor@localhost:25432/conductor?sslmode=disable
+conductor init -n freeze-demo
+conductor add --service --name web --image nginx:alpine
+printf '[deploy]\nnum_replicas = 2\nregion = "us-east-1"\nrestart_max_retries = 5\ndrain_seconds = 10\ncpu = "200m"\nmemory = "128Mi"\n' > config.toml
+conductor up -s web
+A=<id replike>   # iz GET :27080/v1/topology
+curl -XPOST localhost:27780/chaos -d "{\"action\":\"replica_crashloop\",\"replica\":\"$A\"}"
+conductor status                                   # active (degraded) 1/2
+curl -XPOST localhost:27080/v1/replicas/$A/restart # 200; 409 ako nije failed, 404 nepoznat
+curl -XDELETE localhost:27080/v1/replicas/$A       # ručna zamena
+conductor up -s web                                # v2 pokupi frozen kao failed outgoing
+```
+
+Izmereno (2026-09-18, reconcile 2s, agentsim tick 1s, restart_max 5, poller
+nad `/v1/topology` koji loguje samo promene):
+
+- **freeze**: chaos 17:42:55 → `restarts` 1..5 po sekundi → +7s replika A
+  `failed`, `healthy=false`, `restart_count` zaleđen na 6 (u drugom prolazu
+  na 7 — tick od 2s ju je uhvatio jedan restart kasnije); deployment ceo
+  period `active`, `healthy=1/2 observed=2`; agentsim `/agents` za A-in host
+  `containers: []` (kontejner obrisan, izveštaji stali); **nema nove
+  replike** ni posle 10+ tikova; `conductor status` → `active (degraded)  2  1/2`
+- **restart**: `POST …/restart` 17:43:27 (200) → +1s `health_check`
+  `restart_count=0` → +2s `active healthy=true`, deployment `2/2`, status
+  bez `(degraded)`. Replika se vratila na isti host (slot još slobodan);
+  drugi `restart` → 409, restart žive replike → 409, nepoznat id → 404
+- **delete**: crashloop 17:43:46 → frozen +8s → `DELETE` 17:43:58 → red
+  `GONE` odmah, `observed=1` → +2s nova replika `pending` → +4s
+  `health_check` na istom hostu → +5s `active`, `2/2`
+- **redeploy**: crashloop 17:44:48 → frozen +8s → `conductor up` (v2)
+  17:45:00 → +2s v2 kanarinac → +5s healthy → +6s druga v2 → +9s healthy,
+  `2/2` → +10s živa v1 `draining` (traffic switch) → **+12s frozen v1 `GONE`**
+  (`reapFailedOutgoing`, bez drain prozora, dok živa još draina) → +21s živa
+  v1 `GONE` (drain 10s) → +23s v2 `active 2/2`
+- **stateful** (`add --database --engine postgres --name pg`, `volume add
+  --mount /var/lib/postgresql/data --size 2 -s pg`, `up -s pg -f pg-config.toml`
+  sa `num_replicas=1`): crashloop 17:50:01 → frozen +5s (`restart_count` 6);
+  10s posle: `active healthy=0/1 observed=1`, **nema create**, lease u
+  `volume_leases` i dalje na frozen replici (live). `POST …/restart` 17:50:17
+  → +3s `active healthy=true`, na **istom hostu kao volumen** (`ue1-small-1`,
+  pinovana grana placera), lease ponovo uzet istom replikom
+
+Napomena (zabeleženo, nije popravljano): SQL pojas `ReserveReplicaOnHost` ne
+broji `failed` replike u kapacitet hosta, in-memory ledger placera
+(`placer.go`) ih broji — dva ledgera se ne slažu dok replika stoji frozen.
+Zato restart ide kroz hostless `replacing`, ne "na isti host".
 
 ## 5. Zaglavljen health check — progress deadline
 
@@ -239,6 +340,16 @@ pa bi svaka promena preskočila disk gate; jedan resize u letu, čeka se
   `force`, 409 samo ako već draina)
 - `uncordon` (samo API, `POST /v1/hosts/{id}/uncordon`): vraća i `cordoned` i
   `draining` host u `open` i briše `drain_started_at` — tako se drain otkazuje
+- `restart` replike (UI "Restart (thaw)" na `failed` replici →
+  `POST /v1/replicas/{id}/restart`): odmrzava repliku zamrznutu u 4b — red ide u
+  hostless `replacing` sa `restart_count=0`, placer je smesti sledeći tick
+  (isti put kao smrt hosta; "isti host" nije garantovan jer DB pojas failed
+  repliku ne broji u kapacitet, pa je slot mogao biti popunjen). 404 nepoznat
+  id, 409 ako replika nije `failed` — živu repliku restartuje agent, ne
+  control plane
+- `delete` replike (UI "Orphan", `DELETE /v1/replicas/{id}`): na zamrznutoj
+  replici je ovo ručna "jedna zamena" — red nestane, `rollingRampUp` vidi
+  deficit i napravi novu
 - `conductor rollback`: vrati prethodnu verziju deploymenta
 
 ### 12. Drain hosta — graciozna evakuacija
