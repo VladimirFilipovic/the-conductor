@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"conductor/internal/storage/db"
+
+	"github.com/google/uuid"
 )
 
 // newTestClient connects to the DSN in CONDUCTOR_TEST_DSN, skipping the test
@@ -203,16 +205,58 @@ func TestVolumeResizeGuards(t *testing.T) {
 		t.Fatalf("AssignVolumeHost: %v", err)
 	}
 
-	// Never observed: no drift, the approve predicate refuses.
-	if _, err := c.UpdateVolumeSize(ctx, svc.ID, "/data", 4<<30); err != nil {
+	// Never observed: no drift, neither the park nor the approve predicate
+	// fires; update still remembers the size it replaced.
+	upd, err := c.UpdateVolumeSize(ctx, svc.ID, "/data", 4<<30)
+	if err != nil {
 		t.Fatalf("UpdateVolumeSize: %v", err)
+	}
+	if !upd.PreviousDesiredSizeBytes.Valid || upd.PreviousDesiredSizeBytes.Int64 != 2<<30 || upd.Status != "attached" {
+		t.Fatalf("after update = previous %v status %s, want previous 2GiB, status untouched", upd.PreviousDesiredSizeBytes, upd.Status)
+	}
+	if err := c.MarkVolumeResizePending(ctx, v.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("MarkVolumeResizePending on never-observed = %v, want ErrConflict", err)
 	}
 	if err := c.MarkVolumeResizing(ctx, v.ID); !errors.Is(err, ErrConflict) {
 		t.Fatalf("MarkVolumeResizing on never-observed = %v, want ErrConflict", err)
 	}
+	// Not resize_pending: nothing to revert yet.
+	if _, err := c.RevertVolumeSize(ctx, svc.ID, "/data"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("RevertVolumeSize while attached = %v, want ErrNotFound", err)
+	}
 
+	// Drifting without room: park, then revert, then settle.
 	if err := c.RecordVolumeObservedSize(ctx, v.ID, 2<<30); err != nil {
 		t.Fatalf("RecordVolumeObservedSize: %v", err)
+	}
+	if err := c.MarkVolumeResizePending(ctx, v.ID); err != nil {
+		t.Fatalf("MarkVolumeResizePending with drift: %v", err)
+	}
+	if err := c.MarkVolumeResizePending(ctx, v.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("MarkVolumeResizePending twice = %v, want ErrConflict (no longer attached)", err)
+	}
+	if err := c.MarkVolumeAttached(ctx, v.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("MarkVolumeAttached on drifting resize_pending = %v, want ErrConflict", err)
+	}
+	rev, err := c.RevertVolumeSize(ctx, svc.ID, "/data")
+	if err != nil {
+		t.Fatalf("RevertVolumeSize in resize_pending: %v", err)
+	}
+	if rev.DesiredSizeBytes != 2<<30 || rev.PreviousDesiredSizeBytes.Valid || rev.Status != "resize_pending" {
+		t.Fatalf("after revert = desired %d previous %v status %s, want 2GiB, NULL, status untouched",
+			rev.DesiredSizeBytes, rev.PreviousDesiredSizeBytes, rev.Status)
+	}
+	if _, err := c.RevertVolumeSize(ctx, svc.ID, "/data"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("second RevertVolumeSize = %v, want ErrNotFound (one-shot)", err)
+	}
+	if err := c.MarkVolumeAttached(ctx, v.ID); err != nil {
+		t.Fatalf("MarkVolumeAttached settling a reverted resize_pending: %v", err)
+	}
+
+	// Drifting with room: approve straight from attached, resizing is
+	// committed (no revert), settle once the agent catches up.
+	if _, err := c.UpdateVolumeSize(ctx, svc.ID, "/data", 4<<30); err != nil {
+		t.Fatalf("UpdateVolumeSize: %v", err)
 	}
 	if err := c.MarkVolumeResizing(ctx, v.ID); err != nil {
 		t.Fatalf("MarkVolumeResizing with drift: %v", err)
@@ -220,8 +264,9 @@ func TestVolumeResizeGuards(t *testing.T) {
 	if err := c.MarkVolumeResizing(ctx, v.ID); !errors.Is(err, ErrConflict) {
 		t.Fatalf("MarkVolumeResizing twice = %v, want ErrConflict (already resizing)", err)
 	}
-
-	// Still growing: settle refuses until observed reaches desired.
+	if _, err := c.RevertVolumeSize(ctx, svc.ID, "/data"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("RevertVolumeSize while resizing = %v, want ErrNotFound", err)
+	}
 	if err := c.MarkVolumeAttached(ctx, v.ID); !errors.Is(err, ErrConflict) {
 		t.Fatalf("MarkVolumeAttached before catch-up = %v, want ErrConflict", err)
 	}
@@ -238,6 +283,9 @@ func TestVolumeResizeGuards(t *testing.T) {
 	if got.Status != "attached" || !got.ObservedSizeBytes.Valid || got.ObservedSizeBytes.Int64 != 4<<30 {
 		t.Fatalf("settled volume = status %s observed %v, want attached at 4GiB", got.Status, got.ObservedSizeBytes)
 	}
+	if sz := SizingOf(got); !sz.CaughtUp() || sz.Committed() != 4<<30 {
+		t.Fatalf("SizingOf(settled) = %+v, want caught up and committing 4GiB", sz)
+	}
 
 	byHost, err := c.ListVolumesByHost(ctx, host.ID)
 	if err != nil {
@@ -251,12 +299,15 @@ func TestVolumeResizeGuards(t *testing.T) {
 		t.Fatalf("ListVolumesByHost(%s) missing %s", host.ID, v.ID)
 	}
 
-	commit, err := c.HostVolumeCommitment(ctx, host.ID)
+	h, err := c.GetHost(ctx, host.ID)
 	if err != nil {
-		t.Fatalf("HostVolumeCommitment: %v", err)
+		t.Fatalf("GetHost: %v", err)
 	}
-	if commit.DiskBytes != host.DiskBytes || commit.CommittedBytes < 4<<30 {
-		t.Fatalf("HostVolumeCommitment = %+v, want disk %d and at least 4GiB committed", commit, host.DiskBytes)
+	if h.DiskBytes != host.DiskBytes {
+		t.Fatalf("GetHost disk = %d, want %d", h.DiskBytes, host.DiskBytes)
+	}
+	if _, err := c.GetHost(ctx, uuid.New()); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetHost unknown = %v, want ErrNotFound", err)
 	}
 	if _, err := c.GetVolume(ctx, svc.ID, "/missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("GetVolume missing = %v, want ErrNotFound", err)

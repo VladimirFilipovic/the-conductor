@@ -193,17 +193,41 @@ const markVolumeAttached = `-- name: MarkVolumeAttached :execrows
 UPDATE volumes
 SET status = 'attached'
 WHERE id = $1
-  AND status = 'resizing'
+  AND status IN ('resizing', 'resize_pending')
   AND observed_size_bytes >= desired_size_bytes
 `
 
-// Settle a grow: resizing → attached once the agent reports the disk has
-// reached the desired size. The predicate closes the gap where the operator
-// bumped desired again between snapshot and commit: settling then would leave
-// an attached volume with drift and no resizing to unlock it, so the intent
-// drops and next tick keeps waiting on the new target.
+// Settle: resizing or resize_pending → attached once the disk holds at least
+// desired. Covers the end of a grow (the agent reported the new size) and a
+// revert out of resize_pending (desired came back down to the disk). The
+// predicate mirrors domain.VolumeSizing.CaughtUp and closes the gap where the
+// operator bumped desired again between snapshot and commit: settling then
+// would leave an attached volume with drift, so the intent drops and next
+// tick classifies the new target.
 func (q *Queries) MarkVolumeAttached(ctx context.Context, id uuid.UUID) (int64, error) {
 	result, err := q.db.ExecContext(ctx, markVolumeAttached, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const markVolumeResizePending = `-- name: MarkVolumeResizePending :execrows
+UPDATE volumes
+SET status = 'resize_pending'
+WHERE id = $1
+  AND status = 'attached'
+  AND observed_size_bytes IS NOT NULL
+  AND desired_size_bytes > observed_size_bytes
+`
+
+// Park a grow: attached → resize_pending when the host has no room for the
+// delta. The predicate mirrors domain.VolumeSizing.Drifting — still attached,
+// the agent has reported, desired above observed — so a settle or a revert
+// that landed between snapshot and commit drops the intent. rows-affected = 0
+// is the lost race.
+func (q *Queries) MarkVolumeResizePending(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.ExecContext(ctx, markVolumeResizePending, id)
 	if err != nil {
 		return 0, err
 	}
@@ -214,17 +238,17 @@ const markVolumeResizing = `-- name: MarkVolumeResizing :execrows
 UPDATE volumes
 SET status = 'resizing'
 WHERE id = $1
-  AND status = 'attached'
+  AND status IN ('attached', 'resize_pending')
   AND observed_size_bytes IS NOT NULL
   AND desired_size_bytes > observed_size_bytes
 `
 
-// Approve a grow: attached → resizing. The predicate re-asserts what the
-// reconciler decided on — still attached, still drifting — so a settle or a
-// shrink that landed between snapshot and commit drops the intent instead of
-// flipping a converged volume back into resizing. rows-affected = 0 is the
-// lost race. Never-observed volumes (NULL) don't drift: the agent takes
-// desired as its first size.
+// Approve a grow: attached or resize_pending → resizing. The predicate
+// mirrors domain.VolumeSizing.Drifting — still drifting, not yet approved —
+// so a settle or a revert that landed between snapshot and commit drops the
+// intent instead of flipping a converged volume back into resizing.
+// rows-affected = 0 is the lost race. Never-observed volumes (NULL) don't
+// drift: the agent takes desired as its first size.
 func (q *Queries) MarkVolumeResizing(ctx context.Context, id uuid.UUID) (int64, error) {
 	result, err := q.db.ExecContext(ctx, markVolumeResizing, id)
 	if err != nil {

@@ -119,17 +119,18 @@ type Service struct {
 }
 
 type Volume struct {
-	ID                uuid.UUID     `json:"id"`
-	ServiceID         uuid.UUID     `json:"service_id"`
-	Name              string        `json:"name"`
-	MountPath         string        `json:"mount_path"`
-	Region            string        `json:"region"`
-	HostID            uuid.NullUUID `json:"host_id"`
-	Backing           string        `json:"backing"`
-	DesiredSizeBytes  int64         `json:"desired_size_bytes"`
-	ObservedSizeBytes sql.NullInt64 `json:"observed_size_bytes"`
-	Status            string        `json:"status"`
-	CreatedAt         time.Time     `json:"created_at"`
+	ID                       uuid.UUID     `json:"id"`
+	ServiceID                uuid.UUID     `json:"service_id"`
+	Name                     string        `json:"name"`
+	MountPath                string        `json:"mount_path"`
+	Region                   string        `json:"region"`
+	HostID                   uuid.NullUUID `json:"host_id"`
+	Backing                  string        `json:"backing"`
+	DesiredSizeBytes         int64         `json:"desired_size_bytes"`
+	ObservedSizeBytes        sql.NullInt64 `json:"observed_size_bytes"`
+	Status                   string        `json:"status"`
+	CreatedAt                time.Time     `json:"created_at"`
+	PreviousDesiredSizeBytes sql.NullInt64 `json:"previous_desired_size_bytes"`
 }
 
 type VolumeLease struct {

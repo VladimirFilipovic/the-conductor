@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"conductor/internal/domain"
 	"conductor/internal/storage/db"
 
 	"github.com/google/uuid"
@@ -18,10 +19,16 @@ type volumeQuerier interface {
 	CreateVolume(ctx context.Context, serviceID uuid.UUID, name, region, mountPath string, sizeBytes int64) (db.Volume, error)
 	ListVolumesByService(ctx context.Context, projectName, service string) ([]db.Volume, error)
 	GetVolume(ctx context.Context, serviceID uuid.UUID, mountPath string) (db.Volume, error)
+	// UpdateVolumeSize writes desired and remembers the size it replaced; the
+	// status is the engine's to move.
 	UpdateVolumeSize(ctx context.Context, serviceID uuid.UUID, mountPath string, sizeBytes int64) (db.Volume, error)
-	// HostVolumeCommitment is the host's raw disk and the desired bytes of every
-	// volume placed on it — the resize advisory's inputs.
-	HostVolumeCommitment(ctx context.Context, hostID uuid.UUID) (db.HostVolumeCommitmentRow, error)
+	// RevertVolumeSize restores the pre-update desired size of a resize_pending
+	// volume, once. ErrNotFound when the volume is not resize_pending or has
+	// nothing to revert to.
+	RevertVolumeSize(ctx context.Context, serviceID uuid.UUID, mountPath string) (db.Volume, error)
+	// GetHost is the host a placed volume sits on — the resize advisory's
+	// disk size input.
+	GetHost(ctx context.Context, hostID uuid.UUID) (db.Host, error)
 	DeleteVolume(ctx context.Context, serviceID uuid.UUID, mountPath string) (db.Volume, error)
 }
 
@@ -54,12 +61,12 @@ func (q querier) GetVolume(ctx context.Context, serviceID uuid.UUID, mountPath s
 	return v, err
 }
 
-func (q querier) HostVolumeCommitment(ctx context.Context, hostID uuid.UUID) (db.HostVolumeCommitmentRow, error) {
-	row, err := q.queries.HostVolumeCommitment(ctx, hostID)
+func (q querier) GetHost(ctx context.Context, hostID uuid.UUID) (db.Host, error) {
+	h, err := q.queries.GetHost(ctx, hostID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return db.HostVolumeCommitmentRow{}, fmt.Errorf("host %s: %w", hostID, ErrNotFound)
+		return db.Host{}, fmt.Errorf("host %s: %w", hostID, ErrNotFound)
 	}
-	return row, err
+	return h, err
 }
 
 func (q querier) UpdateVolumeSize(ctx context.Context, serviceID uuid.UUID, mountPath string, sizeBytes int64) (db.Volume, error) {
@@ -75,6 +82,26 @@ func (q querier) UpdateVolumeSize(ctx context.Context, serviceID uuid.UUID, moun
 		return db.Volume{}, err
 	}
 	return v, nil
+}
+
+func (q querier) RevertVolumeSize(ctx context.Context, serviceID uuid.UUID, mountPath string) (db.Volume, error) {
+	v, err := q.queries.RevertVolumeSize(ctx, db.RevertVolumeSizeParams{ServiceID: serviceID, MountPath: mountPath})
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.Volume{}, fmt.Errorf("volume at %q: %w", mountPath, ErrNotFound)
+	}
+	return v, err
+}
+
+// SizingOf unpacks a volume row into the domain's sizing view once, so the
+// engine, the agent downlink and the CLI all read drift, settle and committed
+// bytes off the same predicates instead of each handling the NULL observed
+// column.
+func SizingOf(v db.Volume) domain.VolumeSizing {
+	return domain.VolumeSizing{
+		Status:   domain.VolumeStatus(v.Status),
+		Desired:  v.DesiredSizeBytes,
+		Observed: v.ObservedSizeBytes.Int64,
+	}
 }
 
 func (q querier) DeleteVolume(ctx context.Context, serviceID uuid.UUID, mountPath string) (db.Volume, error) {

@@ -15,7 +15,7 @@ const createVolume = `-- name: CreateVolume :one
 
 INSERT INTO volumes (service_id, name, region, mount_path, desired_size_bytes)
 VALUES ($1, $2, $3, $4, $5)
-RETURNING id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at
+RETURNING id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at, previous_desired_size_bytes
 `
 
 type CreateVolumeParams struct {
@@ -29,8 +29,9 @@ type CreateVolumeParams struct {
 // Queries backing `conductor volume`. A volume belongs to a service (not a
 // single environment — volumes.service_id) and is addressed by its mount path,
 // the contract with the container. Size is a mutable desired property the
-// reconcile loop converges to (§4b grow-only resize); there is no create-time
-// --size, so add lands a default the user patches later with `volume update`.
+// reconcile loop converges to (§4b grow-only resize): `volume update` writes
+// desired, `volume revert` takes an unapproved grow back, and the engine alone
+// moves status.
 func (q *Queries) CreateVolume(ctx context.Context, arg CreateVolumeParams) (Volume, error) {
 	row := q.db.QueryRowContext(ctx, createVolume,
 		arg.ServiceID,
@@ -52,6 +53,7 @@ func (q *Queries) CreateVolume(ctx context.Context, arg CreateVolumeParams) (Vol
 		&i.ObservedSizeBytes,
 		&i.Status,
 		&i.CreatedAt,
+		&i.PreviousDesiredSizeBytes,
 	)
 	return i, err
 }
@@ -59,7 +61,7 @@ func (q *Queries) CreateVolume(ctx context.Context, arg CreateVolumeParams) (Vol
 const deleteVolume = `-- name: DeleteVolume :one
 DELETE FROM volumes
 WHERE service_id = $1 AND mount_path = $2
-RETURNING id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at
+RETURNING id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at, previous_desired_size_bytes
 `
 
 type DeleteVolumeParams struct {
@@ -82,12 +84,41 @@ func (q *Queries) DeleteVolume(ctx context.Context, arg DeleteVolumeParams) (Vol
 		&i.ObservedSizeBytes,
 		&i.Status,
 		&i.CreatedAt,
+		&i.PreviousDesiredSizeBytes,
+	)
+	return i, err
+}
+
+const getHost = `-- name: GetHost :one
+SELECT id, region, hostname, cpu_millicores, mem_bytes, disk_bytes, labels, status, last_heartbeat, created_at, host_healthy, drain_started_at FROM hosts WHERE id = $1
+`
+
+// The host a placed volume sits on: the CLI's resize advisory sums the
+// committed bytes of the host's volumes (ListVolumesByHost + Committed()) in
+// Go against the same DiskBudget the placer uses, so the two never disagree
+// on "fits".
+func (q *Queries) GetHost(ctx context.Context, hostID uuid.UUID) (Host, error) {
+	row := q.db.QueryRowContext(ctx, getHost, hostID)
+	var i Host
+	err := row.Scan(
+		&i.ID,
+		&i.Region,
+		&i.Hostname,
+		&i.CpuMillicores,
+		&i.MemBytes,
+		&i.DiskBytes,
+		&i.Labels,
+		&i.Status,
+		&i.LastHeartbeat,
+		&i.CreatedAt,
+		&i.HostHealthy,
+		&i.DrainStartedAt,
 	)
 	return i, err
 }
 
 const getVolume = `-- name: GetVolume :one
-SELECT id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at FROM volumes
+SELECT id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at, previous_desired_size_bytes FROM volumes
 WHERE service_id = $1 AND mount_path = $2
 `
 
@@ -111,36 +142,13 @@ func (q *Queries) GetVolume(ctx context.Context, arg GetVolumeParams) (Volume, e
 		&i.ObservedSizeBytes,
 		&i.Status,
 		&i.CreatedAt,
+		&i.PreviousDesiredSizeBytes,
 	)
 	return i, err
 }
 
-const hostVolumeCommitment = `-- name: HostVolumeCommitment :one
-SELECT h.disk_bytes,
-       coalesce(sum(v.desired_size_bytes), 0)::bigint AS committed_bytes
-FROM hosts h
-LEFT JOIN volumes v ON v.host_id = h.id
-WHERE h.id = $1
-GROUP BY h.id
-`
-
-type HostVolumeCommitmentRow struct {
-	DiskBytes      int64 `json:"disk_bytes"`
-	CommittedBytes int64 `json:"committed_bytes"`
-}
-
-// What a host's disk already promises to volumes, against its raw size. The
-// CLI's resize advisory divides the budget out of disk_bytes in Go with the
-// same knob the placer uses, so the two never disagree on "fits".
-func (q *Queries) HostVolumeCommitment(ctx context.Context, hostID uuid.UUID) (HostVolumeCommitmentRow, error) {
-	row := q.db.QueryRowContext(ctx, hostVolumeCommitment, hostID)
-	var i HostVolumeCommitmentRow
-	err := row.Scan(&i.DiskBytes, &i.CommittedBytes)
-	return i, err
-}
-
 const listVolumesByService = `-- name: ListVolumesByService :many
-SELECT v.id, v.service_id, v.name, v.mount_path, v.region, v.host_id, v.backing, v.desired_size_bytes, v.observed_size_bytes, v.status, v.created_at FROM volumes v
+SELECT v.id, v.service_id, v.name, v.mount_path, v.region, v.host_id, v.backing, v.desired_size_bytes, v.observed_size_bytes, v.status, v.created_at, v.previous_desired_size_bytes FROM volumes v
 JOIN services s ON s.id = v.service_id
 WHERE s.project_name = $1 AND s.name = $2
 ORDER BY v.mount_path
@@ -172,6 +180,7 @@ func (q *Queries) ListVolumesByService(ctx context.Context, arg ListVolumesBySer
 			&i.ObservedSizeBytes,
 			&i.Status,
 			&i.CreatedAt,
+			&i.PreviousDesiredSizeBytes,
 		); err != nil {
 			return nil, err
 		}
@@ -186,11 +195,54 @@ func (q *Queries) ListVolumesByService(ctx context.Context, arg ListVolumesBySer
 	return items, nil
 }
 
+const revertVolumeSize = `-- name: RevertVolumeSize :one
+UPDATE volumes
+SET desired_size_bytes          = previous_desired_size_bytes,
+    previous_desired_size_bytes = NULL
+WHERE service_id = $1 AND mount_path = $2
+  AND status = 'resize_pending'
+  AND previous_desired_size_bytes IS NOT NULL
+RETURNING id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at, previous_desired_size_bytes
+`
+
+type RevertVolumeSizeParams struct {
+	ServiceID uuid.UUID `json:"service_id"`
+	MountPath string    `json:"mount_path"`
+}
+
+// RevertVolumeSize takes back a grow the host could not hold: desired returns
+// to what it was before `volume update`, and the revert target is consumed so
+// it works exactly once. Only a 'resize_pending' volume qualifies — resizing
+// is already a promise to the agent, attached has nothing to take back. Status
+// stays with the engine: observed >= desired now holds, so MarkVolumeAttached
+// settles it on the next tick. No row = not pending anymore (or nothing to
+// revert to); the caller reports that as a retry, not a not-found.
+func (q *Queries) RevertVolumeSize(ctx context.Context, arg RevertVolumeSizeParams) (Volume, error) {
+	row := q.db.QueryRowContext(ctx, revertVolumeSize, arg.ServiceID, arg.MountPath)
+	var i Volume
+	err := row.Scan(
+		&i.ID,
+		&i.ServiceID,
+		&i.Name,
+		&i.MountPath,
+		&i.Region,
+		&i.HostID,
+		&i.Backing,
+		&i.DesiredSizeBytes,
+		&i.ObservedSizeBytes,
+		&i.Status,
+		&i.CreatedAt,
+		&i.PreviousDesiredSizeBytes,
+	)
+	return i, err
+}
+
 const updateVolumeSize = `-- name: UpdateVolumeSize :one
 UPDATE volumes
-SET desired_size_bytes = $1
+SET previous_desired_size_bytes = desired_size_bytes,
+    desired_size_bytes          = $1
 WHERE service_id = $2 AND mount_path = $3
-RETURNING id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at
+RETURNING id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at, previous_desired_size_bytes
 `
 
 type UpdateVolumeSizeParams struct {
@@ -199,11 +251,13 @@ type UpdateVolumeSizeParams struct {
 	MountPath        string    `json:"mount_path"`
 }
 
-// UpdateVolumeSize patches only the desired size; the reconcile loop notices the
-// drift (desired > observed), approves the grow once the host has room
-// (status → 'resizing'), and settles it back to 'attached' when the agent
-// reports the new size. RETURNING lets the caller map a missing (service,
-// mount) to not-found instead of a silent no-op.
+// UpdateVolumeSize patches only the desired size and remembers the size it
+// replaced (the one-shot revert target). Status is untouched: the engine is
+// its only writer. It notices the drift (desired > observed) on its next
+// tick and either approves the grow (→ 'resizing') or parks it
+// (→ 'resize_pending') until the host has room; the agent's report of the
+// new size settles it back to 'attached'. RETURNING lets the caller map a
+// missing (service, mount) to not-found instead of a silent no-op.
 func (q *Queries) UpdateVolumeSize(ctx context.Context, arg UpdateVolumeSizeParams) (Volume, error) {
 	row := q.db.QueryRowContext(ctx, updateVolumeSize, arg.DesiredSizeBytes, arg.ServiceID, arg.MountPath)
 	var i Volume
@@ -219,6 +273,7 @@ func (q *Queries) UpdateVolumeSize(ctx context.Context, arg UpdateVolumeSizePara
 		&i.ObservedSizeBytes,
 		&i.Status,
 		&i.CreatedAt,
+		&i.PreviousDesiredSizeBytes,
 	)
 	return i, err
 }

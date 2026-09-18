@@ -262,7 +262,7 @@ func (q *Queries) ListStalledDrains(ctx context.Context, startedBefore sql.NullT
 }
 
 const listVolumesByHost = `-- name: ListVolumesByHost :many
-SELECT id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at FROM volumes
+SELECT id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at, previous_desired_size_bytes FROM volumes
 WHERE host_id = $1
 ORDER BY id
 `
@@ -292,6 +292,7 @@ func (q *Queries) ListVolumesByHost(ctx context.Context, hostID uuid.NullUUID) (
 			&i.ObservedSizeBytes,
 			&i.Status,
 			&i.CreatedAt,
+			&i.PreviousDesiredSizeBytes,
 		); err != nil {
 			return nil, err
 		}

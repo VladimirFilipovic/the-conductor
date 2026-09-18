@@ -114,16 +114,19 @@ func (q *Queries) ListActiveReplicas(ctx context.Context) ([]ListActiveReplicasR
 }
 
 const listActiveVolumes = `-- name: ListActiveVolumes :many
-SELECT DISTINCT v.id, v.service_id, v.name, v.mount_path, v.region, v.host_id, v.backing, v.desired_size_bytes, v.observed_size_bytes, v.status, v.created_at FROM volumes v
+SELECT DISTINCT v.id, v.service_id, v.name, v.mount_path, v.region, v.host_id, v.backing, v.desired_size_bytes, v.observed_size_bytes, v.status, v.created_at, v.previous_desired_size_bytes FROM volumes v
 JOIN environment_services es ON es.service_id = v.service_id
 JOIN deployments d           ON d.environment_service_id = es.id
 WHERE d.is_current
+ORDER BY v.id
 `
 
 // Volumes for services that have a current deployment — the disks a stateful
 // placement pins and leases. Keyed by (service_id, region) against the stateful
 // rows of SnapshotDesired. DISTINCT collapses a service shared across multiple
 // environments (the lease is re-checked inside the reconcile tx regardless).
+// Ordered by id so that when two grows compete for one host's room, the same
+// one wins every tick instead of flapping with the planner's row order.
 func (q *Queries) ListActiveVolumes(ctx context.Context) ([]Volume, error) {
 	rows, err := q.db.QueryContext(ctx, listActiveVolumes)
 	if err != nil {
@@ -145,6 +148,7 @@ func (q *Queries) ListActiveVolumes(ctx context.Context) ([]Volume, error) {
 			&i.ObservedSizeBytes,
 			&i.Status,
 			&i.CreatedAt,
+			&i.PreviousDesiredSizeBytes,
 		); err != nil {
 			return nil, err
 		}

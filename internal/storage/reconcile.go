@@ -51,11 +51,16 @@ type reconcileQuerier interface {
 	AssignReplicaHost(ctx context.Context, replicaID, hostID uuid.UUID) error
 
 	AssignVolumeHost(ctx context.Context, volumeID, hostID uuid.UUID) error
-	// MarkVolumeResizing approves a grow (attached → resizing); ErrConflict
-	// when the volume is no longer attached-and-drifting.
+	// MarkVolumeResizePending parks a grow the host has no room for (attached
+	// → resize_pending); ErrConflict when the volume is no longer
+	// attached-and-drifting.
+	MarkVolumeResizePending(ctx context.Context, volumeID uuid.UUID) error
+	// MarkVolumeResizing approves a grow (attached|resize_pending → resizing);
+	// ErrConflict when the volume is no longer drifting or already approved.
 	MarkVolumeResizing(ctx context.Context, volumeID uuid.UUID) error
-	// MarkVolumeAttached settles a grow (resizing → attached); ErrConflict when
-	// the volume isn't resizing or observed still trails desired.
+	// MarkVolumeAttached settles (resizing|resize_pending → attached) once the
+	// disk holds at least desired — after a grow or a revert; ErrConflict when
+	// observed still trails desired.
 	MarkVolumeAttached(ctx context.Context, volumeID uuid.UUID) error
 	// AcquireVolumeLease takes (or renews) the single-writer lease; a live lease
 	// held by a different replica returns ErrConflict.
@@ -132,6 +137,17 @@ func (q querier) AssignVolumeHost(ctx context.Context, volumeID, hostID uuid.UUI
 		ID:     volumeID,
 		HostID: uuid.NullUUID{UUID: hostID, Valid: true},
 	})
+}
+
+func (q querier) MarkVolumeResizePending(ctx context.Context, volumeID uuid.UUID) error {
+	n, err := q.queries.MarkVolumeResizePending(ctx, volumeID)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrConflict
+	}
+	return nil
 }
 
 func (q querier) MarkVolumeResizing(ctx context.Context, volumeID uuid.UUID) error {
