@@ -10,13 +10,24 @@ apiserver control plane-a (`CONTROL_PLANE_URL`, podrazumevano :7080), pa UI i
 CLI prolaze kroz isti project sloj. Operator chaos (cordon/drain/delete replica)
 ide na isti control plane, agent chaos na agentsim.
 
+## Stanje hosta: dve kolone, dva vlasnika
+
+`hosts.host_healthy` (bool) piše samo heartbeat/watchdog: heartbeat → `true`,
+30s tišine → `false`. `hosts.status` piše samo operator: `open | cordoned |
+draining`. Slobodno smeštanje ide samo na `host_healthy AND status='open'`;
+volume-pinovana replika sme nazad na svoj host i kad je `cordoned`/`draining`
+(disk je tu i nigde drugde). Heartbeat nikad ne dira `status`, smrt hosta nikad
+ne briše drain. (Do 2026-09-18 sve je bilo u jednoj koloni
+`ready|notready|draining|cordoned` — stara merenja dole koriste te reči.)
+
 ## Pragovi (internal/engine)
 
 | Konstanta | Vrednost | Značenje |
 |---|---|---|
-| `watchdogInterval` | 5s | koliko često watchdog proverava staleness |
-| `hostNotReadyAfter` | 30s | tišina → host van scheduling-a (reverzibilno) |
+| `watchdogInterval` | 5s | koliko često watchdog proverava staleness i settle-uje drainove |
+| `hostUnhealthyAfter` | 30s | tišina → `host_healthy=false`, van scheduling-a (reverzibilno) |
 | `hostDeadAfter` | 2min | tišina → replike se oslobađaju (jednosmerno) |
+| `drainStalledAfter` | 10min | drain u letu duže od ovog → WARN u logu svaki sweep; bez akcije |
 | `volumeLeaseTTL` | 90s | bez healthy observacije → lease ističe, failover sme |
 | startup grace | = `hostDeadAfter` | posle boot-a engine-a nema presuda smrti dok ne protekne pun prozor |
 
@@ -43,9 +54,9 @@ Chaos ide kroz UI (Chaos tab) ili direktno na control API; ID-jeve daje
 Zahtev: kratka smetnja ne sme da scrambluje workload.
 
 - chaos `host_kill` <host> → host ćuti
-- ~30s: host `notready`, van scheduling-a; **replike ostaju vezane i active**
+- ~30s: host `unhealthy`, van scheduling-a; **replike ostaju vezane i active**
 - chaos `host_recover` <host> pre 2min
-- prvi heartbeat vraća `ready`; nijedna replika nije mrdnula
+- prvi heartbeat vraća `healthy`; nijedna replika nije mrdnula
 
 Izmereno kroz chaos-ui (2026-09-11): kill → notready 30s → recover → ready 1s;
 replika netaknuta.
@@ -59,10 +70,10 @@ Zahtev: mrtav host gubi replike; one se automatski re-place-uju na druge
 hostove istog regiona; host koji kasnije oživi vraća se prazan u pool.
 
 - chaos `host_kill` <host>, ne oporavljaj
-- ~30s: `notready` (kao gore)
+- ~30s: `unhealthy` (kao gore)
 - ~2min: watchdog `MarkHostDown` — replike hostless `replacing`, sledeći tick
   placer ih dodeli drugom hostu, agent ih podigne kroz start → health → active
-- `recover-host` bilo kad posle: host se vraća `ready`, prazan; orphan
+- `recover-host` bilo kad posle: host se vraća `healthy`, prazan; orphan
   kontejnere agent sam ugasi na prvom full snapshotu (nisu više u njegovoj listi)
 
 Izmereno kroz chaos-ui (2026-09-11): notready 34s → replacing na 2min04s → active na
@@ -80,9 +91,9 @@ ne zato što su hostovi mrtvi).
 - `docker compose stop engine`, sačekaj 2-3min (svi heartbeat-i staju)
 - `docker compose start engine`
 - agenti se rekonektuju (gRPC backoff ume da doda i ~30s posle dužeg pada);
-  sweep sme da demote-uje u `notready` (reverzibilno), ali presuda smrti ne
+  sweep sme da demote-uje u `unhealthy` (reverzibilno), ali presuda smrti ne
   pada dok uptime engine-a ne pređe `hostDeadAfter` — do tada su se svi živi javili
-- očekivano: nula oslobođenih replika, fleet se vrati `ready` bez ijednog restarta
+- očekivano: nula oslobođenih replika, fleet se vrati `healthy` bez ijednog restarta
 
 Izmereno (apiserver kao gateway, 2026-09-11): `docker compose stop apiserver` 153s →
 watchdog demote 5 hostova na +35s, nula presuda smrti → agenti nazad ~64s posle
@@ -221,12 +232,138 @@ pa bi svaka promena preskočila disk gate; jedan resize u letu, čeka se
 
 ### 10. Operator akcije
 
-- `cordon` (UI → apiserver): host ostaje da služi postojeće, ne dobija novo
-- `drain` (UI → apiserver): danas isto što i cordon (placer ga preskače), replike
-  ostaju gde su — evakuacija još nije implementirana u reconcileru (TODO);
-  `uncordon` (samo API, `POST /v1/hosts/{id}/uncordon`) vraća i cordoned i
-  draining host u `ready`
+- `cordon` (UI → apiserver): host ostaje da služi postojeće, ne dobija novo;
+  primenjuje se samo na `open` (409 za `draining` — cordon bi izbrisao drain)
+- `drain` (UI → apiserver): graciozna evakuacija stateless replika, host na
+  kraju sam završi u `cordoned` — detalji i merenja u 12. Uvek prolazi (nema
+  `force`, 409 samo ako već draina)
+- `uncordon` (samo API, `POST /v1/hosts/{id}/uncordon`): vraća i `cordoned` i
+  `draining` host u `open` i briše `drain_started_at` — tako se drain otkazuje
 - `conductor rollback`: vrati prethodnu verziju deploymenta
+
+### 12. Drain hosta — graciozna evakuacija
+
+Zahtev: operator kaže "skini sve sa ovog hosta" i kapacitet servisa nikad ne
+sme da padne ispod desired. Stateful replike (volume) se **ne sele** — disk je
+lokalan; ostaju na hostu i operator ih migrira ručno kasnije.
+
+Model: nema novog pravila ni Intent-a. `POST /v1/hosts/{id}/drain` upiše
+`status='draining'`, `drain_started_at=now()`. Snapshot svakoj replici nosi
+`host_draining` (LEFT JOIN hosts), a engine to sužava na stateless replike
+(volume-pinovana ne odlazi sa hostom). Dve izmene u rolling kaskadi:
+
+- `healthyTargets` ne broji repliku na draining hostu → `rollingRampUp` sam
+  pravi surge (zamene se kreiraju dok stare još služe)
+- `rollingScaleDown` sortira draining-host replike prve, pa newest-first →
+  kad je zamena healthy, višak koji odlazi su tačno stare
+
+`notAllHealthy` između njih gleda sirovo `Healthy`, ne kapacitet — inače bi
+zdrava replika na draining hostu držala grupu zauvek pre nego što zamena
+uopšte nastane. Kraj draina odlučuje watchdog sweep: `CompleteDrainedHosts`
+prebaci `draining → cordoned` kad na hostu nema živih stateless replika
+(`phase NOT IN (reaped, failed)` — čeka **reap**, ne drain, jer drained
+replika još služi do isteka prozora). Placer ledger sadrži sve `host_healthy`
+hostove, `status='open'` filtrira samo `pick` (slobodno smeštanje); DB pojas
+`ReserveReplicaOnHost` isto: `host_healthy AND (status='open' OR volume_id
+IS NOT NULL)`.
+
+Postavka (svi podscenariji; 3 web replike u us-east-1 da anti-affinity stavi
+po jednu na svaki od 3 hosta):
+
+```bash
+make stack-up && make build
+mkdir demo && cd demo
+../build/conductor init -n chaos-demo
+../build/conductor add --service --name web --image nginx:alpine
+printf '[deploy]\nnum_replicas = 3\nregion = "us-east-1"\ndrain_seconds = 10\ncpu = "200m"\nmemory = "128Mi"\n' > config.toml
+../build/conductor up -s web
+curl -s localhost:7080/v1/hosts | jq -r '.[] | "\(.hostname) \(.id) healthy=\(.host_healthy) \(.status) repl=\(.replicas_on_host)"'
+```
+
+`GET /v1/hosts` (i topology `hosts`) vraća `host_healthy`, `status`,
+`drain_started_at`, `replicas_on_host` — drain se prati odatle ili iz
+chaos-ui Hosts panela (dva badge-a: health + status, "draining since …",
+broj replika).
+
+#### 12a. Drain hosta sa stateless replikom — surge pa scale-down
+
+- `curl -XPOST localhost:7080/v1/hosts/<ue1-medium-1>/drain`
+- sledeći tick: `rollingRampUp → create` (jedna zamena; kanarinac ako na
+  draining hostu stoje **sve** replike grupe, inače ceo deficit odjednom)
+- zamena dobije open host, healthy → `rollingScaleDown → drain` stare
+- stara `draining` još služi `drain_seconds`, pa `reapDrained → destroy`
+- sweep ≤5s posle: `watchdog -> drain complete, host cordoned`; host ostaje
+  `healthy`, `drain_started_at` se briše
+
+Izmereno (2026-09-18, reconcile 2s, drain_seconds 10): drain 10:15:08 →
+create +1s → zamena `active+healthy` +4s → stara `draining` +5s → `reaped`
++15s → host `cordoned` +17s. Broj healthy web replika ceo period ≥ 3.
+
+#### 12b. Drain + smrt hosta sa stateful i stateless replikama (reboot)
+
+Postavka dodatno: `add --database --engine postgres --name pg`, `volume add
+--mount /var/lib/postgresql/data --size 2 -s pg`, `up -s pg -f pg-config.toml`
+(num_replicas=1, us-east-1). pg je sleteo na `ue1-small-1` uz 2 web replike.
+
+- `drain <ue1-small-1>` i odmah chaos `host_kill <ue1-small-1>` (agent zaćuti):
+  `curl -XPOST localhost:7780/chaos -d '{"action":"host_kill","host":"<id>"}'`
+- web: 2 zamene odjednom (postoji healthy web na drugom hostu, kanarinac nije
+  potreban) → healthy → stare 2 `draining` → reap → **sweep cordonira host dok
+  je mrtav**: kraj draina se čita iz redova replika, ne iz heartbeat-a
+- pg ostaje vezan (stateful se ne seli); +30s host `unhealthy`; +2min
+  `MarkHostDown` oslobodi pg → `replacing`, hostless, pinovan na volume čiji
+  je host van ledgera → čeka (assign_host se odbacuje svaki tick)
+- `status` posle smrti ostaje `cordoned` (MarkHostDown dira samo `host_healthy`)
+- chaos `host_recover` → heartbeat vrati `healthy`, status i dalje `cordoned`;
+  pinovana grana placera ignoriše status → pg nazad na **isti** host, lease
+  ponovo uzet, active
+
+Izmereno (2026-09-18): drain+kill 10:17:22 → 2× create +1s → zamene active +6s
+→ stare draining +6s → reaped +15s → `cordoned` +18s → `unhealthy` +33s →
+MarkHostDown +2min03s (pg `replacing`, hostless) → recover 10:20:14 → healthy
++1s → pg `health_check` na istom hostu +2s → `active` +3s. web ceo period 3
+healthy.
+
+#### 12c. Drain hosta na kome je samo stateful
+
+- host sa samo pg (posle 12b): `uncordon` pa `drain`
+- nema šta da se seli → prvi sweep: `cordoned`, pg netaknut, `active`
+
+Izmereno: drain 10:20:32 → `cordoned` 10:20:36 (jedan sweep). Ovo je i
+signal operatoru: host je "prazan koliko može automatski", ostatak je ručno.
+
+#### 12d. Otkazivanje draina / uncordon
+
+- `POST /v1/hosts/{id}/uncordon` na `draining` ili `cordoned` → 200, `status=open`,
+  `drain_started_at=null`; host odmah ponovo prima placement
+- `cordon` na `draining` → 409 (ne brisati drain nehotice); `drain` na
+  `cordoned` → 200 (cordon se "pojačava" u evakuaciju)
+
+Izmereno: uncordon 10:16:36 → `open`, `drain_started_at` null istog sekunda.
+
+#### 12e. Zaglavljen drain — WARN, bez akcije
+
+Kad zamena nema gde (region bez open hosta sa kapacitetom, ili zamena nikad
+ne postane healthy), drain stoji: stara replika služi, host `draining`.
+
+- `cordon` sve ostale hostove u regionu koji imaju mesta; `drain` host sa replikom
+- `rollingRampUp → create`, zamena `pending` hostless; `anyHostlessReplicas`
+  emituje `assign_host` svaki tick, placer ga odbacuje (nema open hosta)
+- posle `drainStalledAfter` (10min): `watchdog -> drain stalled, still holding
+  stateless replicas draining_for=…` WARN u svakom sweep-u; `GET /v1/hosts`
+  pokazuje `drain_started_at` star 10+ min i `replicas_on_host > 0`
+- ništa se ne dešava samo od sebe — čovek oslobodi kapacitet (`uncordon`,
+  novi host) i drain se sam nastavi
+
+Izmereno (2026-09-18): cordon `ue1-medium-1` + drain `ue1-large-1` 10:21:10 →
+create +1s, zamena `pending` bez hosta → prvi WARN 10:31:15
+(`draining_for=10m5s`), pa svakih 5s → uncordon `ue1-medium-1` 10:31:29 →
+zamena `active` +3s → stara `draining` +4s → `reaped` +14s → `cordoned`
++17s. Stara replika služila celih 10min čekanja; broj healthy web ≥ 3.
+
+Napomena: dok zamena čeka host, `anyHostlessReplicas` loguje `assign_host`
+na INFO svaki tick (2s) — isto kao za pinovanu repliku na mrtvom hostu (12b);
+pre-postojeći šum, nije deo drain-a.
 
 ## Kroz chaos-ui (localhost:3000)
 
@@ -237,9 +374,11 @@ Chaos tab pokriva sve akcije, po targetu:
   (skini chaos), Delete row (orphan simulacija — jedini direktan DB upis)
 - **Deployment**: Crash deployment / Stall rollout — fan-out iste agent-akcije
   na sve žive replike deploymenta
-- **Host**: Kill host (agent zaćuti → notready na ~30s → mrtav na 2min),
-  Recover (prvi heartbeat vraća ready), Cordon i Drain (operator desired
-  state, DB upis)
+- **Host**: Kill host (agent zaćuti → `unhealthy` na ~30s → mrtav na 2min),
+  Recover (prvi heartbeat vraća `healthy`), Cordon i Drain (operator desired
+  state preko apiserver-a). Hosts panel nosi dva badge-a: health
+  (`healthy|unhealthy`) i status (`cordoned|draining`, `open` se ne prikazuje),
+  plus broj replika i "draining since …" dok drain traje
 
 Sve agent-observable akcije UI prosleđuje agentsim control API-ju
 (`AGENTSIM_URL`, u stacku `http://agentsim:7780`) — chaos putuje pravim
