@@ -166,11 +166,14 @@ func (q *Queries) ListDeadHosts(ctx context.Context, lastHeartbeatBefore sql.Nul
 
 const listReplicasByHost = `-- name: ListReplicasByHost :many
 SELECT id, deployment_id, region, host_id, volume_id, cpu_millicores, mem_bytes, alloc_reason, desired_status, phase, healthy, restart_count, last_exit_reason, revision, created_at, updated_at, drained_at, health_checks_passed_at FROM replicas
-WHERE host_id = $1 AND phase <> 'reaped'
+WHERE host_id = $1 AND phase NOT IN ('reaped', 'failed')
 `
 
 // The replicas a host agent is responsible for driving (start scheduling,
-// drain draining, report the rest).
+// drain draining, report the rest). Failed rows are left out on purpose: the
+// agent never learns the word "failed" — a frozen replica simply vanishes from
+// its list, which the agent treats as "tear the container down", and the row
+// stays in the database holding the deployment's slot until an operator acts.
 func (q *Queries) ListReplicasByHost(ctx context.Context, hostID uuid.NullUUID) ([]Replica, error) {
 	rows, err := q.db.QueryContext(ctx, listReplicasByHost, hostID)
 	if err != nil {

@@ -121,10 +121,13 @@ WHERE id = @replica_id
 SELECT * FROM hosts;
 
 -- The replicas a host agent is responsible for driving (start scheduling,
--- drain draining, report the rest).
+-- drain draining, report the rest). Failed rows are left out on purpose: the
+-- agent never learns the word "failed" — a frozen replica simply vanishes from
+-- its list, which the agent treats as "tear the container down", and the row
+-- stays in the database holding the deployment's slot until an operator acts.
 -- name: ListReplicasByHost :many
 SELECT * FROM replicas
-WHERE host_id = @host_id AND phase <> 'reaped';
+WHERE host_id = @host_id AND phase NOT IN ('reaped', 'failed');
 
 -- The disks a host agent is responsible for: create on first sight, grow when
 -- the control plane's target exceeds what's on disk, delete when gone. The

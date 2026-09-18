@@ -20,6 +20,9 @@ type controlPlaneQuerier interface {
 	CordonHost(ctx context.Context, hostID uuid.UUID) (bool, error)
 	UncordonHost(ctx context.Context, hostID uuid.UUID) (bool, error)
 	DrainHost(ctx context.Context, hostID uuid.UUID) (bool, error)
+	// RestartReplica thaws a frozen replica back into the re-placement path.
+	// ErrNotFound when no such row, ErrConflict when it exists but is not failed.
+	RestartReplica(ctx context.Context, replicaID uuid.UUID) error
 	ListHostReplicaCounts(ctx context.Context) (map[uuid.UUID]int64, error)
 
 	UpsertApiserverInstance(ctx context.Context, id uuid.UUID, startedAt, now time.Time) error
@@ -63,6 +66,21 @@ func (q querier) DrainHost(ctx context.Context, hostID uuid.UUID) (bool, error) 
 		Now:    sql.NullTime{Time: time.Now(), Valid: true},
 	})
 	return n > 0, err
+}
+
+func (q querier) RestartReplica(ctx context.Context, replicaID uuid.UUID) error {
+	row, err := q.queries.RestartReplica(ctx, replicaID)
+	if err != nil {
+		return err
+	}
+	switch {
+	case row.Restarted:
+		return nil
+	case !row.Found:
+		return ErrNotFound
+	default:
+		return ErrConflict
+	}
 }
 
 // ListHostReplicaCounts is live (non-terminal) replicas per host; hosts with

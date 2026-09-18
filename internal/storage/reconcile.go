@@ -64,6 +64,11 @@ type reconcileQuerier interface {
 	// SetReplicaPhase advances the lifecycle phase iff expectRevision still
 	// matches; a moved revision (the Sensor wrote first) returns ErrConflict.
 	SetReplicaPhase(ctx context.Context, replicaID uuid.UUID, phase domain.ReplicaPhase, expectRevision int64) error
+	// FreezeReplica parks a crash-looping replica of an active deployment in
+	// failed. Phase-guarded rather than revision-CAS'd: the Sensor rewrites
+	// the row every second, but the decision only depends on the monotonic
+	// restart_count. ErrConflict when the row already left the live phases.
+	FreezeReplica(ctx context.Context, replicaID uuid.UUID) error
 
 	ReleaseVolumeLease(ctx context.Context, volumeID uuid.UUID) error
 	DeleteReplica(ctx context.Context, replicaID uuid.UUID) error
@@ -185,6 +190,18 @@ func (q querier) SetReplicaPhase(ctx context.Context, replicaID uuid.UUID, phase
 	}
 	if n == 0 {
 		slog.Debug("reconcile: replica revision moved, dropping phase write", "replica", replicaID, "phase", phase)
+		return ErrConflict
+	}
+	return nil
+}
+
+func (q querier) FreezeReplica(ctx context.Context, replicaID uuid.UUID) error {
+	n, err := q.queries.FreezeReplica(ctx, replicaID)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		slog.Debug("reconcile: replica left live phases before freeze, dropping", "replica", replicaID)
 		return ErrConflict
 	}
 	return nil

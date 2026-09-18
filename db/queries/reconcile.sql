@@ -144,3 +144,17 @@ DELETE FROM replicas WHERE id = $1;
 -- on the reconcile path, and re-asserting the same status is harmless.
 -- name: SetDeploymentStatus :exec
 UPDATE deployments SET status = $2 WHERE id = $1;
+
+-- Freeze a crash-looping replica of an ACTIVE deployment: it stops being a
+-- target (the reconciler buckets failed current replicas apart), keeps its slot
+-- so no replacement is minted, and drops out of the agent's HostState so the
+-- container is torn down and reports stop. No revision CAS on purpose: the
+-- decision rests on restart_count alone, which only grows, while the Sensor
+-- bumps revision on every report (each second) — a CAS would lose the race
+-- almost every tick. The phase guard is the same one MarkHostDown uses:
+-- orchestrator-owned and terminal phases are never overwritten. rows = 0 is a
+-- lost race, not an error.
+-- name: FreezeReplica :execrows
+UPDATE replicas
+SET phase = 'failed', healthy = false, revision = revision + 1
+WHERE id = $1 AND phase NOT IN ('draining', 'reaped', 'failed', 'replacing');

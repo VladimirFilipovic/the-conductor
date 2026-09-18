@@ -358,6 +358,39 @@ func (q *Queries) OldestLiveApiserverStart(ctx context.Context, heartbeatAfter t
 	return started_at, err
 }
 
+const restartReplica = `-- name: RestartReplica :one
+WITH restarted AS (
+    UPDATE replicas
+    SET phase = 'replacing', host_id = NULL, healthy = false,
+        restart_count = 0, last_exit_reason = NULL, revision = revision + 1
+    WHERE replicas.id = $1 AND phase = 'failed'
+    RETURNING replicas.id AS restarted_id
+)
+SELECT EXISTS (SELECT 1 FROM replicas r WHERE r.id = $1) AS found,
+       EXISTS (SELECT 1 FROM restarted)                            AS restarted
+`
+
+type RestartReplicaRow struct {
+	Found     bool `json:"found"`
+	Restarted bool `json:"restarted"`
+}
+
+// Operator thaws a frozen (failed) replica by sending it back through the
+// same path a host death uses: hostless 'replacing', so anyHostlessReplicas
+// hands it to the placer next tick. "Same host" is deliberately not promised:
+// the reservation belt stopped counting the row while it was failed, so its
+// old slot on the host may be taken by now. Counters reset so the new
+// container starts with a full restart budget. The data-modifying CTE and the
+// outer SELECT see the same pre-statement snapshot, so `found` answers "does
+// the row exist at all" independent of whether the UPDATE matched — one round
+// trip distinguishes 404 (no row) from 409 (not failed).
+func (q *Queries) RestartReplica(ctx context.Context, replicaID uuid.UUID) (RestartReplicaRow, error) {
+	row := q.db.QueryRowContext(ctx, restartReplica, replicaID)
+	var i RestartReplicaRow
+	err := row.Scan(&i.Found, &i.Restarted)
+	return i, err
+}
+
 const topologyDesiredRegions = `-- name: TopologyDesiredRegions :many
 SELECT es.id AS es_id, dr.region, dr.replicas AS desired
 FROM deployment_regions dr
