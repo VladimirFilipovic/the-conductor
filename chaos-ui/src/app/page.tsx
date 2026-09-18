@@ -73,6 +73,18 @@ const REPLICA_ACTS: Act[] = [
   },
 ];
 
+// Only a frozen (failed) replica can be thawed; for every other phase the
+// control plane answers 409, so the entry is offered only where it applies.
+const RESTART_ACT: Act = {
+  key: "restart_replica",
+  label: "Restart (thaw)",
+  hint: "Frozen replica goes back through placement with a fresh restart budget.",
+};
+
+function replicaActs(phase: string): Act[] {
+  return phase === "failed" ? [...REPLICA_ACTS, RESTART_ACT] : REPLICA_ACTS;
+}
+
 const DEPLOYMENT_ACTS: Act[] = [
   {
     key: "crash_deployment",
@@ -227,6 +239,9 @@ function ServiceRow({
   const desired = svc.regions.reduce((n, r) => n + r.desired, 0);
   const healthy = svc.regions.reduce((n, r) => n + r.healthy, 0);
   const converged = desired > 0 && healthy >= desired;
+  // Degraded is derived, never stored: the engine keeps a deployment active
+  // when one replica is frozen (crash loop) — the revision itself is fine.
+  const degraded = d?.status === "active" && desired > 0 && healthy < desired;
 
   // Traffic pointing at a version other than the current deployment is the
   // interesting case (mid-rollout or rolled back); otherwise it's just noise.
@@ -267,8 +282,9 @@ function ServiceRow({
         )}
         {d ? (
           <>
-            <Badge className={deployStatusClass(d.status)}>
+            <Badge className={deployStatusClass(degraded ? "degraded" : d.status)}>
               v{d.version} · {d.status}
+              {degraded && " · degraded"}
             </Badge>
             <span
               className="mono truncate text-xs text-[var(--color-faint)]"
@@ -380,7 +396,7 @@ function ReplicaTable({ svc, chaos }: { svc: ServiceNode; chaos: ChaosFn }) {
               </td>
               <td className="w-8 py-1 text-right">
                 <ActionMenu
-                  items={toItems(REPLICA_ACTS, (a) =>
+                  items={toItems(replicaActs(r.phase), (a) =>
                     chaos(a, r.id, `${shortId(r.id)} · ${r.region}`),
                   )}
                 />

@@ -7,6 +7,7 @@ import (
 	"io"
 	"text/tabwriter"
 
+	"conductor/internal/domain"
 	"conductor/internal/storage/db"
 	"conductor/internal/target"
 )
@@ -63,7 +64,7 @@ func Render(w io.Writer, projectName string, rows []db.ProjectStatusRow) {
 			r := rows[i]
 			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%d\t%d/%d\n",
 				r.Service, kindOf(r.Stateful), deployLabel(r.DeployVersion),
-				orDash(r.DeployStatus), r.DesiredReplicas,
+				statusLabel(r), r.DesiredReplicas,
 				r.HealthyReplicas, r.ObservedReplicas)
 		}
 		_ = tw.Flush()
@@ -95,6 +96,18 @@ func deployLabel(v sql.NullInt32) string {
 		return "—"
 	}
 	return fmt.Sprintf("v%d", v.Int32)
+}
+
+// statusLabel derives degradation instead of storing it: an active deployment
+// short of healthy replicas (a frozen crash-looper, a replacement still
+// booting) is "active (degraded)". The engine keeps the row 'active' because
+// nothing about the revision is wrong — only this read knows the count.
+func statusLabel(r db.ProjectStatusRow) string {
+	label := orDash(r.DeployStatus)
+	if r.DeployStatus.String == string(domain.DeploymentActive) && r.DesiredReplicas > 0 && r.HealthyReplicas < r.DesiredReplicas {
+		return label + " (degraded)"
+	}
+	return label
 }
 
 func orDash(s sql.NullString) string {

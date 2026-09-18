@@ -22,6 +22,8 @@ export function deployStatusClass(status: string): string {
   const map: Record<string, string> = {
     pending: "bg-zinc-500/10 text-zinc-600 border-zinc-400/40",
     active: "bg-emerald-500/10 text-emerald-700 border-emerald-400/40",
+    // Not a stored status: the UI's own word for active with healthy < desired.
+    degraded: "bg-amber-500/10 text-amber-700 border-amber-400/40",
     draining: "bg-orange-500/10 text-orange-700 border-orange-400/40",
     failed: "bg-red-500/10 text-red-700 border-red-400/40",
     rolledback: "bg-amber-500/10 text-amber-700 border-amber-400/40",

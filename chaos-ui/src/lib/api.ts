@@ -255,3 +255,9 @@ export function drainHost(id: string) {
 export function deleteReplica(id: string) {
   return call<{ ok: boolean }>(`/v1/replicas/${id}`, { method: "DELETE" });
 }
+
+// Thaw a frozen (failed) replica: it goes back through re-placement with a
+// fresh restart budget. 409 when the replica is not failed.
+export function restartReplica(id: string) {
+  return call<{ ok: boolean }>(`/v1/replicas/${id}/restart`, { method: "POST" });
+}

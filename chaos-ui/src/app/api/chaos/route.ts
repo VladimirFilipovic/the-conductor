@@ -4,6 +4,7 @@ import {
   cordonHost,
   drainHost,
   deleteReplica,
+  restartReplica,
 } from "@/lib/api";
 import { failed } from "@/lib/route";
 
@@ -56,6 +57,7 @@ const handlers: Record<string, (id: string) => Promise<unknown>> = {
   cordon_host: (id) => cordonHost(id),
   drain_host: (id) => drainHost(id),
   delete_replica: (id) => deleteReplica(id),
+  restart_replica: (id) => restartReplica(id),
 };
 
 export async function POST(req: NextRequest) {
