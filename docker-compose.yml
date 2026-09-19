@@ -63,6 +63,8 @@ services:
       context: .
       dockerfile: Dockerfile.agentsim
     container_name: conductor-agentsim
+    environment:
+      CONDUCTOR_AGENTAPI_ADDR: apiserver:7443
     ports:
       # Chaos control API — chaos-ui (and curl) hit it.
       - "7780:7780"

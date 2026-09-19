@@ -15,10 +15,28 @@ import (
 	"conductor/agentsim"
 )
 
+// Addresses come from the environment so the image needs no start-command
+// override to be pointed at a different apiserver; an explicit flag still wins.
+// They live here rather than in internal/config because they are this command's
+// server flags, not process-wide settings the CLI and engine also read.
+const (
+	varAgentAPIAddr = "CONDUCTOR_AGENTAPI_ADDR"
+	varControlAddr  = "CONDUCTOR_CONTROL_ADDR"
+)
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
 func Run(args []string) int {
 	fs := flag.NewFlagSet("agentsim", flag.ContinueOnError)
-	agentAPIAddr := fs.String("agentapi.addr", "localhost:7443", "apiserver AgentAPI gRPC address")
-	controlAddr := fs.String("control.addr", ":7780", "chaos control API listen address")
+	agentAPIAddr := fs.String("agentapi.addr", envOr(varAgentAPIAddr, "localhost:7443"),
+		"apiserver AgentAPI gRPC address (env "+varAgentAPIAddr+")")
+	controlAddr := fs.String("control.addr", envOr(varControlAddr, ":7780"),
+		"chaos control API listen address (env "+varControlAddr+")")
 	tick := fs.Duration("tick", time.Second, "agent tick: container progression + report cadence")
 	if err := fs.Parse(args); err != nil {
 		return 1

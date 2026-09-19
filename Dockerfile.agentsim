@@ -16,5 +16,7 @@ FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /out/conductor /usr/local/bin/conductor
 
+# Addresses come from CONDUCTOR_AGENTAPI_ADDR / CONDUCTOR_CONTROL_ADDR rather
+# than baked-in flags, so the same image runs anywhere the apiserver happens to
+# live without overriding the command.
 ENTRYPOINT ["conductor", "agentsim"]
-CMD ["--agentapi.addr", "apiserver:7443", "--control.addr", ":7780"]
