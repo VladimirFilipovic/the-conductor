@@ -5,6 +5,9 @@ import {
   drainHost,
   deleteReplica,
   restartReplica,
+  revertVolume,
+  ApiError,
+  type ServiceTarget,
 } from "@/lib/api";
 import { failed } from "@/lib/route";
 
@@ -16,7 +19,11 @@ export const dynamic = "force-dynamic";
 // overwrite a DB edit anyway.
 const AGENTSIM_URL = process.env.AGENTSIM_URL ?? "http://localhost:7780";
 
-async function agentChaos(action: string, target: "host" | "replica", id: string) {
+async function agentChaos(
+  action: string,
+  target: "host" | "replica" | "volume",
+  id: string,
+) {
   const url = `${AGENTSIM_URL}/chaos`;
   let res: Response;
   try {
@@ -41,24 +48,53 @@ async function fanOut(action: string, deploymentId: string) {
   await Promise.all(ids.map((id) => agentChaos(action, "replica", id)));
 }
 
-const handlers: Record<string, (id: string) => Promise<unknown>> = {
+// Every action names an id; the control-plane volume actions also carry the
+// (target, mount_path) the project layer addresses a volume by.
+interface ChaosCall {
+  id: string;
+  target?: ServiceTarget;
+  mount_path?: string;
+}
+
+const handlers: Record<string, (c: ChaosCall) => Promise<unknown>> = {
   // host agent chaos
-  host_kill: (id) => agentChaos("host_kill", "host", id),
-  host_recover: (id) => agentChaos("host_recover", "host", id),
+  host_kill: ({ id }) => agentChaos("host_kill", "host", id),
+  host_recover: ({ id }) => agentChaos("host_recover", "host", id),
   // replica (container) chaos on the agent
-  replica_crash: (id) => agentChaos("replica_crash", "replica", id),
-  replica_crashloop: (id) => agentChaos("replica_crashloop", "replica", id),
-  replica_stall_health: (id) => agentChaos("replica_stall_health", "replica", id),
-  replica_heal: (id) => agentChaos("replica_heal", "replica", id),
+  replica_crash: ({ id }) => agentChaos("replica_crash", "replica", id),
+  replica_crashloop: ({ id }) => agentChaos("replica_crashloop", "replica", id),
+  replica_stall_health: ({ id }) => agentChaos("replica_stall_health", "replica", id),
+  replica_heal: ({ id }) => agentChaos("replica_heal", "replica", id),
+  // volume (disk) chaos on the agent: the grow is approved but never lands
+  volume_stall_resize: ({ id }) => agentChaos("volume_stall_resize", "volume", id),
+  volume_heal: ({ id }) => agentChaos("volume_heal", "volume", id),
   // deployment-wide fan-out of agent chaos
-  crash_deployment: (id) => fanOut("replica_crash", id),
-  stall_rollout: (id) => fanOut("replica_stall_health", id),
+  crash_deployment: ({ id }) => fanOut("replica_crash", id),
+  stall_rollout: ({ id }) => fanOut("replica_stall_health", id),
   // operator desired state + synthetic row accidents via the control plane
-  cordon_host: (id) => cordonHost(id),
-  drain_host: (id) => drainHost(id),
-  delete_replica: (id) => deleteReplica(id),
-  restart_replica: (id) => restartReplica(id),
+  cordon_host: ({ id }) => cordonHost(id),
+  drain_host: ({ id }) => drainHost(id),
+  delete_replica: ({ id }) => deleteReplica(id),
+  restart_replica: ({ id }) => restartReplica(id),
+  // a parked grow goes back to its previous size; grow itself has its own
+  // route (/api/volumes/resize) because it needs a body, not an id
+  revert_volume: ({ target, mount_path }) => {
+    if (!target || !mount_path) {
+      throw new ApiError(400, "revert_volume needs target and mount_path");
+    }
+    return revertVolume(target, mount_path);
+  },
 };
+
+function serviceTarget(v: unknown): ServiceTarget | undefined {
+  if (typeof v !== "object" || v === null) return undefined;
+  const t = v as Record<string, unknown>;
+  const project = typeof t.project === "string" ? t.project : "";
+  const environment = typeof t.environment === "string" ? t.environment : "";
+  const service = typeof t.service === "string" ? t.service : "";
+  if (!project || !environment || !service) return undefined;
+  return { project, environment, service };
+}
 
 export async function POST(req: NextRequest) {
   let body: Record<string, unknown>;
@@ -78,7 +114,11 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    await handler(id);
+    await handler({
+      id,
+      target: serviceTarget(body.target),
+      mount_path: typeof body.mount_path === "string" ? body.mount_path : undefined,
+    });
     return NextResponse.json({ ok: true });
   } catch (err) {
     return failed(err);

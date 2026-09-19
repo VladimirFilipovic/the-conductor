@@ -31,6 +31,22 @@ export interface ReplicaRow {
   deployment_id: string;
 }
 
+// A volume as the topology carries it. Sizes are bytes on the wire (the UI
+// shows GiB, as the CLI does); observed_size_bytes is null until the agent has
+// reported the disk once. The id is what agentsim chaos addresses; the control
+// plane addresses a volume by (target, mount_path).
+export interface VolumeRow {
+  id: string;
+  mount_path: string;
+  region: string;
+  host_id: string | null;
+  hostname: string | null;
+  status: string;
+  desired_size_bytes: number;
+  observed_size_bytes: number | null;
+  previous_desired_size_bytes: number | null;
+}
+
 export interface ServiceNode {
   environment_service_id: string;
   environment_id: string;
@@ -47,6 +63,8 @@ export interface ServiceNode {
   } | null;
   regions: { region: string; desired: number; observed: number; healthy: number }[];
   replicas: ReplicaRow[];
+  // Empty for a stateless service.
+  volumes: VolumeRow[];
 }
 
 // Two owners, two fields: host_healthy is what the heartbeat says, status is
@@ -238,6 +256,38 @@ export function scale(target: ServiceTarget, replicas: Record<string, number>) {
     ...target,
     replicas,
   });
+}
+
+// --- Volumes -----------------------------------------------------------------
+// Grow and its one-shot take-back. Every guard (grow-only, one grow in flight,
+// revert only from resize_pending) is the project layer's; a rejection comes
+// back as 409 with the guard's own message.
+
+export interface ResizeOutcome {
+  ok: boolean;
+  // The host's volume budget can't absorb the grow right now: the engine will
+  // park the volume as resize_pending and keep re-checking every tick.
+  waiting_for_space: boolean;
+  shortfall_bytes: number;
+}
+
+export function resizeVolume(
+  target: ServiceTarget,
+  mountPath: string,
+  sizeBytes: number,
+) {
+  return post<ResizeOutcome>("/v1/volumes/resize", {
+    ...target,
+    mount_path: mountPath,
+    size_bytes: sizeBytes,
+  });
+}
+
+export function revertVolume(target: ServiceTarget, mountPath: string) {
+  return post<{ ok: boolean; desired_size_bytes: number }>(
+    "/v1/volumes/revert",
+    { ...target, mount_path: mountPath },
+  );
 }
 
 // --- Operator chaos ----------------------------------------------------------

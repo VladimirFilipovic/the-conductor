@@ -49,6 +49,27 @@ export function hostHealthClass(healthy: boolean): string {
     : "bg-red-500/10 text-red-700 border-red-400/40";
 }
 
+// Volume lifecycle; the engine is the only writer of this status. resize_pending
+// is the one state the operator can act on (revert), hence amber.
+export function volumeStatusClass(status: string): string {
+  const map: Record<string, string> = {
+    pending: "bg-zinc-500/10 text-zinc-600 border-zinc-400/40",
+    attached: "bg-emerald-500/10 text-emerald-700 border-emerald-400/40",
+    resizing: "bg-blue-500/10 text-blue-700 border-blue-400/40",
+    resize_pending: "bg-amber-500/10 text-amber-700 border-amber-400/40",
+    detached: "bg-zinc-400/10 text-zinc-400 border-zinc-300/60",
+    failed: "bg-red-500/10 text-red-700 border-red-400/40",
+  };
+  return map[status] ?? NEUTRAL;
+}
+
+export const GiB = 1024 ** 3;
+
+export function formatGiB(bytes: number): string {
+  const gib = bytes / GiB;
+  return `${Number.isInteger(gib) ? gib : gib.toFixed(1)}GiB`;
+}
+
 export function levelClass(level: string): string {
   const map: Record<string, string> = {
     DEBUG: "bg-zinc-500/10 text-zinc-500 border-zinc-400/40",

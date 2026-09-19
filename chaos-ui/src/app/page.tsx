@@ -7,6 +7,7 @@ import { postJson } from "@/lib/http";
 import { Badge } from "@/components/Badge";
 import { ActivityLog } from "@/components/ActivityLog";
 import { ActionMenu, type MenuItem } from "@/components/ActionMenu";
+import { VolumeTable } from "@/components/VolumeTable";
 import {
   CreateMenu,
   CreateForm,
@@ -350,6 +351,9 @@ function ServiceRow({
       )}
 
       {svc.replicas.length > 0 && <ReplicaTable svc={svc} chaos={chaos} />}
+      {svc.stateful && svc.volumes.length > 0 && (
+        <VolumeTable svc={svc} target={target} />
+      )}
     </div>
   );
 }
