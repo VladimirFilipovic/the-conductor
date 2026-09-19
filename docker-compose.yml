@@ -43,9 +43,9 @@ services:
       context: .
       dockerfile: Dockerfile.engine
     container_name: conductor-apiserver
-    # Same image as the engine; the entrypoint skips migrate/seed for any mode
-    # but engine and instead waits for the engine to have seeded the fleet.
-    command: ["apiserver"]
+    # Same image as the engine, different entrypoint script: this one migrates
+    # nothing and waits for the engine to have seeded the fleet.
+    command: ["/usr/local/bin/apiserver-entrypoint.sh"]
     environment:
       CONDUCTOR_DATABASE_URL: postgres://conductor:conductor@postgres:5432/conductor?sslmode=disable
       LOG_LEVEL: DEBUG

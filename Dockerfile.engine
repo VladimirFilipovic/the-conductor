@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Builds the conductor binary and bundles goose so the engine container can
 # migrate the control plane before the reconcile loop starts. The apiserver
-# runs from the same image (compose overrides the command).
+# runs from the same image, with its own entrypoint script as the command.
 
 FROM golang:1.25-alpine AS builder
 WORKDIR /src
@@ -23,7 +23,10 @@ COPY --from=builder /out/conductor /usr/local/bin/conductor
 COPY --from=builder /go/bin/goose /usr/local/bin/goose
 COPY db/migrations ./db/migrations
 COPY db/seeds ./db/seeds
-COPY docker/engine-entrypoint.sh /usr/local/bin/engine-entrypoint.sh
-RUN chmod +x /usr/local/bin/engine-entrypoint.sh
+COPY docker/wait-for-db.sh docker/engine-entrypoint.sh docker/apiserver-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/engine-entrypoint.sh /usr/local/bin/apiserver-entrypoint.sh
 
-ENTRYPOINT ["/usr/local/bin/engine-entrypoint.sh"]
+# No ENTRYPOINT: an image gets exactly one, and both modes need to be nameable
+# as a plain start command — compose says `command:`, Railway says "start
+# command", and neither then has to smuggle a mode through argv.
+CMD ["/usr/local/bin/engine-entrypoint.sh"]
