@@ -102,6 +102,39 @@ func TestFreshReaderBacklogIsCappedAtTail(t *testing.T) {
 	}
 }
 
+// An engine restart resets the id space, so a browser resuming with the old
+// engine's last id must get a tail rather than wait for the new process to
+// count past it.
+func TestResumePastTheRingFallsBackToTail(t *testing.T) {
+	r := New(10)
+	for i := 1; i <= 3; i++ {
+		write(t, r, fmt.Sprintf("line %d", i))
+	}
+
+	backlog, _, cancel := r.SubscribeSince(500, 2)
+	defer cancel()
+
+	if !sameIDs(backlog, 2, 3) {
+		t.Fatalf("backlog ids = %v, want [2 3]", ids(backlog))
+	}
+}
+
+// Caught up is not the same as out of range: the last issued id must still
+// mean "nothing new", not "replay the tail".
+func TestResumeAtTheLastIDReplaysNothing(t *testing.T) {
+	r := New(10)
+	for i := 1; i <= 3; i++ {
+		write(t, r, fmt.Sprintf("line %d", i))
+	}
+
+	backlog, _, cancel := r.SubscribeSince(3, 2)
+	defer cancel()
+
+	if len(backlog) != 0 {
+		t.Fatalf("backlog ids = %v, want none", ids(backlog))
+	}
+}
+
 // A reader that stops draining must be dropped, never block the writer: Write
 // runs inline on the engine's reconcile tick.
 func TestSlowSubscriberIsDroppedNotBlocked(t *testing.T) {

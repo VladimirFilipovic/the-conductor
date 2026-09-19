@@ -99,7 +99,8 @@ func (r *Ring) append(text string) {
 // SubscribeSince registers a subscriber and takes its replay backlog in the
 // same critical section, so no line can slip between the two and the caller
 // never de-duplicates. since 0 means a fresh reader — it gets the last `last`
-// lines; any other value means a resume and gets everything after that id.
+// lines; any other value means a resume and gets everything after that id, or
+// a fresh tail when that id is one this process never issued.
 // Lines older than the buffer are simply gone: a reader that was away longer
 // than the ring is deep resumes from the oldest line still held.
 //
@@ -109,8 +110,12 @@ func (r *Ring) SubscribeSince(since uint64, last int) ([]Line, <-chan Line, func
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// An id past the end of the ring is an id this process never issued: the
+	// engine restarted and took the id space with it. Serving a fresh tail is
+	// what the file tail did when the file shrank, and the alternative is a
+	// reader that sees nothing until the new process catches up to the old id.
 	backlog := r.sinceLocked(since)
-	if since == 0 {
+	if since == 0 || since >= r.nextID {
 		backlog = r.lastLocked(last)
 	}
 
