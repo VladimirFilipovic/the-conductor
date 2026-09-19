@@ -13,10 +13,12 @@ import (
 
 const volumeUsage = `conductor volume <subcommand> [flags]
 
-Manage a service's persistent volumes. A volume follows the service across
-restarts and reschedules. Its size is set at add (default 1 GiB) and stays
-mutable — grow it later with update. Requires a project and service (volumes
-are service-scoped, so no environment is needed).
+Manage a service's persistent volumes in one environment. A volume follows
+the service across restarts and reschedules, and belongs to the environment
+it was added in: the same service in another environment has its own disk.
+Its size is set at add (default 1 GiB) and stays mutable — grow it later with
+update. Requires a project, environment and service (-e is filled from the
+linked environment when omitted, like up and scale).
 
 Subcommands:
   list                List the service's volumes.
@@ -49,9 +51,7 @@ func cmdVolume(args []string) error {
 		return err
 	}
 	resolve(&t, true)
-	// Volumes key off the service, a single project-scoped row shared across
-	// environments — the environment pointer is irrelevant here.
-	if err := t.require(false, true); err != nil {
+	if err := t.require(true, true); err != nil {
 		return usageErr(volumeUsage, err.Error())
 	}
 
@@ -81,7 +81,7 @@ func cmdVolume(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("added volume at %s on service %q in project %s  (%s, %s)\n", vol.MountPath, t.Service, t.Project, vol.Region, formatBytes(vol.DesiredSizeBytes))
+		fmt.Printf("added volume at %s on service %q in %s/%s  (%s, %s)\n", vol.MountPath, t.Service, t.Project, t.Environment, vol.Region, formatBytes(vol.DesiredSizeBytes))
 		return nil
 	case "update", "resize":
 		if *size <= 0 {
@@ -95,7 +95,7 @@ func cmdVolume(args []string) error {
 			return err
 		}
 		vol := out.Volume
-		fmt.Printf("resizing volume at %s on service %q in project %s → %s\n", vol.MountPath, t.Service, t.Project, formatBytes(vol.DesiredSizeBytes))
+		fmt.Printf("resizing volume at %s on service %q in %s/%s → %s\n", vol.MountPath, t.Service, t.Project, t.Environment, formatBytes(vol.DesiredSizeBytes))
 		switch {
 		case !vol.HostID.Valid:
 			fmt.Println("  not placed yet: the volume will be created at the new size")
@@ -113,7 +113,7 @@ func cmdVolume(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("reverted volume at %s on service %q in project %s → %s (engine settles on next tick)\n", vol.MountPath, t.Service, t.Project, formatBytes(vol.DesiredSizeBytes))
+		fmt.Printf("reverted volume at %s on service %q in %s/%s → %s (engine settles on next tick)\n", vol.MountPath, t.Service, t.Project, t.Environment, formatBytes(vol.DesiredSizeBytes))
 		return nil
 	case "rm", "remove", "delete":
 		if *mount == "" {
@@ -123,7 +123,7 @@ func cmdVolume(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("removed volume at %s on service %q in project %s\n", vol.MountPath, t.Service, t.Project)
+		fmt.Printf("removed volume at %s on service %q in %s/%s\n", vol.MountPath, t.Service, t.Project, t.Environment)
 		return nil
 	}
 	return usageErr(volumeUsage, "unknown volume subcommand "+sub)
@@ -135,7 +135,7 @@ func listVolumesCmd(ctx context.Context, proj *project.Service, t Target) error 
 		return err
 	}
 	if len(vols) == 0 {
-		fmt.Printf("no volumes on service %q in project %s\n", t.Service, t.Project)
+		fmt.Printf("no volumes on service %q in %s/%s\n", t.Service, t.Project, t.Environment)
 		return nil
 	}
 	renderVolumes(os.Stdout, vols)

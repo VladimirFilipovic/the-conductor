@@ -32,10 +32,13 @@ type AddVolumeInput struct {
 	SizeBytes int64
 }
 
-// AddVolume attaches a volume at the given mount path. An unknown service ⇒
-// storage.ErrNotFound; a second volume at the same mount path ⇒ storage.ErrExists.
+// AddVolume attaches a volume at the given mount path to the target's
+// environment service. An unknown project/environment/service or an unbound
+// service ⇒ storage.ErrNotFound; a second volume at the same mount path in the
+// same environment ⇒ storage.ErrExists (the same mount in another environment
+// is a different disk).
 func (s *Service) AddVolume(ctx context.Context, in AddVolumeInput) (db.Volume, error) {
-	id, err := serviceID(ctx, s.store, in.Target)
+	id, err := environmentServiceID(ctx, s.store, in.Target)
 	if err != nil {
 		return db.Volume{}, err
 	}
@@ -46,13 +49,14 @@ func (s *Service) AddVolume(ctx context.Context, in AddVolumeInput) (db.Volume, 
 	return s.store.CreateVolume(ctx, id, volumeName(in.MountPath), defaultVolumeRegion, in.MountPath, size)
 }
 
-// ListVolumes returns the service's volumes, ordered by mount path; the service
-// is resolved first so an unknown one errs instead of an empty list.
+// ListVolumes returns the environment service's volumes, ordered by mount
+// path; the binding is resolved first so an unknown one errs instead of an
+// empty list.
 func (s *Service) ListVolumes(ctx context.Context, t target.Target) ([]db.Volume, error) {
-	if _, err := serviceID(ctx, s.store, t); err != nil {
+	if _, err := environmentServiceID(ctx, s.store, t); err != nil {
 		return nil, err
 	}
-	return s.store.ListVolumesByService(ctx, t.Project, t.Service)
+	return s.store.ListVolumesByEnvironmentService(ctx, t.Project, t.Environment, t.Service)
 }
 
 // ResizeOutcome is ResizeVolume's answer: the patched row plus the engine's
@@ -83,7 +87,7 @@ type ResizeOutcome struct {
 // volume-budget flag may disagree at the margin; the engine's answer is the one
 // that counts, this one just saves the operator a round-trip to `volume list`.
 func (s *Service) ResizeVolume(ctx context.Context, t target.Target, mountPath string, sizeBytes int64) (ResizeOutcome, error) {
-	id, err := serviceID(ctx, s.store, t)
+	id, err := environmentServiceID(ctx, s.store, t)
 	if err != nil {
 		return ResizeOutcome{}, err
 	}
@@ -146,7 +150,7 @@ func (s *Service) ResizeVolume(ctx context.Context, t target.Target, mountPath s
 // yet needs one more tick. Status stays with the engine, which settles the
 // volume back to attached on its next tick (observed >= desired now holds).
 func (s *Service) RevertVolume(ctx context.Context, t target.Target, mountPath string) (db.Volume, error) {
-	id, err := serviceID(ctx, s.store, t)
+	id, err := environmentServiceID(ctx, s.store, t)
 	if err != nil {
 		return db.Volume{}, err
 	}
@@ -175,7 +179,7 @@ func (s *Service) RevertVolume(ctx context.Context, t target.Target, mountPath s
 // RemoveVolume detaches and deletes the volume at mountPath. A volume still
 // pinned by a replica cannot be deleted (FK) — scale the service down first.
 func (s *Service) RemoveVolume(ctx context.Context, t target.Target, mountPath string) (db.Volume, error) {
-	id, err := serviceID(ctx, s.store, t)
+	id, err := environmentServiceID(ctx, s.store, t)
 	if err != nil {
 		return db.Volume{}, err
 	}
@@ -183,27 +187,30 @@ func (s *Service) RemoveVolume(ctx context.Context, t target.Target, mountPath s
 }
 
 // VolumeStore is the volume slice, backing `conductor volume`. Volumes key off
-// the service, not the environment service — a volume outlives any single
-// deployment.
+// the environment service: a volume outlives any single deployment, but data is
+// what environments isolate, so one service bound into two environments owns
+// two disks.
 type VolumeStore interface {
-	CreateVolume(ctx context.Context, serviceID uuid.UUID, name, region, mountPath string, sizeBytes int64) (db.Volume, error)
-	ListVolumesByService(ctx context.Context, projectName, service string) ([]db.Volume, error)
-	GetVolume(ctx context.Context, serviceID uuid.UUID, mountPath string) (db.Volume, error)
-	UpdateVolumeSize(ctx context.Context, serviceID uuid.UUID, mountPath string, sizeBytes int64) (db.Volume, error)
-	RevertVolumeSize(ctx context.Context, serviceID uuid.UUID, mountPath string) (db.Volume, error)
+	CreateVolume(ctx context.Context, envServiceID uuid.UUID, name, region, mountPath string, sizeBytes int64) (db.Volume, error)
+	ListVolumesByEnvironmentService(ctx context.Context, projectName, environment, service string) ([]db.Volume, error)
+	GetVolume(ctx context.Context, envServiceID uuid.UUID, mountPath string) (db.Volume, error)
+	UpdateVolumeSize(ctx context.Context, envServiceID uuid.UUID, mountPath string, sizeBytes int64) (db.Volume, error)
+	RevertVolumeSize(ctx context.Context, envServiceID uuid.UUID, mountPath string) (db.Volume, error)
 	// GetHost + ListVolumesByHost feed the resize advisory: the host's disk
 	// and what its volumes already commit.
 	GetHost(ctx context.Context, hostID uuid.UUID) (db.Host, error)
 	ListVolumesByHost(ctx context.Context, hostID uuid.UUID) ([]db.Volume, error)
-	DeleteVolume(ctx context.Context, serviceID uuid.UUID, mountPath string) (db.Volume, error)
+	DeleteVolume(ctx context.Context, envServiceID uuid.UUID, mountPath string) (db.Volume, error)
 }
 
-// serviceID resolves the project-domain half of every volume operation: volumes
-// key off the service row, and resolving it up front turns an unknown service
-// into storage.ErrNotFound instead of an empty list or a no-op write.
-func serviceID(ctx context.Context, st ProjectStore, t target.Target) (uuid.UUID, error) {
-	svc, err := st.GetService(ctx, t.Project, t.Service)
-	return svc.ID, err
+// environmentServiceID resolves the project-domain half of every volume
+// operation: volumes key off the environment_services row, the same one
+// Deploy/Scale target, and resolving it up front turns an unknown environment,
+// service or binding into storage.ErrNotFound instead of an empty list or a
+// no-op write.
+func environmentServiceID(ctx context.Context, st DeploymentStore, t target.Target) (uuid.UUID, error) {
+	row, err := st.GetEnvironmentService(ctx, t.Project, t.Environment, t.Service)
+	return row.ID, err
 }
 
 // volumeName derives the engine's stable internal id from the mount path
