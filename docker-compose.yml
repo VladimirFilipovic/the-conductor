@@ -29,7 +29,12 @@ services:
     environment:
       CONDUCTOR_DATABASE_URL: postgres://conductor:conductor@postgres:5432/conductor?sslmode=disable
       CONDUCTOR_LOG_FILE: /var/log/conductor/engine.log
+      CONDUCTOR_LOGS_ADDR: ":7090"
       LOG_LEVEL: DEBUG
+    ports:
+      # Log stream (SSE). chaos-ui reaches it over the compose network; the
+      # published port is for `curl -N localhost:7090/logs/stream`.
+      - "7090:7090"
     volumes:
       - conductor-logs:/var/log/conductor
     depends_on:

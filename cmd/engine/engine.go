@@ -12,7 +12,10 @@ import (
 
 	"conductor/internal/config"
 	"conductor/internal/engine"
+	"conductor/internal/logbuf"
 	"conductor/internal/storage"
+
+	"golang.org/x/sync/errgroup"
 )
 
 func Run(args []string) int {
@@ -28,7 +31,17 @@ func Run(args []string) int {
 		return 1
 	}
 
-	logW := io.Writer(os.Stderr)
+	writers := []io.Writer{os.Stderr}
+
+	// The ring tees off the same handler as stderr, so what the stream serves
+	// is the log, not a second rendering of it.
+	var logs *logbuf.Server
+	if cfg.LogsAddr != "" {
+		ring := logbuf.New(logbuf.DefaultCapacity)
+		writers = append(writers, ring)
+		logs = logbuf.NewServer(cfg.LogsAddr, ring)
+	}
+
 	if cfg.LogFile != "" {
 		logFile, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 		if err != nil {
@@ -36,11 +49,11 @@ func Run(args []string) int {
 			return 1
 		}
 		defer func() { _ = logFile.Close() }()
-		logW = io.MultiWriter(os.Stderr, logFile)
+		writers = append(writers, logFile)
 	}
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(
-		logW,
+		io.MultiWriter(writers...),
 		&slog.HandlerOptions{Level: cfg.LogLevel},
 	)))
 
@@ -57,7 +70,16 @@ func Run(args []string) int {
 	watchdog := engine.NewWatchdog(client)
 	eng := engine.New(client, engine.NewReconciler(*placement), engine.NewActuator(client))
 
-	if err := engine.Run(ctx, eng, watchdog); err != nil {
+	// The log stream shares the process but nothing else: it serves reads from
+	// memory, so a reader can't slow the reconcile loop down, and a failed
+	// listener still takes the container down for the supervisor to restart.
+	g, ctx := errgroup.WithContext(ctx)
+	if logs != nil {
+		g.Go(func() error { return logs.Run(ctx) })
+	}
+	g.Go(func() error { return engine.Run(ctx, eng, watchdog) })
+
+	if err := g.Wait(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
