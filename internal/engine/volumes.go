@@ -60,7 +60,7 @@ func (p *placer) resizeVolumes(snap stateSnapshot, led ledger) []Intent {
 			// hl is nil for an unhealthy host: nothing fits there, so the grow
 			// parks and the operator keeps the revert exit.
 			hl := led[v.HostID]
-			item := packItem{id: v.ID, region: v.Region, disk: v.GrowDelta(), resize: true}
+			item := packItem{id: v.ID, region: v.Slot.Region, disk: v.GrowDelta(), resize: true}
 			if hl != nil && p.fits(item, hl) {
 				led.commit(item, v.HostID)
 				intents = append(intents, Intent{Kind: IntentResizeVolume, VolumeID: v.ID})

@@ -160,7 +160,7 @@ func (p *placer) scarcityWeights(snap stateSnapshot) regionWeights {
 		s.dMem += r.MemBytes
 	}
 	for _, v := range snap.volumes {
-		acc(v.Region).dDisk += v.Committed()
+		acc(v.Slot.Region).dDisk += v.Committed()
 	}
 	rw := make(regionWeights, len(byRegion))
 	for region, s := range byRegion {
@@ -451,7 +451,7 @@ func (p *placer) placeVolumes(snap stateSnapshot, led ledger) []Intent {
 		cpu, mem := serviceDemand(snap, v)
 		items = append(items, packItem{
 			id:     v.ID,
-			region: v.Region,
+			region: v.Slot.Region,
 			cpu:    cpu,
 			mem:    mem,
 			disk:   v.Desired,
@@ -479,11 +479,11 @@ func (p *placer) placeVolumes(snap stateSnapshot, led ledger) []Intent {
 	return intents
 }
 
-// serviceDemand is the cpu/mem one replica of the volume's service needs in
-// its region — the co-scheduling gate for volume placement.
+// serviceDemand is the cpu/mem one replica of the volume's slot needs — the
+// co-scheduling gate for volume placement.
 func serviceDemand(snap stateSnapshot, v volume) (int64, int64) {
 	for _, d := range snap.desired {
-		if d.ServiceID == v.ServiceID && d.Slot.Region == v.Region {
+		if d.Slot == v.Slot {
 			return int64(d.CPUMillicores), d.MemBytes
 		}
 	}

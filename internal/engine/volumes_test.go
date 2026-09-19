@@ -18,7 +18,7 @@ import (
 const gib = int64(1) << 30
 
 func placedVolume(n byte, hostID uuid.UUID, status domain.VolumeStatus, desired, observed int64) volume {
-	return volume{ID: pinnedID(n), ServiceID: pinnedID(100 + n), Region: "eu", HostID: hostID,
+	return volume{ID: pinnedID(n), Slot: replicaSlot{pinnedID(100 + n), "eu"}, HostID: hostID,
 		VolumeSizing: domain.VolumeSizing{Status: status, Desired: desired, Observed: observed}}
 }
 
@@ -161,7 +161,7 @@ func TestResizeVolumesStateMachine(t *testing.T) {
 func TestPlanVolumesPlacesAndGrowsInOneTick(t *testing.T) {
 	h := testHost(1, "eu", 2000, 1<<30, 10*gib)
 	growing := placedVolume(2, h.ID, domain.VolumeAttached, 4*gib, 2*gib)
-	fresh := volume{ID: pinnedID(3), ServiceID: pinnedID(103), Region: "eu",
+	fresh := volume{ID: pinnedID(3), Slot: replicaSlot{pinnedID(103), "eu"},
 		VolumeSizing: domain.VolumeSizing{Status: domain.VolumePending, Desired: 2 * gib}}
 	snap := stateSnapshot{hosts: []host{h}, volumes: []volume{growing, fresh}}
 	p := placer{cfg: flatPlacement()}
@@ -186,7 +186,7 @@ func TestPlanVolumesPlacesAndGrowsInOneTick(t *testing.T) {
 func TestPlanVolumesUnapprovedGrowDoesNotBlockPlacement(t *testing.T) {
 	h := testHost(1, "eu", 2000, 1<<30, 80*gib)
 	wanting := placedVolume(2, h.ID, domain.VolumeAttached, 100*gib, 4*gib)
-	fresh := volume{ID: pinnedID(3), ServiceID: pinnedID(103), Region: "eu",
+	fresh := volume{ID: pinnedID(3), Slot: replicaSlot{pinnedID(103), "eu"},
 		VolumeSizing: domain.VolumeSizing{Status: domain.VolumePending, Desired: 30 * gib}}
 	snap := stateSnapshot{hosts: []host{h}, volumes: []volume{wanting, fresh}}
 	p := placer{cfg: flatPlacement()}

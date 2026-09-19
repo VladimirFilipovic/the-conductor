@@ -59,14 +59,13 @@ type memReplica struct {
 }
 
 type memVolume struct {
-	id        uuid.UUID
-	serviceID uuid.UUID
-	region    string
-	hostID    uuid.UUID
-	size      int64 // desired
-	previous  int64 // desired before the last grow request; 0 = nothing to revert to
-	observed  int64 // 0 = never reported
-	status    string
+	id       uuid.UUID
+	slot     replicaSlot // the owning environment service + region, as the volumes row carries it
+	hostID   uuid.UUID
+	size     int64 // desired
+	previous int64 // desired before the last grow request; 0 = nothing to revert to
+	observed int64 // 0 = never reported
+	status   string
 }
 
 // grow plays `volume update`: desired moves, the revert target is kept, the
@@ -238,8 +237,8 @@ func (m *memStore) ListActiveVolumes(context.Context) ([]db.Volume, error) {
 	for _, v := range m.volumes {
 		out = append(out, db.Volume{
 			ID:                       v.id,
-			ServiceID:                v.serviceID,
-			Region:                   v.region,
+			EnvironmentServiceID:     v.slot.EnvironmentServiceID,
+			Region:                   v.slot.Region,
 			HostID:                   uuid.NullUUID{UUID: v.hostID, Valid: v.hostID != uuid.Nil},
 			DesiredSizeBytes:         v.size,
 			PreviousDesiredSizeBytes: sql.NullInt64{Int64: v.previous, Valid: v.previous != 0},
@@ -696,10 +695,12 @@ func (l *loop) addHost(disk int64) uuid.UUID {
 	return id
 }
 
-func (l *loop) addVolume(serviceID uuid.UUID, region string, size int64) uuid.UUID {
+// addVolume plays `volume add` for the slot's environment service — the same
+// key deploy() takes, so a volume and the deployment it serves share one arg.
+func (l *loop) addVolume(slot replicaSlot, size int64) uuid.UUID {
 	id := uuid.New()
 	l.ms.volumes = append(l.ms.volumes, &memVolume{
-		id: id, serviceID: serviceID, region: region, size: size, status: "pending",
+		id: id, slot: slot, size: size, status: "pending",
 	})
 	return id
 }
@@ -942,7 +943,7 @@ func TestE2EStatefulRecreateKeepsSingleWriter(t *testing.T) {
 	serviceID := uuid.New()
 	l.addHost(10 << 30)
 	l.addHost(10 << 30)
-	vol := l.addVolume(serviceID, region, 1<<30)
+	vol := l.addVolume(slot, 1<<30)
 
 	v1 := l.deploy(slot, serviceID, 1, true)
 	l.rollout(v1)
@@ -998,7 +999,7 @@ func TestE2EVolumeResizeGrowOnly(t *testing.T) {
 	// 10 GiB disk, 0.8 volume budget → 8 GiB packable; 0.2 reserve → new
 	// volumes see 6.4 GiB, grows may fill all 8.
 	hostID := l.addHost(10 << 30)
-	vol := l.addVolume(serviceID, region, 2<<30)
+	vol := l.addVolume(slot, 2<<30)
 
 	v1 := l.deploy(slot, serviceID, 1, true)
 	l.rollout(v1)
@@ -1035,7 +1036,7 @@ func TestE2EVolumeResizeGrowOnly(t *testing.T) {
 	// The parked request is not a reservation: a second 2 GiB volume lands on
 	// the same host (2 ≤ 8 − 4 − 1.6 reserve), where charging the 9 GiB desired
 	// would have made the host look overcommitted.
-	second := l.addVolume(uuid.New(), region, 2<<30)
+	second := l.addVolume(replicaSlot{uuid.New(), region}, 2<<30)
 	l.tick()
 	l.agentConverge()
 	if v := l.ms.volume(second); v.hostID != hostID || v.status != "attached" {

@@ -167,13 +167,9 @@ func buildReplicaGroups(snap stateSnapshot) []replicaGroup {
 		replicaIndex[r.Slot] = b
 	}
 
-	type volumeKey struct {
-		serviceID uuid.UUID
-		region    string
-	}
-	volumeIndex := make(map[volumeKey]volume, len(snap.volumes))
+	volumeIndex := make(map[replicaSlot]volume, len(snap.volumes))
 	for _, v := range snap.volumes {
-		volumeIndex[volumeKey{v.ServiceID, v.Region}] = v
+		volumeIndex[v.Slot] = v
 	}
 
 	groups := make([]replicaGroup, 0, len(snap.desired))
@@ -182,7 +178,7 @@ func buildReplicaGroups(snap stateSnapshot) []replicaGroup {
 		delete(replicaIndex, d.Slot)
 		groups = append(groups, replicaGroup{
 			Desired:          d,
-			Volume:           volumeIndex[volumeKey{d.ServiceID, d.Slot.Region}],
+			Volume:           volumeIndex[d.Slot],
 			TargetReplicas:   b.target,
 			FrozenReplicas:   b.frozen,
 			OutgoingReplicas: b.outgoing,

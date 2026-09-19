@@ -20,7 +20,6 @@ import (
 type desiredState struct {
 	Slot          replicaSlot
 	DeploymentID  uuid.UUID
-	ServiceID     uuid.UUID
 	Replicas      int32
 	CPUMillicores int32
 	MemBytes      int64
@@ -84,11 +83,13 @@ type host struct {
 	Open bool
 }
 
+// volume is one environment service's disk in one region — the same
+// replicaSlot the desired rows and replicas carry, so a service bound into
+// two environments owns two volumes and the reconciler never cross-wires them.
 type volume struct {
-	ID        uuid.UUID
-	ServiceID uuid.UUID
-	Region    string
-	HostID    uuid.UUID
+	ID     uuid.UUID
+	Slot   replicaSlot
+	HostID uuid.UUID
 	// VolumeSizing carries status + desired + observed and the predicates the
 	// resize pass and the ledger are written against (Drifting, CaughtUp,
 	// Committed) — the same ones the downlink and the CLI use.
@@ -180,7 +181,6 @@ func newStateSnapshot(
 		snap.desired = append(snap.desired, desiredState{
 			Slot:             replicaSlot{d.EnvironmentServiceID, d.Region},
 			DeploymentID:     d.DeploymentID,
-			ServiceID:        d.ServiceID,
 			Replicas:         d.DesiredReplicas,
 			CPUMillicores:    d.CpuMillicores,
 			MemBytes:         d.MemBytes,
@@ -226,8 +226,7 @@ func newStateSnapshot(
 	for _, v := range volumes {
 		snap.volumes = append(snap.volumes, volume{
 			ID:           v.ID,
-			ServiceID:    v.ServiceID,
-			Region:       v.Region,
+			Slot:         replicaSlot{v.EnvironmentServiceID, v.Region},
 			HostID:       v.HostID.UUID,
 			VolumeSizing: storage.SizingOf(v),
 		})

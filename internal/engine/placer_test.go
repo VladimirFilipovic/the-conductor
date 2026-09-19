@@ -294,7 +294,7 @@ func TestPinnedReplicaFollowsVolume(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			vol := volume{ID: pinnedID(40), ServiceID: uuid.New(), Region: region, HostID: tt.volumeHost, VolumeSizing: domain.VolumeSizing{Desired: 1 << 20}}
+			vol := volume{ID: pinnedID(40), Slot: replicaSlot{uuid.New(), region}, HostID: tt.volumeHost, VolumeSizing: domain.VolumeSizing{Desired: 1 << 20}}
 			r := hostlessReplica(10, slot, 100, 100, domain.ReplicaPhasePending)
 			r.VolumeID = vol.ID
 			snap := stateSnapshot{
@@ -333,14 +333,13 @@ func placedVolumes(t *testing.T, intents []Intent) map[uuid.UUID]uuid.UUID {
 // volume would land, the replica never schedule. The balanced host wins.
 func TestVolumeFilterRejectsCPUStarvedHost(t *testing.T) {
 	region := "eu"
-	serviceID := uuid.New()
+	slot := replicaSlot{uuid.New(), region}
 	diskRich := testHost(1, region, 1000, 1<<30, 100<<30)
 	balanced := testHost(2, region, 1000, 1<<30, 10<<30)
 	snap := stateSnapshot{
 		hosts: []host{diskRich, balanced},
 		desired: []desiredState{{
-			Slot:          replicaSlot{uuid.New(), region},
-			ServiceID:     serviceID,
+			Slot:          slot,
 			CPUMillicores: 100,
 			MemBytes:      100,
 		}},
@@ -348,7 +347,7 @@ func TestVolumeFilterRejectsCPUStarvedHost(t *testing.T) {
 			// Eats diskRich's cpu so the replica gate must reject it.
 			{ID: pinnedID(20), Slot: replicaSlot{uuid.New(), region}, HostID: diskRich.ID, CPUMillicores: 950},
 		},
-		volumes: []volume{{ID: pinnedID(40), ServiceID: serviceID, Region: region, VolumeSizing: domain.VolumeSizing{Desired: 1 << 30}}},
+		volumes: []volume{{ID: pinnedID(40), Slot: slot, VolumeSizing: domain.VolumeSizing{Desired: 1 << 30}}},
 	}
 
 	p := placer{cfg: flatPlacement()}
@@ -377,7 +376,7 @@ func TestVolumeBudgetBoundary(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			snap := stateSnapshot{
 				hosts:   []host{h},
-				volumes: []volume{{ID: pinnedID(40), ServiceID: uuid.New(), Region: region, VolumeSizing: domain.VolumeSizing{Desired: tt.size}}},
+				volumes: []volume{{ID: pinnedID(40), Slot: replicaSlot{uuid.New(), region}, VolumeSizing: domain.VolumeSizing{Desired: tt.size}}},
 			}
 			p := placer{cfg: flatPlacement()}
 			got := placedVolumes(t, p.placeVolumes(snap, p.newLedger(snap)))
@@ -398,8 +397,8 @@ func TestResizedVolumeBlocksNewVolume(t *testing.T) {
 	snap := stateSnapshot{
 		hosts: []host{h},
 		volumes: []volume{
-			{ID: pinnedID(40), ServiceID: uuid.New(), Region: region, HostID: h.ID, VolumeSizing: domain.VolumeSizing{Desired: 700}},
-			{ID: pinnedID(41), ServiceID: uuid.New(), Region: region, VolumeSizing: domain.VolumeSizing{Desired: 50}},
+			{ID: pinnedID(40), Slot: replicaSlot{uuid.New(), region}, HostID: h.ID, VolumeSizing: domain.VolumeSizing{Desired: 700}},
+			{ID: pinnedID(41), Slot: replicaSlot{uuid.New(), region}, VolumeSizing: domain.VolumeSizing{Desired: 50}},
 		},
 	}
 
@@ -420,8 +419,8 @@ func TestVolumesShareLedger(t *testing.T) {
 	snap := stateSnapshot{
 		hosts: []host{hA, hB},
 		volumes: []volume{
-			{ID: pinnedID(40), ServiceID: uuid.New(), Region: region, VolumeSizing: domain.VolumeSizing{Desired: 500}},
-			{ID: pinnedID(41), ServiceID: uuid.New(), Region: region, VolumeSizing: domain.VolumeSizing{Desired: 500}},
+			{ID: pinnedID(40), Slot: replicaSlot{uuid.New(), region}, VolumeSizing: domain.VolumeSizing{Desired: 500}},
+			{ID: pinnedID(41), Slot: replicaSlot{uuid.New(), region}, VolumeSizing: domain.VolumeSizing{Desired: 500}},
 		},
 	}
 
@@ -445,8 +444,8 @@ func TestVolumeSteadyStates(t *testing.T) {
 		name string
 		vol  volume
 	}{
-		{"placed volume is never re-placed", volume{ID: pinnedID(40), Region: region, HostID: h.ID, VolumeSizing: domain.VolumeSizing{Desired: 100}}},
-		{"unplaceable volume stays hostless", volume{ID: pinnedID(41), Region: region, VolumeSizing: domain.VolumeSizing{Desired: 10_000}}},
+		{"placed volume is never re-placed", volume{ID: pinnedID(40), Slot: replicaSlot{Region: region}, HostID: h.ID, VolumeSizing: domain.VolumeSizing{Desired: 100}}},
+		{"unplaceable volume stays hostless", volume{ID: pinnedID(41), Slot: replicaSlot{Region: region}, VolumeSizing: domain.VolumeSizing{Desired: 10_000}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -490,7 +489,7 @@ func TestPinnedReplicaReturnsToDrainingHost(t *testing.T) {
 	slot := replicaSlot{uuid.New(), region}
 	volHost := testHost(2, region, 1000, 1<<30, 1<<30)
 	volHost.Open = false
-	vol := volume{ID: pinnedID(40), ServiceID: uuid.New(), Region: region, HostID: volHost.ID, VolumeSizing: domain.VolumeSizing{Desired: 1 << 20}}
+	vol := volume{ID: pinnedID(40), Slot: replicaSlot{uuid.New(), region}, HostID: volHost.ID, VolumeSizing: domain.VolumeSizing{Desired: 1 << 20}}
 	r := hostlessReplica(10, slot, 100, 100, domain.ReplicaPhaseReplacing)
 	r.VolumeID = vol.ID
 
