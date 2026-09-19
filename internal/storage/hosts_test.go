@@ -22,7 +22,7 @@ import (
 type hostFixture struct {
 	c      *PostgresClient
 	dep    db.Deployment
-	svc    db.Service
+	es     db.EnvironmentService
 	hostID uuid.UUID
 }
 
@@ -54,11 +54,11 @@ func newHostFixture(t *testing.T, c *PostgresClient, status string, lastHeartbea
 	if err != nil {
 		t.Fatalf("CreateService: %v", err)
 	}
-	t.Cleanup(func() { _, _ = c.pool.ExecContext(ctx, "DELETE FROM volumes WHERE service_id = $1", svc.ID) })
 	es, err := c.AddServiceToEnvironment(ctx, env.ID, svc.ID, nil)
 	if err != nil {
 		t.Fatalf("AddServiceToEnvironment: %v", err)
 	}
+	t.Cleanup(func() { _, _ = c.pool.ExecContext(ctx, "DELETE FROM volumes WHERE environment_service_id = $1", es.ID) })
 	dep, err := c.CreateDeployment(ctx, db.CreateDeploymentParams{
 		EnvironmentServiceID: es.ID, Version: 1, ImageRef: "nginx:latest",
 		CpuMillicores: 500, MemBytes: 1 << 29,
@@ -72,7 +72,7 @@ func newHostFixture(t *testing.T, c *PostgresClient, status string, lastHeartbea
 		t.Fatalf("SetDeploymentRegion: %v", err)
 	}
 	t.Cleanup(func() { _, _ = c.pool.ExecContext(ctx, "DELETE FROM replicas WHERE deployment_id = $1", dep.ID) })
-	return hostFixture{c: c, dep: dep, svc: svc, hostID: hostID}
+	return hostFixture{c: c, dep: dep, es: es, hostID: hostID}
 }
 
 // replica plants one replica bound to the fixture host; volumeID Nil means
@@ -174,7 +174,7 @@ func TestCompleteDrainedHostsWaitsForReapIgnoresStateful(t *testing.T) {
 	if _, err := c.pool.ExecContext(ctx, "UPDATE hosts SET drain_started_at = $2 WHERE id = $1", f.hostID, now.Add(-15*time.Minute)); err != nil {
 		t.Fatalf("backdate drain: %v", err)
 	}
-	vol, err := c.CreateVolume(ctx, f.svc.ID, "data", "us-east-1", "/data", 1<<30)
+	vol, err := c.CreateVolume(ctx, f.es.ID, "data", "us-east-1", "/data", 1<<30)
 	if err != nil {
 		t.Fatalf("CreateVolume: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestHostTransitionsAndReservationBelt(t *testing.T) {
 	}
 
 	// Belt: stateless onto a draining host is refused; pinned goes through.
-	vol, err := c.CreateVolume(ctx, f.svc.ID, "data", "us-east-1", "/data", 1<<30)
+	vol, err := c.CreateVolume(ctx, f.es.ID, "data", "us-east-1", "/data", 1<<30)
 	if err != nil {
 		t.Fatalf("CreateVolume: %v", err)
 	}

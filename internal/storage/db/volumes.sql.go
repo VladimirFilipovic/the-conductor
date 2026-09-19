@@ -13,28 +13,29 @@ import (
 
 const createVolume = `-- name: CreateVolume :one
 
-INSERT INTO volumes (service_id, name, region, mount_path, desired_size_bytes)
+INSERT INTO volumes (environment_service_id, name, region, mount_path, desired_size_bytes)
 VALUES ($1, $2, $3, $4, $5)
-RETURNING id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at, previous_desired_size_bytes
+RETURNING id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at, previous_desired_size_bytes, environment_service_id
 `
 
 type CreateVolumeParams struct {
-	ServiceID        uuid.UUID `json:"service_id"`
-	Name             string    `json:"name"`
-	Region           string    `json:"region"`
-	MountPath        string    `json:"mount_path"`
-	DesiredSizeBytes int64     `json:"desired_size_bytes"`
+	EnvironmentServiceID uuid.UUID `json:"environment_service_id"`
+	Name                 string    `json:"name"`
+	Region               string    `json:"region"`
+	MountPath            string    `json:"mount_path"`
+	DesiredSizeBytes     int64     `json:"desired_size_bytes"`
 }
 
-// Queries backing `conductor volume`. A volume belongs to a service (not a
-// single environment — volumes.service_id) and is addressed by its mount path,
-// the contract with the container. Size is a mutable desired property the
+// Queries backing `conductor volume`. A volume belongs to an environment
+// service (volumes.environment_service_id): data is what environments isolate,
+// so one service bound into two environments owns two disks. Within that
+// binding it is addressed by its mount path, the contract with the container. Size is a mutable desired property the
 // reconcile loop converges to (§4b grow-only resize): `volume update` writes
 // desired, `volume revert` takes an unapproved grow back, and the engine alone
 // moves status.
 func (q *Queries) CreateVolume(ctx context.Context, arg CreateVolumeParams) (Volume, error) {
 	row := q.db.QueryRowContext(ctx, createVolume,
-		arg.ServiceID,
+		arg.EnvironmentServiceID,
 		arg.Name,
 		arg.Region,
 		arg.MountPath,
@@ -43,7 +44,6 @@ func (q *Queries) CreateVolume(ctx context.Context, arg CreateVolumeParams) (Vol
 	var i Volume
 	err := row.Scan(
 		&i.ID,
-		&i.ServiceID,
 		&i.Name,
 		&i.MountPath,
 		&i.Region,
@@ -54,27 +54,27 @@ func (q *Queries) CreateVolume(ctx context.Context, arg CreateVolumeParams) (Vol
 		&i.Status,
 		&i.CreatedAt,
 		&i.PreviousDesiredSizeBytes,
+		&i.EnvironmentServiceID,
 	)
 	return i, err
 }
 
 const deleteVolume = `-- name: DeleteVolume :one
 DELETE FROM volumes
-WHERE service_id = $1 AND mount_path = $2
-RETURNING id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at, previous_desired_size_bytes
+WHERE environment_service_id = $1 AND mount_path = $2
+RETURNING id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at, previous_desired_size_bytes, environment_service_id
 `
 
 type DeleteVolumeParams struct {
-	ServiceID uuid.UUID `json:"service_id"`
-	MountPath string    `json:"mount_path"`
+	EnvironmentServiceID uuid.UUID `json:"environment_service_id"`
+	MountPath            string    `json:"mount_path"`
 }
 
 func (q *Queries) DeleteVolume(ctx context.Context, arg DeleteVolumeParams) (Volume, error) {
-	row := q.db.QueryRowContext(ctx, deleteVolume, arg.ServiceID, arg.MountPath)
+	row := q.db.QueryRowContext(ctx, deleteVolume, arg.EnvironmentServiceID, arg.MountPath)
 	var i Volume
 	err := row.Scan(
 		&i.ID,
-		&i.ServiceID,
 		&i.Name,
 		&i.MountPath,
 		&i.Region,
@@ -85,6 +85,7 @@ func (q *Queries) DeleteVolume(ctx context.Context, arg DeleteVolumeParams) (Vol
 		&i.Status,
 		&i.CreatedAt,
 		&i.PreviousDesiredSizeBytes,
+		&i.EnvironmentServiceID,
 	)
 	return i, err
 }
@@ -118,21 +119,20 @@ func (q *Queries) GetHost(ctx context.Context, hostID uuid.UUID) (Host, error) {
 }
 
 const getVolume = `-- name: GetVolume :one
-SELECT id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at, previous_desired_size_bytes FROM volumes
-WHERE service_id = $1 AND mount_path = $2
+SELECT id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at, previous_desired_size_bytes, environment_service_id FROM volumes
+WHERE environment_service_id = $1 AND mount_path = $2
 `
 
 type GetVolumeParams struct {
-	ServiceID uuid.UUID `json:"service_id"`
-	MountPath string    `json:"mount_path"`
+	EnvironmentServiceID uuid.UUID `json:"environment_service_id"`
+	MountPath            string    `json:"mount_path"`
 }
 
 func (q *Queries) GetVolume(ctx context.Context, arg GetVolumeParams) (Volume, error) {
-	row := q.db.QueryRowContext(ctx, getVolume, arg.ServiceID, arg.MountPath)
+	row := q.db.QueryRowContext(ctx, getVolume, arg.EnvironmentServiceID, arg.MountPath)
 	var i Volume
 	err := row.Scan(
 		&i.ID,
-		&i.ServiceID,
 		&i.Name,
 		&i.MountPath,
 		&i.Region,
@@ -143,24 +143,28 @@ func (q *Queries) GetVolume(ctx context.Context, arg GetVolumeParams) (Volume, e
 		&i.Status,
 		&i.CreatedAt,
 		&i.PreviousDesiredSizeBytes,
+		&i.EnvironmentServiceID,
 	)
 	return i, err
 }
 
-const listVolumesByService = `-- name: ListVolumesByService :many
-SELECT v.id, v.service_id, v.name, v.mount_path, v.region, v.host_id, v.backing, v.desired_size_bytes, v.observed_size_bytes, v.status, v.created_at, v.previous_desired_size_bytes FROM volumes v
-JOIN services s ON s.id = v.service_id
-WHERE s.project_name = $1 AND s.name = $2
+const listVolumesByEnvironmentService = `-- name: ListVolumesByEnvironmentService :many
+SELECT v.id, v.name, v.mount_path, v.region, v.host_id, v.backing, v.desired_size_bytes, v.observed_size_bytes, v.status, v.created_at, v.previous_desired_size_bytes, v.environment_service_id FROM volumes v
+JOIN environment_services es ON es.id = v.environment_service_id
+JOIN environments e          ON e.id = es.environment_id
+JOIN services s              ON s.id = es.service_id
+WHERE s.project_name = $1 AND e.name = $2 AND s.name = $3
 ORDER BY v.mount_path
 `
 
-type ListVolumesByServiceParams struct {
+type ListVolumesByEnvironmentServiceParams struct {
 	ProjectName string `json:"project_name"`
-	Name        string `json:"name"`
+	Environment string `json:"environment"`
+	Service     string `json:"service"`
 }
 
-func (q *Queries) ListVolumesByService(ctx context.Context, arg ListVolumesByServiceParams) ([]Volume, error) {
-	rows, err := q.db.QueryContext(ctx, listVolumesByService, arg.ProjectName, arg.Name)
+func (q *Queries) ListVolumesByEnvironmentService(ctx context.Context, arg ListVolumesByEnvironmentServiceParams) ([]Volume, error) {
+	rows, err := q.db.QueryContext(ctx, listVolumesByEnvironmentService, arg.ProjectName, arg.Environment, arg.Service)
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +174,6 @@ func (q *Queries) ListVolumesByService(ctx context.Context, arg ListVolumesBySer
 		var i Volume
 		if err := rows.Scan(
 			&i.ID,
-			&i.ServiceID,
 			&i.Name,
 			&i.MountPath,
 			&i.Region,
@@ -181,6 +184,7 @@ func (q *Queries) ListVolumesByService(ctx context.Context, arg ListVolumesBySer
 			&i.Status,
 			&i.CreatedAt,
 			&i.PreviousDesiredSizeBytes,
+			&i.EnvironmentServiceID,
 		); err != nil {
 			return nil, err
 		}
@@ -199,15 +203,15 @@ const revertVolumeSize = `-- name: RevertVolumeSize :one
 UPDATE volumes
 SET desired_size_bytes          = previous_desired_size_bytes,
     previous_desired_size_bytes = NULL
-WHERE service_id = $1 AND mount_path = $2
+WHERE environment_service_id = $1 AND mount_path = $2
   AND status = 'resize_pending'
   AND previous_desired_size_bytes IS NOT NULL
-RETURNING id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at, previous_desired_size_bytes
+RETURNING id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at, previous_desired_size_bytes, environment_service_id
 `
 
 type RevertVolumeSizeParams struct {
-	ServiceID uuid.UUID `json:"service_id"`
-	MountPath string    `json:"mount_path"`
+	EnvironmentServiceID uuid.UUID `json:"environment_service_id"`
+	MountPath            string    `json:"mount_path"`
 }
 
 // RevertVolumeSize takes back a grow the host could not hold: desired returns
@@ -218,11 +222,10 @@ type RevertVolumeSizeParams struct {
 // settles it on the next tick. No row = not pending anymore (or nothing to
 // revert to); the caller reports that as a retry, not a not-found.
 func (q *Queries) RevertVolumeSize(ctx context.Context, arg RevertVolumeSizeParams) (Volume, error) {
-	row := q.db.QueryRowContext(ctx, revertVolumeSize, arg.ServiceID, arg.MountPath)
+	row := q.db.QueryRowContext(ctx, revertVolumeSize, arg.EnvironmentServiceID, arg.MountPath)
 	var i Volume
 	err := row.Scan(
 		&i.ID,
-		&i.ServiceID,
 		&i.Name,
 		&i.MountPath,
 		&i.Region,
@@ -233,6 +236,7 @@ func (q *Queries) RevertVolumeSize(ctx context.Context, arg RevertVolumeSizePara
 		&i.Status,
 		&i.CreatedAt,
 		&i.PreviousDesiredSizeBytes,
+		&i.EnvironmentServiceID,
 	)
 	return i, err
 }
@@ -241,14 +245,14 @@ const updateVolumeSize = `-- name: UpdateVolumeSize :one
 UPDATE volumes
 SET previous_desired_size_bytes = desired_size_bytes,
     desired_size_bytes          = $1
-WHERE service_id = $2 AND mount_path = $3
-RETURNING id, service_id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at, previous_desired_size_bytes
+WHERE environment_service_id = $2 AND mount_path = $3
+RETURNING id, name, mount_path, region, host_id, backing, desired_size_bytes, observed_size_bytes, status, created_at, previous_desired_size_bytes, environment_service_id
 `
 
 type UpdateVolumeSizeParams struct {
-	DesiredSizeBytes int64     `json:"desired_size_bytes"`
-	ServiceID        uuid.UUID `json:"service_id"`
-	MountPath        string    `json:"mount_path"`
+	DesiredSizeBytes     int64     `json:"desired_size_bytes"`
+	EnvironmentServiceID uuid.UUID `json:"environment_service_id"`
+	MountPath            string    `json:"mount_path"`
 }
 
 // UpdateVolumeSize patches only the desired size and remembers the size it
@@ -257,13 +261,12 @@ type UpdateVolumeSizeParams struct {
 // tick and either approves the grow (→ 'resizing') or parks it
 // (→ 'resize_pending') until the host has room; the agent's report of the
 // new size settles it back to 'attached'. RETURNING lets the caller map a
-// missing (service, mount) to not-found instead of a silent no-op.
+// missing (environment service, mount) to not-found instead of a silent no-op.
 func (q *Queries) UpdateVolumeSize(ctx context.Context, arg UpdateVolumeSizeParams) (Volume, error) {
-	row := q.db.QueryRowContext(ctx, updateVolumeSize, arg.DesiredSizeBytes, arg.ServiceID, arg.MountPath)
+	row := q.db.QueryRowContext(ctx, updateVolumeSize, arg.DesiredSizeBytes, arg.EnvironmentServiceID, arg.MountPath)
 	var i Volume
 	err := row.Scan(
 		&i.ID,
-		&i.ServiceID,
 		&i.Name,
 		&i.MountPath,
 		&i.Region,
@@ -274,6 +277,7 @@ func (q *Queries) UpdateVolumeSize(ctx context.Context, arg UpdateVolumeSizePara
 		&i.Status,
 		&i.CreatedAt,
 		&i.PreviousDesiredSizeBytes,
+		&i.EnvironmentServiceID,
 	)
 	return i, err
 }

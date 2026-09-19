@@ -13,32 +13,32 @@ import (
 )
 
 // volumeQuerier is the volume slice of Querier, backing `conductor volume`.
-// Volumes key off the service, not the environment service — a volume outlives
-// any single deployment.
+// Volumes key off the environment service: a volume outlives any single
+// deployment, but not the binding — data is what environments isolate.
 type volumeQuerier interface {
-	CreateVolume(ctx context.Context, serviceID uuid.UUID, name, region, mountPath string, sizeBytes int64) (db.Volume, error)
-	ListVolumesByService(ctx context.Context, projectName, service string) ([]db.Volume, error)
-	GetVolume(ctx context.Context, serviceID uuid.UUID, mountPath string) (db.Volume, error)
+	CreateVolume(ctx context.Context, envServiceID uuid.UUID, name, region, mountPath string, sizeBytes int64) (db.Volume, error)
+	ListVolumesByEnvironmentService(ctx context.Context, projectName, environment, service string) ([]db.Volume, error)
+	GetVolume(ctx context.Context, envServiceID uuid.UUID, mountPath string) (db.Volume, error)
 	// UpdateVolumeSize writes desired and remembers the size it replaced; the
 	// status is the engine's to move.
-	UpdateVolumeSize(ctx context.Context, serviceID uuid.UUID, mountPath string, sizeBytes int64) (db.Volume, error)
+	UpdateVolumeSize(ctx context.Context, envServiceID uuid.UUID, mountPath string, sizeBytes int64) (db.Volume, error)
 	// RevertVolumeSize restores the pre-update desired size of a resize_pending
 	// volume, once. ErrNotFound when the volume is not resize_pending or has
 	// nothing to revert to.
-	RevertVolumeSize(ctx context.Context, serviceID uuid.UUID, mountPath string) (db.Volume, error)
+	RevertVolumeSize(ctx context.Context, envServiceID uuid.UUID, mountPath string) (db.Volume, error)
 	// GetHost is the host a placed volume sits on — the resize advisory's
 	// disk size input.
 	GetHost(ctx context.Context, hostID uuid.UUID) (db.Host, error)
-	DeleteVolume(ctx context.Context, serviceID uuid.UUID, mountPath string) (db.Volume, error)
+	DeleteVolume(ctx context.Context, envServiceID uuid.UUID, mountPath string) (db.Volume, error)
 }
 
-func (q querier) CreateVolume(ctx context.Context, serviceID uuid.UUID, name, region, mountPath string, sizeBytes int64) (db.Volume, error) {
+func (q querier) CreateVolume(ctx context.Context, envServiceID uuid.UUID, name, region, mountPath string, sizeBytes int64) (db.Volume, error) {
 	v, err := q.queries.CreateVolume(ctx, db.CreateVolumeParams{
-		ServiceID:        serviceID,
-		Name:             name,
-		Region:           region,
-		MountPath:        mountPath,
-		DesiredSizeBytes: sizeBytes,
+		EnvironmentServiceID: envServiceID,
+		Name:                 name,
+		Region:               region,
+		MountPath:            mountPath,
+		DesiredSizeBytes:     sizeBytes,
 	})
 	if uniqueViolation(err) {
 		return db.Volume{}, fmt.Errorf("volume at %q: %w", mountPath, ErrExists)
@@ -49,12 +49,16 @@ func (q querier) CreateVolume(ctx context.Context, serviceID uuid.UUID, name, re
 	return v, nil
 }
 
-func (q querier) ListVolumesByService(ctx context.Context, projectName, service string) ([]db.Volume, error) {
-	return q.queries.ListVolumesByService(ctx, db.ListVolumesByServiceParams{ProjectName: projectName, Name: service})
+func (q querier) ListVolumesByEnvironmentService(ctx context.Context, projectName, environment, service string) ([]db.Volume, error) {
+	return q.queries.ListVolumesByEnvironmentService(ctx, db.ListVolumesByEnvironmentServiceParams{
+		ProjectName: projectName,
+		Environment: environment,
+		Service:     service,
+	})
 }
 
-func (q querier) GetVolume(ctx context.Context, serviceID uuid.UUID, mountPath string) (db.Volume, error) {
-	v, err := q.queries.GetVolume(ctx, db.GetVolumeParams{ServiceID: serviceID, MountPath: mountPath})
+func (q querier) GetVolume(ctx context.Context, envServiceID uuid.UUID, mountPath string) (db.Volume, error) {
+	v, err := q.queries.GetVolume(ctx, db.GetVolumeParams{EnvironmentServiceID: envServiceID, MountPath: mountPath})
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.Volume{}, fmt.Errorf("volume at %q: %w", mountPath, ErrNotFound)
 	}
@@ -69,11 +73,11 @@ func (q querier) GetHost(ctx context.Context, hostID uuid.UUID) (db.Host, error)
 	return h, err
 }
 
-func (q querier) UpdateVolumeSize(ctx context.Context, serviceID uuid.UUID, mountPath string, sizeBytes int64) (db.Volume, error) {
+func (q querier) UpdateVolumeSize(ctx context.Context, envServiceID uuid.UUID, mountPath string, sizeBytes int64) (db.Volume, error) {
 	v, err := q.queries.UpdateVolumeSize(ctx, db.UpdateVolumeSizeParams{
-		DesiredSizeBytes: sizeBytes,
-		ServiceID:        serviceID,
-		MountPath:        mountPath,
+		DesiredSizeBytes:     sizeBytes,
+		EnvironmentServiceID: envServiceID,
+		MountPath:            mountPath,
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.Volume{}, fmt.Errorf("volume at %q: %w", mountPath, ErrNotFound)
@@ -84,8 +88,8 @@ func (q querier) UpdateVolumeSize(ctx context.Context, serviceID uuid.UUID, moun
 	return v, nil
 }
 
-func (q querier) RevertVolumeSize(ctx context.Context, serviceID uuid.UUID, mountPath string) (db.Volume, error) {
-	v, err := q.queries.RevertVolumeSize(ctx, db.RevertVolumeSizeParams{ServiceID: serviceID, MountPath: mountPath})
+func (q querier) RevertVolumeSize(ctx context.Context, envServiceID uuid.UUID, mountPath string) (db.Volume, error) {
+	v, err := q.queries.RevertVolumeSize(ctx, db.RevertVolumeSizeParams{EnvironmentServiceID: envServiceID, MountPath: mountPath})
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.Volume{}, fmt.Errorf("volume at %q: %w", mountPath, ErrNotFound)
 	}
@@ -104,8 +108,8 @@ func SizingOf(v db.Volume) domain.VolumeSizing {
 	}
 }
 
-func (q querier) DeleteVolume(ctx context.Context, serviceID uuid.UUID, mountPath string) (db.Volume, error) {
-	v, err := q.queries.DeleteVolume(ctx, db.DeleteVolumeParams{ServiceID: serviceID, MountPath: mountPath})
+func (q querier) DeleteVolume(ctx context.Context, envServiceID uuid.UUID, mountPath string) (db.Volume, error) {
+	v, err := q.queries.DeleteVolume(ctx, db.DeleteVolumeParams{EnvironmentServiceID: envServiceID, MountPath: mountPath})
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.Volume{}, fmt.Errorf("volume at %q: %w", mountPath, ErrNotFound)
 	}

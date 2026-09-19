@@ -53,15 +53,14 @@ WHERE r.phase <> 'reaped'
   );
 
 -- name: ListActiveVolumes :many
--- Volumes for services that have a current deployment — the disks a stateful
--- placement pins and leases. Keyed by (service_id, region) against the stateful
--- rows of SnapshotDesired. DISTINCT collapses a service shared across multiple
--- environments (the lease is re-checked inside the reconcile tx regardless).
+-- Volumes of environment services with a current deployment — the disks a
+-- stateful placement pins and leases. Keyed by (environment_service_id,
+-- region), the same replicaSlot the stateful rows of SnapshotDesired carry,
+-- so a service bound into two environments yields two volumes here.
 -- Ordered by id so that when two grows compete for one host's room, the same
 -- one wins every tick instead of flapping with the planner's row order.
-SELECT DISTINCT v.* FROM volumes v
-JOIN environment_services es ON es.service_id = v.service_id
-JOIN deployments d           ON d.environment_service_id = es.id
+SELECT v.* FROM volumes v
+JOIN deployments d ON d.environment_service_id = v.environment_service_id
 WHERE d.is_current
 ORDER BY v.id;
 

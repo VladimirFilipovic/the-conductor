@@ -120,7 +120,6 @@ type Service struct {
 
 type Volume struct {
 	ID                       uuid.UUID     `json:"id"`
-	ServiceID                uuid.UUID     `json:"service_id"`
 	Name                     string        `json:"name"`
 	MountPath                string        `json:"mount_path"`
 	Region                   string        `json:"region"`
@@ -131,6 +130,7 @@ type Volume struct {
 	Status                   string        `json:"status"`
 	CreatedAt                time.Time     `json:"created_at"`
 	PreviousDesiredSizeBytes sql.NullInt64 `json:"previous_desired_size_bytes"`
+	EnvironmentServiceID     uuid.UUID     `json:"environment_service_id"`
 }
 
 type VolumeLease struct {

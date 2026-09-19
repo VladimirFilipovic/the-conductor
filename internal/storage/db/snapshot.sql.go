@@ -114,17 +114,16 @@ func (q *Queries) ListActiveReplicas(ctx context.Context) ([]ListActiveReplicasR
 }
 
 const listActiveVolumes = `-- name: ListActiveVolumes :many
-SELECT DISTINCT v.id, v.service_id, v.name, v.mount_path, v.region, v.host_id, v.backing, v.desired_size_bytes, v.observed_size_bytes, v.status, v.created_at, v.previous_desired_size_bytes FROM volumes v
-JOIN environment_services es ON es.service_id = v.service_id
-JOIN deployments d           ON d.environment_service_id = es.id
+SELECT v.id, v.name, v.mount_path, v.region, v.host_id, v.backing, v.desired_size_bytes, v.observed_size_bytes, v.status, v.created_at, v.previous_desired_size_bytes, v.environment_service_id FROM volumes v
+JOIN deployments d ON d.environment_service_id = v.environment_service_id
 WHERE d.is_current
 ORDER BY v.id
 `
 
-// Volumes for services that have a current deployment — the disks a stateful
-// placement pins and leases. Keyed by (service_id, region) against the stateful
-// rows of SnapshotDesired. DISTINCT collapses a service shared across multiple
-// environments (the lease is re-checked inside the reconcile tx regardless).
+// Volumes of environment services with a current deployment — the disks a
+// stateful placement pins and leases. Keyed by (environment_service_id,
+// region), the same replicaSlot the stateful rows of SnapshotDesired carry,
+// so a service bound into two environments yields two volumes here.
 // Ordered by id so that when two grows compete for one host's room, the same
 // one wins every tick instead of flapping with the planner's row order.
 func (q *Queries) ListActiveVolumes(ctx context.Context) ([]Volume, error) {
@@ -138,7 +137,6 @@ func (q *Queries) ListActiveVolumes(ctx context.Context) ([]Volume, error) {
 		var i Volume
 		if err := rows.Scan(
 			&i.ID,
-			&i.ServiceID,
 			&i.Name,
 			&i.MountPath,
 			&i.Region,
@@ -149,6 +147,7 @@ func (q *Queries) ListActiveVolumes(ctx context.Context) ([]Volume, error) {
 			&i.Status,
 			&i.CreatedAt,
 			&i.PreviousDesiredSizeBytes,
+			&i.EnvironmentServiceID,
 		); err != nil {
 			return nil, err
 		}

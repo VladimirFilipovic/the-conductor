@@ -124,53 +124,89 @@ func TestVolumeCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
-	svc, err := c.CreateService(ctx, proj.Name, "pg", true)
-	if err != nil {
-		t.Fatalf("CreateService: %v", err)
-	}
-	// volumes reference services ON DELETE RESTRICT, so they block the project
-	// delete; clear them first. t.Cleanup is LIFO, so this (registered last) runs
-	// before the project cleanup below.
+	// volumes reference environment_services ON DELETE RESTRICT, so they block
+	// the project delete; clear them first. t.Cleanup is LIFO, so this
+	// (registered last) runs before the project cleanup below.
 	t.Cleanup(func() { _, _ = c.pool.ExecContext(ctx, "DELETE FROM projects WHERE name = $1", proj.Name) })
-	t.Cleanup(func() { _, _ = c.pool.ExecContext(ctx, "DELETE FROM volumes WHERE service_id = $1", svc.ID) })
+	prod, staging := bindInTwoEnvironments(t, c, proj.Name, "pg")
 
-	v, err := c.CreateVolume(ctx, svc.ID, "data", "us-east-1", "/data", 1<<30)
+	v, err := c.CreateVolume(ctx, prod.ID, "data", "us-east-1", "/data", 1<<30)
 	if err != nil {
 		t.Fatalf("CreateVolume: %v", err)
 	}
-	if v.MountPath != "/data" || v.DesiredSizeBytes != 1<<30 {
-		t.Fatalf("CreateVolume = %+v, want mount /data size 1GiB", v)
+	if v.MountPath != "/data" || v.DesiredSizeBytes != 1<<30 || v.EnvironmentServiceID != prod.ID {
+		t.Fatalf("CreateVolume = %+v, want mount /data size 1GiB owned by %s", v, prod.ID)
 	}
 
-	if _, err := c.CreateVolume(ctx, svc.ID, "data2", "us-east-1", "/data", 1<<30); !errors.Is(err, ErrExists) {
+	if _, err := c.CreateVolume(ctx, prod.ID, "data2", "us-east-1", "/data", 1<<30); !errors.Is(err, ErrExists) {
 		t.Fatalf("duplicate mount error = %v, want ErrExists", err)
 	}
-
-	vols, err := c.ListVolumesByService(ctx, proj.Name, "pg")
-	if err != nil {
-		t.Fatalf("ListVolumesByService: %v", err)
-	}
-	if len(vols) != 1 {
-		t.Fatalf("ListVolumesByService len = %d, want 1", len(vols))
+	// The same mount on the same service in another environment is a different
+	// disk: the uniqueness is per binding, not per service.
+	if _, err := c.CreateVolume(ctx, staging.ID, "data", "us-east-1", "/data", 1<<30); err != nil {
+		t.Fatalf("CreateVolume in staging: %v", err)
 	}
 
-	resized, err := c.UpdateVolumeSize(ctx, svc.ID, "/data", 5<<30)
+	for _, env := range []string{"production", "staging"} {
+		vols, err := c.ListVolumesByEnvironmentService(ctx, proj.Name, env, "pg")
+		if err != nil {
+			t.Fatalf("ListVolumesByEnvironmentService(%s): %v", env, err)
+		}
+		if len(vols) != 1 {
+			t.Fatalf("ListVolumesByEnvironmentService(%s) len = %d, want 1", env, len(vols))
+		}
+	}
+
+	resized, err := c.UpdateVolumeSize(ctx, prod.ID, "/data", 5<<30)
 	if err != nil {
 		t.Fatalf("UpdateVolumeSize: %v", err)
 	}
 	if resized.DesiredSizeBytes != 5<<30 {
 		t.Fatalf("UpdateVolumeSize = %d, want 5GiB", resized.DesiredSizeBytes)
 	}
-	if _, err := c.UpdateVolumeSize(ctx, svc.ID, "/missing", 5<<30); !errors.Is(err, ErrNotFound) {
+	if _, err := c.UpdateVolumeSize(ctx, prod.ID, "/missing", 5<<30); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("resize missing volume error = %v, want ErrNotFound", err)
 	}
+	// Keyed by the binding: staging's copy is untouched by production's grow.
+	if sv, err := c.GetVolume(ctx, staging.ID, "/data"); err != nil || sv.DesiredSizeBytes != 1<<30 {
+		t.Fatalf("staging volume after production resize = %+v, %v; want 1GiB", sv, err)
+	}
 
-	if _, err := c.DeleteVolume(ctx, svc.ID, "/data"); err != nil {
+	if _, err := c.DeleteVolume(ctx, prod.ID, "/data"); err != nil {
 		t.Fatalf("DeleteVolume: %v", err)
 	}
-	if _, err := c.DeleteVolume(ctx, svc.ID, "/data"); !errors.Is(err, ErrNotFound) {
+	if _, err := c.DeleteVolume(ctx, prod.ID, "/data"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("delete missing volume error = %v, want ErrNotFound", err)
 	}
+	if _, err := c.DeleteVolume(ctx, staging.ID, "/data"); err != nil {
+		t.Fatalf("DeleteVolume in staging: %v", err)
+	}
+}
+
+// bindInTwoEnvironments creates one stateful service and binds it into a
+// production and a staging environment — the shape the volume ownership
+// change is about. Volumes hang off the returned bindings and are removed
+// before the project cleanup (LIFO).
+func bindInTwoEnvironments(t *testing.T, c *PostgresClient, project, service string) (prod, staging db.EnvironmentService) {
+	t.Helper()
+	ctx := context.Background()
+	svc, err := c.CreateService(ctx, project, service, true)
+	if err != nil {
+		t.Fatalf("CreateService: %v", err)
+	}
+	bind := func(name string) db.EnvironmentService {
+		env, err := c.CreateEnvironment(ctx, project, name)
+		if err != nil {
+			t.Fatalf("CreateEnvironment(%s): %v", name, err)
+		}
+		es, err := c.AddServiceToEnvironment(ctx, env.ID, svc.ID, nil)
+		if err != nil {
+			t.Fatalf("AddServiceToEnvironment(%s): %v", name, err)
+		}
+		t.Cleanup(func() { _, _ = c.pool.ExecContext(ctx, "DELETE FROM volumes WHERE environment_service_id = $1", es.ID) })
+		return es
+	}
+	return bind("production"), bind("staging")
 }
 
 // TestVolumeResizeGuards covers the resize state machine's SQL side: the two
@@ -184,12 +220,8 @@ func TestVolumeResizeGuards(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
-	svc, err := c.CreateService(ctx, proj.Name, "pg", true)
-	if err != nil {
-		t.Fatalf("CreateService: %v", err)
-	}
 	t.Cleanup(func() { _, _ = c.pool.ExecContext(ctx, "DELETE FROM projects WHERE name = $1", proj.Name) })
-	t.Cleanup(func() { _, _ = c.pool.ExecContext(ctx, "DELETE FROM volumes WHERE service_id = $1", svc.ID) })
+	es, _ := bindInTwoEnvironments(t, c, proj.Name, "pg")
 
 	hosts, err := c.ListAgentHosts(ctx)
 	if err != nil || len(hosts) == 0 {
@@ -197,7 +229,7 @@ func TestVolumeResizeGuards(t *testing.T) {
 	}
 	host := hosts[0]
 
-	v, err := c.CreateVolume(ctx, svc.ID, "data", host.Region, "/data", 2<<30)
+	v, err := c.CreateVolume(ctx, es.ID, "data", host.Region, "/data", 2<<30)
 	if err != nil {
 		t.Fatalf("CreateVolume: %v", err)
 	}
@@ -207,7 +239,7 @@ func TestVolumeResizeGuards(t *testing.T) {
 
 	// Never observed: no drift, neither the park nor the approve predicate
 	// fires; update still remembers the size it replaced.
-	upd, err := c.UpdateVolumeSize(ctx, svc.ID, "/data", 4<<30)
+	upd, err := c.UpdateVolumeSize(ctx, es.ID, "/data", 4<<30)
 	if err != nil {
 		t.Fatalf("UpdateVolumeSize: %v", err)
 	}
@@ -221,7 +253,7 @@ func TestVolumeResizeGuards(t *testing.T) {
 		t.Fatalf("MarkVolumeResizing on never-observed = %v, want ErrConflict", err)
 	}
 	// Not resize_pending: nothing to revert yet.
-	if _, err := c.RevertVolumeSize(ctx, svc.ID, "/data"); !errors.Is(err, ErrNotFound) {
+	if _, err := c.RevertVolumeSize(ctx, es.ID, "/data"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("RevertVolumeSize while attached = %v, want ErrNotFound", err)
 	}
 
@@ -238,7 +270,7 @@ func TestVolumeResizeGuards(t *testing.T) {
 	if err := c.MarkVolumeAttached(ctx, v.ID); !errors.Is(err, ErrConflict) {
 		t.Fatalf("MarkVolumeAttached on drifting resize_pending = %v, want ErrConflict", err)
 	}
-	rev, err := c.RevertVolumeSize(ctx, svc.ID, "/data")
+	rev, err := c.RevertVolumeSize(ctx, es.ID, "/data")
 	if err != nil {
 		t.Fatalf("RevertVolumeSize in resize_pending: %v", err)
 	}
@@ -246,7 +278,7 @@ func TestVolumeResizeGuards(t *testing.T) {
 		t.Fatalf("after revert = desired %d previous %v status %s, want 2GiB, NULL, status untouched",
 			rev.DesiredSizeBytes, rev.PreviousDesiredSizeBytes, rev.Status)
 	}
-	if _, err := c.RevertVolumeSize(ctx, svc.ID, "/data"); !errors.Is(err, ErrNotFound) {
+	if _, err := c.RevertVolumeSize(ctx, es.ID, "/data"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("second RevertVolumeSize = %v, want ErrNotFound (one-shot)", err)
 	}
 	if err := c.MarkVolumeAttached(ctx, v.ID); err != nil {
@@ -255,7 +287,7 @@ func TestVolumeResizeGuards(t *testing.T) {
 
 	// Drifting with room: approve straight from attached, resizing is
 	// committed (no revert), settle once the agent catches up.
-	if _, err := c.UpdateVolumeSize(ctx, svc.ID, "/data", 4<<30); err != nil {
+	if _, err := c.UpdateVolumeSize(ctx, es.ID, "/data", 4<<30); err != nil {
 		t.Fatalf("UpdateVolumeSize: %v", err)
 	}
 	if err := c.MarkVolumeResizing(ctx, v.ID); err != nil {
@@ -264,7 +296,7 @@ func TestVolumeResizeGuards(t *testing.T) {
 	if err := c.MarkVolumeResizing(ctx, v.ID); !errors.Is(err, ErrConflict) {
 		t.Fatalf("MarkVolumeResizing twice = %v, want ErrConflict (already resizing)", err)
 	}
-	if _, err := c.RevertVolumeSize(ctx, svc.ID, "/data"); !errors.Is(err, ErrNotFound) {
+	if _, err := c.RevertVolumeSize(ctx, es.ID, "/data"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("RevertVolumeSize while resizing = %v, want ErrNotFound", err)
 	}
 	if err := c.MarkVolumeAttached(ctx, v.ID); !errors.Is(err, ErrConflict) {
@@ -276,7 +308,7 @@ func TestVolumeResizeGuards(t *testing.T) {
 	if err := c.MarkVolumeAttached(ctx, v.ID); err != nil {
 		t.Fatalf("MarkVolumeAttached after catch-up: %v", err)
 	}
-	got, err := c.GetVolume(ctx, svc.ID, "/data")
+	got, err := c.GetVolume(ctx, es.ID, "/data")
 	if err != nil {
 		t.Fatalf("GetVolume: %v", err)
 	}
@@ -309,7 +341,7 @@ func TestVolumeResizeGuards(t *testing.T) {
 	if _, err := c.GetHost(ctx, uuid.New()); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("GetHost unknown = %v, want ErrNotFound", err)
 	}
-	if _, err := c.GetVolume(ctx, svc.ID, "/missing"); !errors.Is(err, ErrNotFound) {
+	if _, err := c.GetVolume(ctx, es.ID, "/missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("GetVolume missing = %v, want ErrNotFound", err)
 	}
 }
