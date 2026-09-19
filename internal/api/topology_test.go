@@ -40,6 +40,14 @@ func TestTopologyBuildsTree(t *testing.T) {
 				DepVersion: 2, IsCurrent: false, DeploymentID: pinnedID(7), EsID: esID,
 			},
 		},
+		volumes: []db.TopologyVolumesRow{{
+			ID: pinnedID(8), MountPath: "/data", Region: "us-east-1",
+			HostID: uuid.NullUUID{UUID: hostID, Valid: true}, Hostname: nullString("h1"),
+			Status: "resize_pending", DesiredSizeBytes: 100 << 30,
+			ObservedSizeBytes:        sql.NullInt64{Int64: 4 << 30, Valid: true},
+			PreviousDesiredSizeBytes: sql.NullInt64{Int64: 4 << 30, Valid: true},
+			EsID:                     esID,
+		}},
 		hosts: []db.Host{{ID: hostID, Hostname: "h1", Region: "us-east-1", HostHealthy: true, Status: "open"}},
 	}
 	api := NewOperatorAPI(store, &fakeDesired{})
@@ -77,6 +85,12 @@ func TestTopologyBuildsTree(t *testing.T) {
 	if svc.Replicas[0].DeploymentVersion != 3 {
 		t.Errorf("deployment_version = %d, want 3", svc.Replicas[0].DeploymentVersion)
 	}
+	if len(svc.Volumes) != 1 || svc.Volumes[0].MountPath != "/data" || svc.Volumes[0].Status != "resize_pending" {
+		t.Fatalf("volumes = %+v, want the /data volume under its environment service", svc.Volumes)
+	}
+	if vol := svc.Volumes[0]; vol.Hostname == nil || *vol.Hostname != "h1" || vol.ObservedSizeBytes == nil || *vol.ObservedSizeBytes != 4<<30 {
+		t.Errorf("volume = %+v, want host joined and observed size relayed", vol)
+	}
 	if len(svc.Regions) != 1 {
 		t.Fatalf("regions = %+v", svc.Regions)
 	}
@@ -106,6 +120,9 @@ func TestTopologyUndeployedService(t *testing.T) {
 	svc := topo.Tree[0].Environments[0].Services[0]
 	if svc.Deployment != nil {
 		t.Errorf("deployment = %+v, want nil", svc.Deployment)
+	}
+	if svc.Volumes == nil {
+		t.Error("volumes = null, want [] (stateless services carry an empty array)")
 	}
 	if svc.Replicas == nil || svc.Regions == nil {
 		t.Error("replicas/regions = null, want []")

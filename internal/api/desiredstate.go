@@ -29,6 +29,11 @@ type DesiredState interface {
 	BindService(ctx context.Context, in project.BindServiceInput) (db.EnvironmentService, error)
 	Deploy(ctx context.Context, in project.DeployInput) (project.DeployResult, error)
 	Scale(ctx context.Context, in project.ScaleInput) error
+	// Volume grow and its one-shot take-back. Every guard — grow-only, one grow
+	// in flight, revert only from resize_pending — is the project layer's; the
+	// handlers translate JSON and map the sentinels.
+	ResizeVolume(ctx context.Context, t target.Target, mountPath string, sizeBytes int64) (project.ResizeOutcome, error)
+	RevertVolume(ctx context.Context, t target.Target, mountPath string) (db.Volume, error)
 }
 
 // --- Requests ---------------------------------------------------------------
@@ -85,6 +90,19 @@ type scaleRequest struct {
 	Replicas map[string]int32 `json:"replicas"`
 }
 
+// A volume is addressed the way the CLI addresses it: the service target plus
+// the mount path, never the volume UUID.
+type volumeResizeRequest struct {
+	serviceTarget
+	MountPath string `json:"mount_path"`
+	SizeBytes int64  `json:"size_bytes"`
+}
+
+type volumeRevertRequest struct {
+	serviceTarget
+	MountPath string `json:"mount_path"`
+}
+
 // --- Responses --------------------------------------------------------------
 
 type projectCreatedJSON struct {
@@ -117,6 +135,19 @@ type environmentServiceJSON struct {
 type deployedJSON struct {
 	Version  int32            `json:"version"`
 	Replicas map[string]int32 `json:"replicas"`
+}
+
+// volumeResizedJSON relays the project layer's space advisory so the UI can
+// say up front whether the grow starts next tick or parks as resize_pending.
+type volumeResizedJSON struct {
+	OK              bool  `json:"ok"`
+	WaitingForSpace bool  `json:"waiting_for_space"`
+	ShortfallBytes  int64 `json:"shortfall_bytes"`
+}
+
+type volumeRevertedJSON struct {
+	OK               bool  `json:"ok"`
+	DesiredSizeBytes int64 `json:"desired_size_bytes"`
 }
 
 // --- Handlers ---------------------------------------------------------------
@@ -276,6 +307,46 @@ func (o *OperatorAPI) scale(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, okJSON{OK: true})
 }
 
+func (o *OperatorAPI) resizeVolume(w http.ResponseWriter, r *http.Request) {
+	var req volumeResizeRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := req.validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	out, err := o.desired.ResizeVolume(r.Context(), req.target(), req.MountPath, req.SizeBytes)
+	if err != nil {
+		writeVolumeError(w, r, err)
+		return
+	}
+	slog.Info("operatorapi -> volume resize requested", "target", req.serviceTarget,
+		"mount", req.MountPath, "size_bytes", req.SizeBytes, "waiting_for_space", out.WaitingForSpace)
+	writeJSON(w, http.StatusOK, volumeResizedJSON{
+		OK: true, WaitingForSpace: out.WaitingForSpace, ShortfallBytes: out.ShortfallBytes,
+	})
+}
+
+func (o *OperatorAPI) revertVolume(w http.ResponseWriter, r *http.Request) {
+	var req volumeRevertRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := req.validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	vol, err := o.desired.RevertVolume(r.Context(), req.target(), req.MountPath)
+	if err != nil {
+		writeVolumeError(w, r, err)
+		return
+	}
+	slog.Info("operatorapi -> volume grow reverted", "target", req.serviceTarget,
+		"mount", req.MountPath, "size_bytes", vol.DesiredSizeBytes)
+	writeJSON(w, http.StatusOK, volumeRevertedJSON{OK: true, DesiredSizeBytes: vol.DesiredSizeBytes})
+}
+
 // --- Validation -------------------------------------------------------------
 
 func (t serviceTarget) target() target.Target {
@@ -314,6 +385,29 @@ func (r scaleRequest) validate() error {
 	return validateReplicas(r.Replicas)
 }
 
+func (r volumeResizeRequest) validate() error {
+	if err := r.serviceTarget.validate(); err != nil {
+		return err
+	}
+	if r.MountPath == "" {
+		return errors.New("mount_path is required")
+	}
+	if r.SizeBytes <= 0 {
+		return errors.New("size_bytes must be positive")
+	}
+	return nil
+}
+
+func (r volumeRevertRequest) validate() error {
+	if err := r.serviceTarget.validate(); err != nil {
+		return err
+	}
+	if r.MountPath == "" {
+		return errors.New("mount_path is required")
+	}
+	return nil
+}
+
 func validateReplicas(replicas map[string]int32) error {
 	if len(replicas) == 0 {
 		return errors.New("replicas must name at least one region")
@@ -339,6 +433,22 @@ func writeDomainError(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, http.StatusConflict, err)
 	case errors.Is(err, project.ErrInvalid):
 		writeError(w, http.StatusBadRequest, err)
+	default:
+		writeInternalError(w, r, err)
+	}
+}
+
+// writeVolumeError differs from writeDomainError in one mapping: every
+// project.ErrInvalid a volume guard raises is a state conflict (a grow already
+// in flight, nothing to revert, shrink of a converged disk), not a malformed
+// request, so it is a 409 like restartReplica's — and the message goes through
+// verbatim, since it names the state and the way out ("revert first").
+func writeVolumeError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, storage.ErrNotFound):
+		writeError(w, http.StatusNotFound, err)
+	case errors.Is(err, project.ErrInvalid):
+		writeError(w, http.StatusConflict, err)
 	default:
 		writeInternalError(w, r, err)
 	}

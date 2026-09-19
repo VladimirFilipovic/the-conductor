@@ -689,6 +689,73 @@ func (q *Queries) TopologyServices(ctx context.Context, arg TopologyServicesPara
 	return items, nil
 }
 
+const topologyVolumes = `-- name: TopologyVolumes :many
+SELECT v.id, v.mount_path, v.region, v.host_id, h.hostname, v.status,
+       v.desired_size_bytes, v.observed_size_bytes, v.previous_desired_size_bytes,
+       v.environment_service_id AS es_id
+FROM volumes v
+JOIN environment_services es ON es.id = v.environment_service_id
+JOIN environments         e  ON e.id = es.environment_id
+LEFT JOIN hosts h ON h.id = v.host_id
+WHERE ($1::text = '' OR e.project_name = $1)
+  AND ($2::text = '' OR e.name = $2)
+  AND ($3::text = '' OR v.region = $3)
+ORDER BY v.mount_path
+`
+
+type TopologyVolumesParams struct {
+	Project     string `json:"project"`
+	Environment string `json:"environment"`
+	Region      string `json:"region"`
+}
+
+type TopologyVolumesRow struct {
+	ID                       uuid.UUID      `json:"id"`
+	MountPath                string         `json:"mount_path"`
+	Region                   string         `json:"region"`
+	HostID                   uuid.NullUUID  `json:"host_id"`
+	Hostname                 sql.NullString `json:"hostname"`
+	Status                   string         `json:"status"`
+	DesiredSizeBytes         int64          `json:"desired_size_bytes"`
+	ObservedSizeBytes        sql.NullInt64  `json:"observed_size_bytes"`
+	PreviousDesiredSizeBytes sql.NullInt64  `json:"previous_desired_size_bytes"`
+	EsID                     uuid.UUID      `json:"es_id"`
+}
+
+func (q *Queries) TopologyVolumes(ctx context.Context, arg TopologyVolumesParams) ([]TopologyVolumesRow, error) {
+	rows, err := q.db.QueryContext(ctx, topologyVolumes, arg.Project, arg.Environment, arg.Region)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []TopologyVolumesRow
+	for rows.Next() {
+		var i TopologyVolumesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.MountPath,
+			&i.Region,
+			&i.HostID,
+			&i.Hostname,
+			&i.Status,
+			&i.DesiredSizeBytes,
+			&i.ObservedSizeBytes,
+			&i.PreviousDesiredSizeBytes,
+			&i.EsID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const uncordonHost = `-- name: UncordonHost :execrows
 UPDATE hosts SET status = 'open', drain_started_at = NULL
 WHERE id = $1 AND status IN ('cordoned', 'draining')

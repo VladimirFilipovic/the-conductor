@@ -39,6 +39,7 @@ type controlPlaneQuerier interface {
 	TopologyServices(ctx context.Context, f TopologyFilter) ([]db.TopologyServicesRow, error)
 	TopologyDesiredRegions(ctx context.Context, f TopologyFilter) ([]db.TopologyDesiredRegionsRow, error)
 	TopologyReplicas(ctx context.Context, f TopologyFilter) ([]db.TopologyReplicasRow, error)
+	TopologyVolumes(ctx context.Context, f TopologyFilter) ([]db.TopologyVolumesRow, error)
 	TopologyHosts(ctx context.Context, region string) ([]db.Host, error)
 	TopologyServed(ctx context.Context, f TopologyFilter) ([]db.TopologyServedRow, error)
 }
@@ -151,6 +152,12 @@ func (q querier) TopologyDesiredRegions(ctx context.Context, f TopologyFilter) (
 
 func (q querier) TopologyReplicas(ctx context.Context, f TopologyFilter) ([]db.TopologyReplicasRow, error) {
 	return q.queries.TopologyReplicas(ctx, db.TopologyReplicasParams{
+		Project: f.Project, Environment: f.Environment, Region: f.Region,
+	})
+}
+
+func (q querier) TopologyVolumes(ctx context.Context, f TopologyFilter) ([]db.TopologyVolumesRow, error) {
+	return q.queries.TopologyVolumes(ctx, db.TopologyVolumesParams{
 		Project: f.Project, Environment: f.Environment, Region: f.Region,
 	})
 }

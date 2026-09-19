@@ -123,6 +123,19 @@ WHERE (@project::text = '' OR e.project_name = @project)
   AND (@region::text = '' OR r.region = @region)
 ORDER BY r.region, r.created_at;
 
+-- name: TopologyVolumes :many
+SELECT v.id, v.mount_path, v.region, v.host_id, h.hostname, v.status,
+       v.desired_size_bytes, v.observed_size_bytes, v.previous_desired_size_bytes,
+       v.environment_service_id AS es_id
+FROM volumes v
+JOIN environment_services es ON es.id = v.environment_service_id
+JOIN environments         e  ON e.id = es.environment_id
+LEFT JOIN hosts h ON h.id = v.host_id
+WHERE (@project::text = '' OR e.project_name = @project)
+  AND (@environment::text = '' OR e.name = @environment)
+  AND (@region::text = '' OR v.region = @region)
+ORDER BY v.mount_path;
+
 -- name: TopologyHosts :many
 SELECT * FROM hosts
 WHERE (@region::text = '' OR region = @region)

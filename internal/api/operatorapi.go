@@ -34,6 +34,7 @@ type FleetReader interface {
 	TopologyServices(ctx context.Context, f storage.TopologyFilter) ([]db.TopologyServicesRow, error)
 	TopologyDesiredRegions(ctx context.Context, f storage.TopologyFilter) ([]db.TopologyDesiredRegionsRow, error)
 	TopologyReplicas(ctx context.Context, f storage.TopologyFilter) ([]db.TopologyReplicasRow, error)
+	TopologyVolumes(ctx context.Context, f storage.TopologyFilter) ([]db.TopologyVolumesRow, error)
 	TopologyHosts(ctx context.Context, region string) ([]db.Host, error)
 	TopologyServed(ctx context.Context, f storage.TopologyFilter) ([]db.TopologyServedRow, error)
 }
@@ -97,6 +98,8 @@ func (o *OperatorAPI) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/environment-services", o.bindService)
 	mux.HandleFunc("POST /v1/deployments", o.deploy)
 	mux.HandleFunc("POST /v1/deployments/scale", o.scale)
+	mux.HandleFunc("POST /v1/volumes/resize", o.resizeVolume)
+	mux.HandleFunc("POST /v1/volumes/revert", o.revertVolume)
 	return mux
 }
 
@@ -180,6 +183,13 @@ func nullStr(s sql.NullString) *string {
 		return nil
 	}
 	return &s.String
+}
+
+func nullInt64(n sql.NullInt64) *int64 {
+	if !n.Valid {
+		return nil
+	}
+	return &n.Int64
 }
 
 // orEmpty keeps a nil slice out of the JSON: clients iterate these unguarded,

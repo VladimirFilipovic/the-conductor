@@ -59,6 +59,10 @@ type serviceNode struct {
 	Deployment           *deploymentJSON       `json:"deployment"`
 	Regions              []regionSummaryJSON   `json:"regions"`
 	Replicas             []topologyReplicaJSON `json:"replicas"`
+	// Volumes is empty for a stateless service; volumes key off the
+	// environment service, so one service bound into two environments shows a
+	// different disk under each.
+	Volumes []topologyVolumeJSON `json:"volumes"`
 }
 
 type deploymentJSON struct {
@@ -95,6 +99,22 @@ type topologyReplicaJSON struct {
 	IsCurrent            bool       `json:"is_current"`
 	EnvironmentServiceID uuid.UUID  `json:"environment_service_id"`
 	DeploymentID         uuid.UUID  `json:"deployment_id"`
+}
+
+// topologyVolumeJSON is a volume as the tree shows it. Sizes are bytes on the
+// wire (the UI converts to GiB, as the CLI does); ObservedSizeBytes is null
+// until the agent has reported the disk once. The UUID is what agentsim chaos
+// addresses; the operator API addresses the volume by (target, mount_path).
+type topologyVolumeJSON struct {
+	ID                       uuid.UUID  `json:"id"`
+	MountPath                string     `json:"mount_path"`
+	Region                   string     `json:"region"`
+	HostID                   *uuid.UUID `json:"host_id"`
+	Hostname                 *string    `json:"hostname"`
+	Status                   string     `json:"status"`
+	DesiredSizeBytes         int64      `json:"desired_size_bytes"`
+	ObservedSizeBytes        *int64     `json:"observed_size_bytes"`
+	PreviousDesiredSizeBytes *int64     `json:"previous_desired_size_bytes"`
 }
 
 // servedJSON is one (service, region) traffic pointer: which deployment version
@@ -152,7 +172,7 @@ func (o *OperatorAPI) topology(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, topo)
 }
 
-// readTopology assembles the whole dashboard payload from the seven slices the
+// readTopology assembles the whole dashboard payload from the eight slices the
 // filter selects. The joins stay flat in SQL and the tree is built here: the
 // alternative (nested jsonb aggregation) buys nothing and costs readability.
 func (o *OperatorAPI) readTopology(ctx context.Context, filter storage.TopologyFilter) (topologyJSON, error) {
@@ -176,6 +196,10 @@ func (o *OperatorAPI) readTopology(ctx context.Context, filter storage.TopologyF
 	if err != nil {
 		return topologyJSON{}, err
 	}
+	volumes, err := o.store.TopologyVolumes(ctx, filter)
+	if err != nil {
+		return topologyJSON{}, err
+	}
 	hosts, err := o.store.TopologyHosts(ctx, filter.Region)
 	if err != nil {
 		return topologyJSON{}, err
@@ -190,7 +214,7 @@ func (o *OperatorAPI) readTopology(ctx context.Context, filter storage.TopologyF
 	}
 
 	return topologyJSON{
-		Tree:   buildTree(projects, environments, buildServiceNodes(services, desired, replicas)),
+		Tree:   buildTree(projects, environments, buildServiceNodes(services, desired, replicas, volumes)),
 		Hosts:  hostsJSON(hosts, hostReplicas),
 		Served: servedRowsJSON(served),
 	}, nil
@@ -200,6 +224,7 @@ func buildServiceNodes(
 	services []db.TopologyServicesRow,
 	desired []db.TopologyDesiredRegionsRow,
 	replicas []db.TopologyReplicasRow,
+	volumes []db.TopologyVolumesRow,
 ) []serviceNode {
 	replicasByService := make(map[uuid.UUID][]topologyReplicaJSON, len(services))
 	for _, rep := range replicas {
@@ -210,6 +235,17 @@ func buildServiceNodes(
 			LastExitReason: nullStr(rep.LastExitReason), UpdatedAt: rep.UpdatedAt,
 			DeploymentVersion: rep.DepVersion, IsCurrent: rep.IsCurrent,
 			EnvironmentServiceID: rep.EsID, DeploymentID: rep.DeploymentID,
+		})
+	}
+
+	volumesByService := make(map[uuid.UUID][]topologyVolumeJSON, len(volumes))
+	for _, vol := range volumes {
+		volumesByService[vol.EsID] = append(volumesByService[vol.EsID], topologyVolumeJSON{
+			ID: vol.ID, MountPath: vol.MountPath, Region: vol.Region,
+			HostID: nullUUID(vol.HostID), Hostname: nullStr(vol.Hostname), Status: vol.Status,
+			DesiredSizeBytes:         vol.DesiredSizeBytes,
+			ObservedSizeBytes:        nullInt64(vol.ObservedSizeBytes),
+			PreviousDesiredSizeBytes: nullInt64(vol.PreviousDesiredSizeBytes),
 		})
 	}
 
@@ -232,6 +268,7 @@ func buildServiceNodes(
 			Deployment:           currentDeployment(svc),
 			Regions:              regionSummaries(desiredByService[svc.EsID], reps),
 			Replicas:             orEmpty(reps),
+			Volumes:              orEmpty(volumesByService[svc.EsID]),
 		}
 	}
 	return nodes

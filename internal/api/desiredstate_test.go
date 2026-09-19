@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -160,5 +161,93 @@ func TestBindServiceRejectsBadIDs(t *testing.T) {
 		`{"environment_id":"nope","service_id":"`+uuid.Nil.String()+`"}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+// The volume guards (grow-only, one grow in flight, revert only from
+// resize_pending) live in the project layer; the handler relays a rejection as
+// a 409 with the project message verbatim, an unknown target/mount as 404.
+func TestResizeVolumeStatusMapping(t *testing.T) {
+	body := `{"project":"acme","environment":"production","service":"pg","mount_path":"/data","size_bytes":4294967296}`
+	guard := fmt.Errorf("%w: volume at \"/data\" already has a grow requested (2147483648 → 4294967296 bytes); revert first", project.ErrInvalid)
+	tests := []struct {
+		name    string
+		body    string
+		err     error
+		want    int
+		wantErr string
+	}{
+		{"grow fits", body, nil, http.StatusOK, ""},
+		{"guard rejects", body, guard, http.StatusConflict, guard.Error()},
+		{"unknown mount", body, storage.ErrNotFound, http.StatusNotFound, ""},
+		{"database down", body, errBoom, http.StatusInternalServerError, "internal error"},
+		{"partial target", `{"project":"acme","mount_path":"/data","size_bytes":1}`, nil, http.StatusBadRequest, ""},
+		{"no mount", `{"project":"acme","environment":"production","service":"pg","size_bytes":1}`, nil, http.StatusBadRequest, ""},
+		{"zero size", `{"project":"acme","environment":"production","service":"pg","mount_path":"/data","size_bytes":0}`, nil, http.StatusBadRequest, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			desired := &fakeDesired{err: tc.err}
+			rec := do(t, NewOperatorAPI(&fakeOperatorStore{}, desired), http.MethodPost, "/v1/volumes/resize", tc.body)
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d (body %s)", rec.Code, tc.want, rec.Body)
+			}
+			if tc.wantErr != "" && decodeBody[errorJSON](t, rec).Error != tc.wantErr {
+				t.Errorf("error = %s, want %q verbatim", rec.Body, tc.wantErr)
+			}
+			if tc.want == http.StatusBadRequest && desired.volumeMount != "" {
+				t.Error("a rejected request still reached the project layer")
+			}
+		})
+	}
+}
+
+// The space advisory rides the 200: the UI shows the shortfall before the
+// engine parks the volume, the same line the CLI prints.
+func TestResizeVolumeRelaysAdvisory(t *testing.T) {
+	desired := &fakeDesired{resizeOutcome: project.ResizeOutcome{WaitingForSpace: true, ShortfallBytes: 36 << 30}}
+	body := `{"project":"acme","environment":"production","service":"pg","mount_path":"/data","size_bytes":107374182400}`
+	rec := do(t, NewOperatorAPI(&fakeOperatorStore{}, desired), http.MethodPost, "/v1/volumes/resize", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body)
+	}
+	res := decodeBody[volumeResizedJSON](t, rec)
+	if !res.OK || !res.WaitingForSpace || res.ShortfallBytes != 36<<30 {
+		t.Errorf("response = %+v, want the advisory relayed", res)
+	}
+	if desired.volumeTarget.Service != "pg" || desired.volumeMount != "/data" || desired.volumeSize != 107374182400 {
+		t.Errorf("project layer got target=%+v mount=%q size=%d", desired.volumeTarget, desired.volumeMount, desired.volumeSize)
+	}
+}
+
+func TestRevertVolumeStatusMapping(t *testing.T) {
+	body := `{"project":"acme","environment":"production","service":"pg","mount_path":"/data"}`
+	guard := fmt.Errorf("%w: volume at \"/data\" is attached; nothing to revert", project.ErrInvalid)
+	tests := []struct {
+		name    string
+		body    string
+		err     error
+		want    int
+		wantErr string
+	}{
+		{"reverted", body, nil, http.StatusOK, ""},
+		{"nothing to revert", body, guard, http.StatusConflict, guard.Error()},
+		{"unknown mount", body, storage.ErrNotFound, http.StatusNotFound, ""},
+		{"no mount", `{"project":"acme","environment":"production","service":"pg"}`, nil, http.StatusBadRequest, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			desired := &fakeDesired{err: tc.err}
+			rec := do(t, NewOperatorAPI(&fakeOperatorStore{}, desired), http.MethodPost, "/v1/volumes/revert", tc.body)
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d (body %s)", rec.Code, tc.want, rec.Body)
+			}
+			if tc.wantErr != "" && decodeBody[errorJSON](t, rec).Error != tc.wantErr {
+				t.Errorf("error = %s, want %q verbatim", rec.Body, tc.wantErr)
+			}
+			if tc.want == http.StatusOK && decodeBody[volumeRevertedJSON](t, rec).DesiredSizeBytes != 4<<30 {
+				t.Errorf("response = %s, want the restored desired size", rec.Body)
+			}
+		})
 	}
 }

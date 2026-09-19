@@ -16,6 +16,7 @@ import (
 	"conductor/internal/project"
 	"conductor/internal/storage"
 	"conductor/internal/storage/db"
+	"conductor/internal/target"
 
 	"github.com/google/uuid"
 )
@@ -32,6 +33,7 @@ type fakeOperatorStore struct {
 	services     []db.TopologyServicesRow
 	desired      []db.TopologyDesiredRegionsRow
 	replicas     []db.TopologyReplicasRow
+	volumes      []db.TopologyVolumesRow
 	hosts        []db.Host
 	hostReplicas map[uuid.UUID]int64
 	served       []db.TopologyServedRow
@@ -78,6 +80,10 @@ func (f *fakeOperatorStore) TopologyDesiredRegions(_ context.Context, _ storage.
 
 func (f *fakeOperatorStore) TopologyReplicas(_ context.Context, _ storage.TopologyFilter) ([]db.TopologyReplicasRow, error) {
 	return f.replicas, nil
+}
+
+func (f *fakeOperatorStore) TopologyVolumes(_ context.Context, _ storage.TopologyFilter) ([]db.TopologyVolumesRow, error) {
+	return f.volumes, nil
 }
 
 func (f *fakeOperatorStore) TopologyHosts(_ context.Context, _ string) ([]db.Host, error) {
@@ -134,6 +140,13 @@ type fakeDesired struct {
 	createdEnv     string
 	deploy         project.DeployInput
 	scale          project.ScaleInput
+
+	// Volume calls record the (target, mount) they were addressed with; resize
+	// answers with resizeOutcome so the advisory passthrough is exercised.
+	resizeOutcome project.ResizeOutcome
+	volumeTarget  target.Target
+	volumeMount   string
+	volumeSize    int64
 }
 
 func (f *fakeDesired) CreateProject(_ context.Context, name, env string) (db.Project, error) {
@@ -161,6 +174,16 @@ func (f *fakeDesired) Deploy(_ context.Context, in project.DeployInput) (project
 func (f *fakeDesired) Scale(_ context.Context, in project.ScaleInput) error {
 	f.scale = in
 	return f.err
+}
+
+func (f *fakeDesired) ResizeVolume(_ context.Context, t target.Target, mount string, size int64) (project.ResizeOutcome, error) {
+	f.volumeTarget, f.volumeMount, f.volumeSize = t, mount, size
+	return f.resizeOutcome, f.err
+}
+
+func (f *fakeDesired) RevertVolume(_ context.Context, t target.Target, mount string) (db.Volume, error) {
+	f.volumeTarget, f.volumeMount = t, mount
+	return db.Volume{MountPath: mount, DesiredSizeBytes: 4 << 30}, f.err
 }
 
 func do(t *testing.T, api *OperatorAPI, method, path, body string) *httptest.ResponseRecorder {
