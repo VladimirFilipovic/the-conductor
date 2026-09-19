@@ -477,8 +477,53 @@ ishodi, iste latencije (grow 3s, park 2s, revert 1s, heal 4s).
 
 Engine log: jedan INFO `volume grow waiting for host space` pri parkiranju,
 posle toga DEBUG `still waiting` po ticku; `volume grow approved` /
-`volume resized from=<status>` na flipovima. Resize je i dalje CLI-only —
-chaos-ui ne prikazuje volumene.
+`volume resized from=<status>` na flipovima.
+
+#### Kroz chaos-ui (od 2026-09-19)
+
+Volumeni putuju sa topologijom (`GET /v1/topology` → `services[].volumes`,
+jedan upit `TopologyVolumes` join hosts, ključ `environment_service_id`;
+stateless servis nosi `[]`), pa stateful servis ispod tabele replika dobija red
+po volumenu: MOUNT | HOST | SIZE (desired, sa `← prethodni` dok postoji cilj za
+revert) | ON DISK (observed, narandžasto dok zaostaje; `—` dok agent nije javio)
+| STATUS badge (`attached` zeleno, `resizing` plavo, `resize_pending`
+narandžasto, `pending` sivo) | ⋯ meni. Dve trake kao za replike: **Grow** i
+**Revert** su operatorska namera i idu na control plane (`POST
+/v1/volumes/resize` i `/v1/volumes/revert`; guardovi ostaju u `project`,
+`ErrInvalid` → 409 sa porukom koju i CLI ispisuje, `ErrNotFound` → 404);
+**Stall resize** i **Heal** idu na agentsim (`volume_stall_resize` /
+`volume_heal` sa UUID-em volumena iz reda). GiB u formi, bajtovi na žici;
+identitet na API-ju je `(target, mount_path)` kao u CLI-u, ne UUID.
+
+- **Grow…** se nudi samo za `pending` ili `attached` bez drifta (isti uslov
+  koji `update` prihvata): inline polje GiB → Activity `resize
+  /var/lib/postgresql/data → 6GiB`; kad host nema mesta odgovor nosi
+  `waiting_for_space` + `shortfall_bytes` i red dobija hint "host short 38GiB —
+  parked as resize_pending" pre nego što engine promeni status
+- **Revert** samo iz `resize_pending`: Activity `revert … → 6GiB`; drugi klik
+  → 409 "is attached; nothing to revert"
+- **Stall resize** samo za `attached` konvergiran (da zakači *sledeći* grow),
+  pa Grow → volumen stoji `resizing`, ON DISK zaostaje; **Heal** → agent
+  naraste, engine settle-uje
+
+Izmereno (2026-09-19 UTC, akcije kroz UI rute `/api/volumes/resize` i
+`/api/chaos`; production `pg` 4GiB na `ue1-small-1` pored staging `pg` 2GiB,
+budžet 64GiB; replika `active|healthy|restart_count=0` ceo period):
+
+- grow 4→6 11:45:58 → `resizing` 11:45:59 → `attached` 11:46:01 (**3s**)
+- grow →100 11:46:27 → odgovor `waiting_for_space, shortfall 38GiB` odmah;
+  `resize_pending` 11:46:29 (**2s**); drugi grow iste sekunde → 409 "already
+  has a grow requested (6G → 100G); revert first"; posle ticka → 409 "is
+  resize_pending; revert or wait for it to attach"; nepoznat mount → 404
+- revert 11:47:19 → `attached` 6GiB 11:47:19 (**<1s**), `previous` NULL
+- stall 11:47:22 + grow →8 11:47:22 → `resizing` 11:47:24, ON DISK 6GiB stoji
+  30s+; heal 11:47:56 → `attached` 8GiB 11:47:57 (**1s**), engine
+  `volume resized from=resizing`
+
+Nije provereno klikom u browseru: Activity log i hint su stanje stranice posle
+klika, a scenario je vožen kroz iste Next rute koje dugmad zovu. Render tabele
+i badge-ova proveren headless screenshot-om u `resize_pending` (100GiB ← 6GiB,
+ON DISK 6GiB) i `resizing` (8GiB ← 6GiB) stanju.
 
 ### 12. Drain hosta — graciozna evakuacija
 
@@ -618,6 +663,11 @@ Chaos tab pokriva sve akcije, po targetu:
   state preko apiserver-a). Hosts panel nosi dva badge-a: health
   (`healthy|unhealthy`) i status (`cordoned|draining`, `open` se ne prikazuje),
   plus broj replika i "draining since …" dok drain traje
+- **Volume** (red ispod replika stateful servisa; MOUNT | HOST | SIZE | ON
+  DISK | STATUS): Grow… (inline GiB, control plane; hint "host short N GiB —
+  parked as resize_pending" kad nema mesta), Revert (samo `resize_pending`,
+  control plane), Stall resize / Heal (agentsim `volume_stall_resize` /
+  `volume_heal`). Koraci i merenja u §11 "Kroz chaos-ui".
 
 Sve agent-observable akcije UI prosleđuje agentsim control API-ju
 (`AGENTSIM_URL`, u stacku `http://agentsim:7780`) — chaos putuje pravim
