@@ -985,6 +985,54 @@ func TestE2EStatefulRecreateKeepsSingleWriter(t *testing.T) {
 	}
 }
 
+// One service bound into two environments is two slots and, since volumes
+// belong to the environment service, two disks. Both rollouts converge on
+// their own volume with their own lease — before the rekey the reconciler
+// indexed volumes by (service, region), so both slots resolved to one volume
+// and the second environment's replica never got the lease.
+func TestE2ESameServiceInTwoEnvironmentsGetsTwoVolumes(t *testing.T) {
+	l := newLoop(t)
+	region := "eu-west-1"
+	serviceID := uuid.New()
+	production := replicaSlot{uuid.New(), region}
+	staging := replicaSlot{uuid.New(), region}
+	l.addHost(10 << 30)
+	l.addHost(10 << 30)
+	prodVol := l.addVolume(production, 1<<30)
+	stagingVol := l.addVolume(staging, 1<<30)
+
+	prodDep := l.deploy(production, serviceID, 1, true)
+	stagingDep := l.deploy(staging, serviceID, 1, true)
+	l.rollout(prodDep)
+	l.rollout(stagingDep)
+
+	for _, tc := range []struct {
+		env string
+		dep uuid.UUID
+		vol uuid.UUID
+	}{{"production", prodDep, prodVol}, {"staging", stagingDep, stagingVol}} {
+		v := l.ms.volume(tc.vol)
+		if v.hostID == uuid.Nil || v.status != "attached" {
+			t.Fatalf("%s volume: host=%s status=%s, want placed and attached", tc.env, v.hostID, v.status)
+		}
+		rs := l.replicasOf(tc.dep)
+		if len(rs) != 1 {
+			t.Fatalf("%s replicas = %d, want 1", tc.env, len(rs))
+		}
+		r := rs[0]
+		if r.phase != domain.ReplicaPhaseActive || r.volumeID != tc.vol || r.hostID != v.hostID {
+			t.Fatalf("%s replica: phase=%s volume=%s host=%s, want active on its own volume %s at %s",
+				tc.env, r.phase, r.volumeID, r.hostID, tc.vol, v.hostID)
+		}
+		if lease := l.ms.leases[tc.vol]; lease.replicaID != r.id {
+			t.Fatalf("%s lease held by %s, want its replica %s", tc.env, lease.replicaID, r.id)
+		}
+	}
+	if len(l.ms.leases) != 2 {
+		t.Fatalf("leases = %d, want one per environment", len(l.ms.leases))
+	}
+}
+
 // The resize loop: a bumped desired size is approved by the engine only when
 // the host has room for the delta, the agent grows to it, and the engine
 // settles the volume back to attached. Without room the engine parks the
