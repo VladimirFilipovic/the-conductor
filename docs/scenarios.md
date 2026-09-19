@@ -649,6 +649,54 @@ Napomena: dok zamena čeka host, `anyHostlessReplicas` loguje `assign_host`
 na INFO svaki tick (2s) — isto kao za pinovanu repliku na mrtvom hostu (12b);
 pre-postojeći šum, nije deo drain-a.
 
+### 13. Log stream — replay, resume, restart engine-a
+
+Engine drži poslednjih 5000 linija u ring buffer-u (`internal/logbuf`) i servira
+ih preko SSE na `CONDUCTOR_LOGS_ADDR` (`:7090`); chaos-ui ih samo prosleđuje
+browseru na `/api/logs/stream`, pa engine ostaje privatan. Nema više deljenog
+log volume-a ni tail-ovanja fajla — svaka linija ima monotoni `id`, i to je ono
+čime se reconnect nastavlja.
+
+Zahtev: novootvorena Logs strana mora da pokaže istoriju, prekinuta veza da se
+nastavi tamo gde je stala, a spor čitalac ne sme da uspori engine.
+
+```bash
+curl -N 'http://localhost:7090/logs/stream?tail=3'                 # direktno sa engine-a
+curl -N 'http://localhost:3000/api/logs/stream?tail=2'             # kroz UI relay (ono što browser zove)
+curl -N -H 'Last-Event-ID: 23' 'http://localhost:3000/api/logs/stream?tail=800'
+docker restart conductor-engine                                     # reconnect pod otvorenom stranom
+```
+
+- `?tail=N` → N linija backlog-a pa live tail; `data:` je nepromenjena slog
+  TextHandler linija, pa `parseLine` u UI-ju radi isto što je radio nad fajlom
+- `?since=N` i `Last-Event-ID: N` → samo `id > N`; header pobeđuje query, jer
+  EventSource sam šalje header pri svom reconnect-u
+- `: heartbeat` na 20s prolazi kroz oba proxy hop-a (Railway edge + Next relay
+  ne smeju da ubiju idle konekciju)
+- spor čitalac se ne čeka: kad mu se bafer (256) napuni, kanal se zatvara i
+  klijent se vraća sa svojim poslednjim id-em — logger piše na tick petlji
+  engine-a, pa blokiranje nije opcija
+- restart engine-a resetuje id prostor; resume sa starim (većim) id-em bi inače
+  čekao da novi proces dobroji dotle → server tada servira fresh tail
+
+Izmereno (2026-09-19):
+
+- `?tail=3` → backlog id 13–15 odmah, pa live id 16, 17… na svakih 2s (snapshot
+  kadenca engine-a); `?since=15` → prva linija id 16; `Last-Event-ID: 23` uz
+  `?tail=800` → prva linija id 24 (header pobeđuje query)
+- operator akcija vidljiva u streamu kroz relay: `POST
+  /v1/replicas/<id>/restart` u 14:06:33 → `reconcile -> rule fired
+  rule=anyHostlessReplicas intents=[assign_host]` 14:06:33.987 → `engine -> pass
+  applied` 14:06:34.003
+- 30s capture: 16 linija (~32 lin/min na idle DEBUG-u) i tačno 1 heartbeat →
+  5000 linija ringa ≈ 2.5h idle istorije, ~600 KB
+- Logs strana (headless Chrome): na otvaranju 240 redova, najstariji
+  `storage: connected` od pre 8min (dakle replay, ne samo live), status
+  "streaming from the engine", +3 reda za 6s
+- `docker restart conductor-engine` u +6.4s → baner "stream down" u +7.9s →
+  "streaming from the engine" u +9.5s, sa fresh tail-om novog procesa (14 → 19
+  redova), bez reload-a strane
+
 ## Kroz chaos-ui (localhost:3000)
 
 Chaos tab pokriva sve akcije, po targetu:
