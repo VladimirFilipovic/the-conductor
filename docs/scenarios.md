@@ -278,6 +278,11 @@ Izmereno: `up` v2 → v2 current (2 active) i v1 reaped za **12s**. Kroz chaos-u
   `conductor volume add --mount /var/lib/postgresql/data --size 2 -s pg` +
   `conductor up -s pg -f pg-config.toml` (num_replicas=1 — stateful je single
   instance)
+- volume je per environment-service, ne per service (od 2026-09-19,
+  migracija 00007): `volume *` traži projekat, environment i servis kao `up`
+  i `scale` — `-e` se podrazumeva iz linka, a `conductor init` linkuje
+  `production`, pa komande gore rade bez `-e`. Isti servis u drugom
+  environmentu ima svoj disk (9a).
 - placer prvo smesti volume (3D bin-pack: cpu/mem/disk), replika prati volume
   host; lease se uzima u istoj transakciji kao dodela hosta
 - redeploy (`up` opet) je recreate, ne blue/green: stara replika ode, nova
@@ -287,6 +292,62 @@ Izmereno: deploy→active+lease za **13s** (replika i volume na istom hostu);
 recreate v1→v2 sa lease handover-om za **19s**, ceo period tačno 1 živa replika.
 2026-09-11: deploy→active+lease 6s; recreate: stara draining → reaped +13s, nova
 scheduling +16s, active + lease +18s.
+
+#### 9a. Jedan servis u dva environmenta — dva volumena, dva lease-a
+
+Do 2026-09-19 je `volumes.service_id` pokazivao na `services`, pa je servis
+vezan u dva environmenta delio jedan disk; reconciler je indeksirao volumene
+po `(service_id, region)`, dva desired reda (jedan po environmentu) su
+rezolvirala isti volume i drugi environment nikad nije dobio lease.
+`ListActiveVolumes` je imao `DISTINCT` koji je tu koliziju samo maskirao.
+Sad volume pripada `environment_services` redu — istom `replicaSlot{
+EnvironmentServiceID, Region}` ključu po kom engine vodi sve ostalo
+(`volumeKey` je obrisan, indeks je `map[replicaSlot]volume`,
+`serviceDemand` poredi slot, `DISTINCT` je otišao). `UNIQUE
+(environment_service_id, mount_path)`: isti mount na istom servisu u drugom
+environmentu je drugi disk, ne `ErrExists`. `ON DELETE RESTRICT` ostaje —
+odvezivanje servisa iz environmenta sa volumenom pada glasno. Bez backfill-a:
+baza je dev-only, migracija briše postojeće volumene (leases, pa
+`replicas.volume_id = NULL`, pa volumes) i menja vlasnika; wipe stack-a ostaje
+eksplicitan (`make stack-fresh`).
+
+Koraci (postavka kao u 9; `environment create` klonira bindinge iz
+linkovanog environmenta, pa `pg` završi vezan i u `staging`):
+
+```bash
+conductor init -n env-demo                                   # linkuje production
+conductor add --database --engine postgres --name pg
+conductor volume add --mount /var/lib/postgresql/data --size 2 -s pg
+conductor up -s pg -f pg-config.toml
+conductor environment create -n staging                      # klon production → pg vezan i tu
+conductor volume add --mount /var/lib/postgresql/data --size 2 -s pg -e staging
+conductor up -s pg -e staging -f pg-config.toml
+conductor volume list -s pg              # samo production-ov
+conductor volume list -s pg -e staging   # samo staging-ov
+conductor volume list -s pg -e nosuch    # "service "pg" in env-demo/nosuch: not found"
+```
+
+Očekivano: dva reda u `volumes` sa različitim `environment_service_id`, dva
+lease-a, dve `active` replike svaka pinovana na svoj volume; u engine logu
+nijedan hold, nijedan lease konflikt.
+
+Izmereno (2026-09-19 UTC, agentsim tick 1s, reconcile 2s, oba `up` u istoj
+sekundi):
+
+- `up` production + `up` staging 10:33:10 → jedan pass 10:33:11
+  `place_volume:2 create:2` (oba volumena na `ue1-small-1`) → 10:33:13
+  `assign_host:2` → 10:33:15 `recreateComplete` za oba slota (**5s**,
+  `holds=0` u svakom passu)
+- baza 10:33:50: dva `attached` 2GiB volumena (es `d50a447f` production,
+  `153b14b7` staging), dva živa lease-a, replike `bb1e6124`/`eff42a10`
+  `active|healthy`, svaka na svom volumenu
+- §11 na production volumenu dok staging gleda: `--size 4` 10:34:20 →
+  `resizing` 10:34:22 → `attached` 4GiB 10:34:23 (**3s**); `--size 100` →
+  CLI "short 38GiB", `resize_pending` 10:34:26 (**3s**); drugi `update` →
+  "is resize_pending; revert or wait"; `revert` 10:34:26 → `attached` 4GiB,
+  `previous` NULL 10:34:28 (**2s**). Staging volume ceo period `attached
+  2GiB/2GiB` — grow po `(environment_service_id, mount_path)` ne dira
+  komšiju.
 
 ### 10. Operator akcije
 
@@ -365,7 +426,9 @@ pending ──place──▶ attached ──drift, fits────────�
 | `resizing` | ❌ | ❌ "nothing to revert" |
 
 Koraci (postavka kao u 9: stateful `pg`, `volume add --size 2`, `up`; volume
-je sleteo na `ue1-small-1` — 80GB, budžet 64GiB):
+je sleteo na `ue1-small-1` — 80GB, budžet 64GiB; sve `volume` komande dole
+ciljaju linkovani `production` — za drugi environment dodaj `-e`, volume je
+per environment-service):
 
 - grow sa mestom: `volume update --mount /var/lib/postgresql/data --size 4 -s pg`
   → CLI "host has room"; `resizing` na sledećem ticku; agent naraste i javi;
