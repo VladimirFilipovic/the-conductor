@@ -3,23 +3,19 @@
 import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/Badge";
 import { levelClass, relativeTime } from "@/lib/ui";
-import type { LogLine } from "@/lib/logs";
-
-interface TailResponse {
-  exists: boolean;
-  offset: number;
-  lines: LogLine[];
-  path: string;
-  error?: string;
-}
+import { parseLine, type LogLine } from "@/lib/logs";
 
 const LEVELS = ["DEBUG", "INFO", "WARN", "ERROR"];
 const MAX_BUFFER = 3000;
+// The engine emits bursts at DEBUG; one setState per line would re-render the
+// page hundreds of times a second for no visible gain.
+const FLUSH_INTERVAL = 250;
+
+type Connection = "connecting" | "live" | "down";
 
 export default function LogsPage() {
   const [lines, setLines] = useState<LogLine[]>([]);
-  const [exists, setExists] = useState(true);
-  const [path, setPath] = useState("");
+  const [connection, setConnection] = useState<Connection>("connecting");
   const [levelFilter, setLevelFilter] = useState<Record<string, boolean>>({
     DEBUG: true,
     INFO: true,
@@ -29,40 +25,30 @@ export default function LogsPage() {
   const [search, setSearch] = useState("");
   const [follow, setFollow] = useState(true);
 
-  const offset = useRef<number | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    let cancelled = false;
+    // EventSource reconnects on its own and resends Last-Event-ID, so a dropped
+    // connection resumes at the line it stopped on instead of replaying.
+    const es = new EventSource("/api/logs/stream?tail=800");
+    const pending: LogLine[] = [];
 
-    const poll = async () => {
-      const url =
-        offset.current == null
-          ? "/api/logs?tail=800"
-          : `/api/logs?since=${offset.current}`;
-      try {
-        const res = await fetch(url, { cache: "no-store" });
-        const data: TailResponse = await res.json();
-        if (cancelled) return;
-        setExists(data.exists);
-        setPath(data.path);
-        offset.current = data.offset;
-        if (data.lines.length) {
-          setLines((prev) => {
-            const next = [...prev, ...data.lines];
-            return next.length > MAX_BUFFER ? next.slice(-MAX_BUFFER) : next;
-          });
-        }
-      } catch {
-        /* transient; retried next tick */
-      }
-    };
+    es.onopen = () => setConnection("live");
+    es.onerror = () => setConnection("down");
+    es.onmessage = (e) => pending.push(parseLine(e.data));
 
-    poll();
-    const t = setInterval(poll, 1500);
+    const flush = setInterval(() => {
+      if (pending.length === 0) return;
+      const batch = pending.splice(0, pending.length);
+      setLines((prev) => {
+        const next = [...prev, ...batch];
+        return next.length > MAX_BUFFER ? next.slice(-MAX_BUFFER) : next;
+      });
+    }, FLUSH_INTERVAL);
+
     return () => {
-      cancelled = true;
-      clearInterval(t);
+      es.close();
+      clearInterval(flush);
     };
   }, []);
 
@@ -85,7 +71,9 @@ export default function LogsPage() {
       <div className="flex flex-wrap items-center gap-3">
         <div>
           <h1 className="text-lg font-semibold">Engine logs</h1>
-          <p className="mono text-xs text-[var(--color-faint)]">{path || "…"}</p>
+          <p className="mono text-xs text-[var(--color-faint)]">
+            {connection === "live" ? "streaming from the engine" : `stream ${connection}`}
+          </p>
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-2">
           {LEVELS.map((lvl) => (
@@ -112,10 +100,10 @@ export default function LogsPage() {
         </div>
       </div>
 
-      {!exists && (
+      {connection === "down" && (
         <div className="panel border-amber-400/40 bg-amber-500/5 px-4 py-3 text-sm text-amber-700">
-          Log file not found yet. It appears once the engine starts writing to{" "}
-          <span className="mono">{path}</span>.
+          Log stream disconnected — retrying. Lines already received stay on
+          screen, and the stream resumes where it stopped.
         </div>
       )}
 

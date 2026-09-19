@@ -31,29 +31,18 @@ func Run(args []string) int {
 		return 1
 	}
 
-	writers := []io.Writer{os.Stderr}
-
 	// The ring tees off the same handler as stderr, so what the stream serves
-	// is the log, not a second rendering of it.
+	// is the log itself, not a second rendering of it.
+	logW := io.Writer(os.Stderr)
 	var logs *logbuf.Server
 	if cfg.LogsAddr != "" {
 		ring := logbuf.New(logbuf.DefaultCapacity)
-		writers = append(writers, ring)
+		logW = io.MultiWriter(os.Stderr, ring)
 		logs = logbuf.NewServer(cfg.LogsAddr, ring)
 	}
 
-	if cfg.LogFile != "" {
-		logFile, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "open log file: %v\n", err)
-			return 1
-		}
-		defer func() { _ = logFile.Close() }()
-		writers = append(writers, logFile)
-	}
-
 	slog.SetDefault(slog.New(slog.NewTextHandler(
-		io.MultiWriter(writers...),
+		logW,
 		&slog.HandlerOptions{Level: cfg.LogLevel},
 	)))
 
