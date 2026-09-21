@@ -1,175 +1,169 @@
-# Chaos scenariji
+# Chaos scenarios
 
-Realne situacije koje sistem mora da preživi, svedene na ponovljive korake.
-Svi su izvedeni protiv docker stack-a (`make stack-up`) sa lokalnim agentsim
-fleet-om. Chaos ide kroz agente (chaos-ui Chaos tab ili agentsim control API na :7780), nikad direktno u bazu —
-agent laže ili ćuti preko pravog gRPC transporta.
+Real situations the system must survive, reduced to repeatable steps. All run
+against the docker stack (`make stack-up`) with the local agentsim fleet. Chaos
+always goes through agents (chaos-ui Chaos tab, or the agentsim control API on
+:7780), never straight into the database — the agent lies or goes silent over
+the real gRPC transport.
 
-chaos-ui uopšte nema pristup bazi: topologiju čita i desired state piše preko
-apiserver control plane-a (`CONTROL_PLANE_URL`, podrazumevano :7080), pa UI i
-CLI prolaze kroz isti project sloj. Operator chaos (cordon/drain/delete replica)
-ide na isti control plane, agent chaos na agentsim.
+chaos-ui has no database access at all: it reads topology and writes desired
+state through the apiserver control plane (`CONTROL_PLANE_URL`, default :7080),
+so UI and CLI share the same project layer. Operator chaos (cordon/drain/delete
+replica) goes to that control plane; agent chaos goes to agentsim.
 
-## Stanje hosta: dve kolone, dva vlasnika
+## Host state: two columns, two owners
 
-`hosts.host_healthy` (bool) piše samo heartbeat/watchdog: heartbeat → `true`,
-30s tišine → `false`. `hosts.status` piše samo operator: `open | cordoned |
-draining`. Slobodno smeštanje ide samo na `host_healthy AND status='open'`;
-volume-pinovana replika sme nazad na svoj host i kad je `cordoned`/`draining`
-(disk je tu i nigde drugde). Heartbeat nikad ne dira `status`, smrt hosta nikad
-ne briše drain. (Do 2026-09-18 sve je bilo u jednoj koloni
-`ready|notready|draining|cordoned` — stara merenja dole koriste te reči.)
+`hosts.host_healthy` (bool) is written only by heartbeat/watchdog: heartbeat →
+`true`, 30s of silence → `false`. `hosts.status` is written only by the
+operator: `open | cordoned | draining`. Free placement requires
+`host_healthy AND status='open'`; a volume-pinned replica may return to its own
+host even when `cordoned`/`draining` (the disk is there and nowhere else).
+Heartbeat never touches `status`; host death never clears a drain.
 
-## Pragovi (internal/engine)
+## Thresholds (internal/engine)
 
-| Konstanta | Vrednost | Značenje |
+| Constant | Value | Meaning |
 |---|---|---|
-| `watchdogInterval` | 5s | koliko često watchdog proverava staleness i settle-uje drainove |
-| `hostUnhealthyAfter` | 30s | tišina → `host_healthy=false`, van scheduling-a (reverzibilno) |
-| `hostDeadAfter` | 2min | tišina → replike se oslobađaju (jednosmerno) |
-| `drainStalledAfter` | 10min | drain u letu duže od ovog → WARN u logu svaki sweep; bez akcije |
-| `volumeLeaseTTL` | 90s | bez healthy observacije → lease ističe, failover sme |
-| startup grace | = `hostDeadAfter` | posle boot-a engine-a nema presuda smrti dok ne protekne pun prozor |
+| `watchdogInterval` | 5s | how often the watchdog checks staleness and settles drains |
+| `hostUnhealthyAfter` | 30s | silence → `host_healthy=false`, out of scheduling (reversible) |
+| `hostDeadAfter` | 2min | silence → replicas are released (one-way) |
+| `drainStalledAfter` | 10min | drain in flight longer than this → WARN every sweep; no action |
+| `volumeLeaseTTL` | 90s | no healthy observation → lease expires, failover allowed |
+| startup grace | = `hostDeadAfter` | after engine boot, no death verdicts until a full window passes |
 
-## Postavka
+## Setup
 
 ```bash
 make stack-up      # postgres + engine + apiserver + agentsim + chaos-ui (localhost:3000)
 make build
-# u praznom folderu:
+# in an empty folder:
 ./build/conductor init -n chaos-demo
 ./build/conductor add --service --name web --image nginx:alpine
-./build/conductor up -s web                    # config.toml: 2 replike, us-east-1
+./build/conductor up -s web                    # config.toml: 2 replicas, us-east-1
 ```
 
-Agentsim je deo stack-a (jedan sim-agent po hostu, control API na :7780).
-Chaos ide kroz UI (Chaos tab) ili direktno na control API; ID-jeve daje
-`curl localhost:7780/agents` (host + replika + faza + chaos mod). Akcija:
-`curl -XPOST localhost:7780/chaos -d '{"action":"host_kill","host":"<id>"}'`
-(akcije: `host_kill|host_recover`, `replica_crash|replica_crashloop|replica_stall_health|replica_heal`,
-`volume_stall_resize|volume_heal` sa `"volume":"<id>"`).
+Agentsim is part of the stack (one sim-agent per host, control API on :7780).
+Chaos goes through the UI (Chaos tab) or straight to the control API; IDs come
+from `curl localhost:7780/agents` (host + replica + phase + chaos mode).
+Action: `curl -XPOST localhost:7780/chaos -d '{"action":"host_kill","host":"<id>"}'`
+(actions: `host_kill|host_recover`, `replica_crash|replica_crashloop|replica_stall_health|replica_heal`,
+`volume_stall_resize|volume_heal` with `"volume":"<id>"`).
 
-## 1. Mrežni blip (< 2min) — ništa se ne pomera
+## 1. Network blip (< 2min) — nothing moves
 
-Zahtev: kratka smetnja ne sme da scrambluje workload.
+Requirement: a short disturbance must not scramble the workload.
 
-- chaos `host_kill` <host> → host ćuti
-- ~30s: host `unhealthy`, van scheduling-a; **replike ostaju vezane i active**
-- chaos `host_recover` <host> pre 2min
-- prvi heartbeat vraća `healthy`; nijedna replika nije mrdnula
+- chaos `host_kill <host>` → the host goes silent
+- ~30s: host `unhealthy`, out of scheduling; **replicas stay bound and active**
+- chaos `host_recover <host>` before the 2min mark
+- first heartbeat restores `healthy`; no replica moved
 
-Izmereno kroz chaos-ui (2026-09-11): kill → notready 30s → recover → ready 1s;
-replika netaknuta.
+Measured: kill 11:54:42 → unhealthy 11:55:14 (32s) → recover 11:55:27 →
+healthy 11:55:32 (5s). Replicas untouched throughout.
 
-Izmereno: kill 11:54:42 → notready 11:55:14 (32s) → recover 11:55:27 → ready
-11:55:32 (5s). Replike netaknute ceo period.
+## 2. Host death (> 2min) — re-place onto survivors
 
-## 2. Smrt hosta (> 2min) — re-place na preživele
+Requirement: a dead host loses its replicas; they are re-placed automatically on
+other hosts in the same region; a host that comes back later rejoins the pool
+empty.
 
-Zahtev: mrtav host gubi replike; one se automatski re-place-uju na druge
-hostove istog regiona; host koji kasnije oživi vraća se prazan u pool.
+- chaos `host_kill <host>`, do not recover
+- ~30s: `unhealthy` (as above)
+- ~2min: watchdog `MarkHostDown` — replicas become hostless `replacing`; next
+  tick the placer assigns another host, the agent brings them up through
+  start → health → active
+- `host_recover` any time after: host returns `healthy` and empty; the agent
+  kills orphan containers itself on the first full snapshot (they are no longer
+  in its list)
 
-- chaos `host_kill` <host>, ne oporavljaj
-- ~30s: `unhealthy` (kao gore)
-- ~2min: watchdog `MarkHostDown` — replike hostless `replacing`, sledeći tick
-  placer ih dodeli drugom hostu, agent ih podigne kroz start → health → active
-- `recover-host` bilo kad posle: host se vraća `healthy`, prazan; orphan
-  kontejnere agent sam ugasi na prvom full snapshotu (nisu više u njegovoj listi)
+Measured: kill 11:55:47 → unhealthy 11:56:19 (32s) → replica released 11:57:49
+(2min02s) → active+healthy on a new host 11:57:53 (4s after the verdict).
 
-Izmereno kroz chaos-ui (2026-09-11): notready 34s → replacing na 2min04s → active na
-drugom hostu 3s kasnije; recover vraća host `ready` prazan za 1s.
+## 3. Control plane restart — startup grace, no massacre
 
-Izmereno: kill 11:55:47 → notready 11:56:19 (32s) → replika oslobođena
-11:57:49 (2min02s) → active+healthy na novom hostu 11:57:53 (4s posle presude).
+Requirement: an engine crash/redeploy longer than the staleness window must not
+declare the whole fleet dead on boot (heartbeats stopped because the gateway was
+down, not because the hosts died).
 
-## 3. Restart control plane-a — startup grace, bez masakra
-
-Zahtev: pad/redeploy engine-a duži od staleness prozora ne sme po boot-u da
-proglasi ceo fleet mrtvim (heartbeat-i su stali zato što je gateway bio down,
-ne zato što su hostovi mrtvi).
-
-- `docker compose stop engine`, sačekaj 2-3min (svi heartbeat-i staju)
+- `docker compose stop engine`, wait 2-3min (all heartbeats stop)
 - `docker compose start engine`
-- agenti se rekonektuju (gRPC backoff ume da doda i ~30s posle dužeg pada);
-  sweep sme da demote-uje u `unhealthy` (reverzibilno), ali presuda smrti ne
-  pada dok uptime engine-a ne pređe `hostDeadAfter` — do tada su se svi živi javili
-- očekivano: nula oslobođenih replika, fleet se vrati `healthy` bez ijednog restarta
+- agents reconnect (gRPC backoff can add ~30s after a longer outage); the sweep
+  may demote hosts to `unhealthy` (reversible), but no death verdict falls until
+  engine uptime exceeds `hostDeadAfter` — by then every live host has checked in
+- expected: zero released replicas, fleet back to `healthy` without a single
+  restart
 
-Izmereno (apiserver kao gateway, 2026-09-11): `docker compose stop apiserver` 153s →
-watchdog demote 5 hostova na +35s, nula presuda smrti → agenti nazad ~64s posle
-starta (gRPC backoff) → svi `ready` na +217s, replike netaknute.
+Measured: outage 11:58:29→12:00:59 (2.5min) → at +30s the sweep demoted all 6
+hosts (agents still in backoff) → agents back at +39s → heartbeat restored
+`healthy`. `hostless=0`, `active=2` the whole cycle — no replica restarted or
+moved.
 
-Izmereno: outage 11:58:29→12:00:59 (2.5min) → na +30s sweep demote-ovao svih 6
-hostova (agenti još u backoff-u) → agenti nazad +39s → heartbeat vratio `ready`.
-`hostless=0`, `active=2` tokom celog ciklusa — nijedna replika ni restartovana
-ni pomerena.
+## 4. Crash-looping replica during rollout — restart budget fails the deployment
 
-## 4. Crash-loop replike u rollout-u — restart budžet obara deployment
+Requirement: a container that keeps dying must not spin forever.
 
-Zahtev: kontejner koji stalno umire ne sme da vrti sistem u krug zauvek.
+Applies **only to a rollout in progress** (deployment `pending`/`draining`):
+there the offender is the canary or its batch, so the revision itself is
+suspect. For an already-`active` deployment see 4b — there only the replica is
+frozen.
 
-Važi **samo za rollout u toku** (deployment `pending`/`draining`): tu je
-prekršilac kanarinac ili njegov batch, pa je sumnjiva sama revizija. Za
-deployment koji je već `active` vidi 4b — tamo se zamrzava samo replika.
+- chaos `replica_crashloop <replica>` → restart_count grows every tick
+- past `restart_max`, the reconciler's `crashLooping` rule fails the **whole
+  deployment** and `deploymentFrozen` freezes it: no re-place, no replacement,
+  the outgoing version keeps serving
+- deliberate: an exhausted restart budget mid-rollout is a signal for a human,
+  not for automation
+- chaos `replica_heal <replica>` afterwards restores the container, but the
+  deployment stays `failed` — the only way out is `conductor up`/`rollback`
 
-- chaos `replica_crashloop <replica>` → restart_count raste svaki tick
-- kad pređe `restart_max`, reconciler-ovo `crashLooping` pravilo obara **ceo
-  deployment** u `failed` i `deploymentFrozen` ga zamrzava: nema re-place-a,
-  nema zamene, stara verzija (outgoing) nastavlja da služi
-- to je namerno: iscrpljen restart budžet u rollout-u je signal za čoveka, ne
-  za automatiku
-- chaos `replica_heal <replica>` posle toga vraća kontejner u normalan hod, ali
-  deployment ostaje `failed` — jedini izlaz je `conductor up`/`rollback`
+Measured: restart_max=5 → deployment `failed` in ~6s; the replica stayed
+`starting` with restart_count in the hundreds until the next deploy arrived.
 
-Izmereno (kroz chaos-ui): restart_max=5 → deployment `failed` za ~6s; replika
-ostala `starting` sa restart_count u stotinama dok nije stigao sledeći deploy.
-(Merenje je pre 4b; kanarinac u rollout-u i danas ostaje da se vrti dok
-rollback/redeploy ne stigne — zamrzavanje replike je rezervisano za aktivan
-deployment.)
+## 4b. Crash-loop in an active deployment — freeze the replica
 
-## 4b. Crash-loop u aktivnom deploymentu — zamrzni repliku
+Requirement: one bad replica in an already-`active` deployment must not fail the
+whole deployment nor spin forever; the rest of the group keeps serving,
+degradation is visible, the operator decides what next.
 
-Zahtev: jedna loša replika u deploymentu koji je već `active` ne sme da obori
-ceo deployment niti da se vrti zauvek; ostatak grupe nastavlja da služi,
-degradiranost je vidljiva, operator bira šta dalje.
+Model: `crashLooping` looks at deployment status. For `active` it emits
+`IntentFreezeReplica` **for offenders only** (not `IntentFail`). Actuator →
+`FreezeReplica`: `phase='failed', healthy=false` with a phase guard (like
+`MarkHostDown`), **without a revision CAS** — the sensor bumps `revision` every
+second so a CAS would always lose, and the decision depends only on the
+monotonic `restart_count`. The consequences close the loop:
 
-Model: `crashLooping` gleda status deploymenta. Za `active` emituje
-`IntentFreezeReplica` **samo za prekršioce** (ne `IntentFail`). Actuator →
-`FreezeReplica`: `phase='failed', healthy=false` uz guard na fazu (kao
-`MarkHostDown`), **bez revision CAS-a** — sensor bumpuje `revision` svake
-sekunde pa bi CAS stalno gubio, a odluka zavisi samo od monotonog
-`restart_count`. Posledice zatvaraju krug:
+- `RecordReplicaObservation` rejects reports for `failed` → `restart_count`
+  stays frozen at the value that crossed max
+- `ListReplicasByHost` (+ the `hostState` guard) does not send `failed` to the
+  agent → the replica disappears from `HostState`, the agent deletes the
+  container and stops reporting; the agent never learns the word `failed`
+- the snapshot still sees it (`phase<>'reaped'`), but `buildReplicaGroups` puts
+  it in a third bucket, `FrozenReplicas` — not in `TargetReplicas`, so
+  `crashLooping`/`notAllHealthy`/`newHealthOpenPastDeadline` don't see it
+- **no replacement**: `rollingRampUp`/`recreateRampUp` count `healthy + frozen`
+  against desired (`heldSlots`) — frozen holds the slot; a crash-loop is almost
+  always image/config, a clone would crash the same. A stateful frozen replica
+  also holds its lease.
+- `rollingScaleDown` spends surplus on frozen first (`destroy`, no drain
+  window), only then drains live ones newest-first
+- `rolloutComplete` counts `heldSlots` too: a rollback to a revision with a
+  frozen replica ends `active` (degraded) instead of hanging in `draining`
+- deployment status stays `active`; degradation is derived in the read path:
+  `conductor status` prints `active (degraded)` when `healthy < desired`, and
+  chaos-ui shows a yellow `v1 · active · degraded` badge
 
-- `RecordReplicaObservation` odbija izveštaje za `failed` → `restart_count`
-  ostaje zaleđen na vrednosti koja je prešla max
-- `ListReplicasByHost` (+ guard u `hostState`) ne šalje `failed` agentu →
-  replika nestane iz `HostState`, agent obriše kontejner i prestane da
-  izveštava; agent nikad ne uči reč `failed`
-- snapshot je i dalje vidi (`phase<>'reaped'`), ali `buildReplicaGroups` je
-  stavlja u treću korpu `FrozenReplicas` — nije u `TargetReplicas`, pa je
-  `crashLooping`/`notAllHealthy`/`newHealthOpenPastDeadline` ne vide
-- **bez zamene**: `rollingRampUp`/`recreateRampUp` broje `healthy + frozen`
-  prema desired (`heldSlots`) — frozen drži slot; crash-loop je skoro uvek
-  image/config, klon bi crashovao isto. Stateful frozen replika drži i lease.
-- `rollingScaleDown` troši višak prvo na frozen (`destroy`, bez drain prozora),
-  pa tek onda draina žive newest-first
-- `rolloutComplete` isto broji `heldSlots`: rollback na reviziju sa zamrznutom
-  replikom završi kao `active` (degradiran), ne visi u `draining`
-- status deploymenta ostaje `active`; degradiranost je izvedena u read path-u:
-  `conductor status` piše `active (degraded)` kad `healthy < desired`, chaos-ui
-  badge isto (žuto `v1 · active · degraded`)
+Thawing (three ways, all exist):
 
-Odmrzavanje (tri puta, svi postoje):
+1. `POST /v1/replicas/{id}/restart` (UI "Restart (thaw)", only on `failed`) →
+   the row goes hostless `replacing`, `restart_count=0` → `anyHostlessReplicas`
+   → placer → `scheduling` → agent starts a fresh container with no chaos mode
+2. `DELETE /v1/replicas/{id}` → the row disappears, `rollingRampUp` sees the
+   deficit → a new replica (manual "one replacement")
+3. `conductor up` / `rollback` → frozen becomes outgoing and
+   `reapFailedOutgoing` deletes it with no drain window while the old live
+   replica is still draining
 
-1. `POST /v1/replicas/{id}/restart` (UI "Restart (thaw)", samo na `failed`) →
-   red ide u hostless `replacing`, `restart_count=0` → `anyHostlessReplicas` →
-   placer → `scheduling` → agent digne novi kontejner bez chaos moda
-2. `DELETE /v1/replicas/{id}` → red nestane, `rollingRampUp` vidi deficit →
-   nova replika (ručna "jedna zamena")
-3. `conductor up` / `rollback` → frozen postane outgoing, `reapFailedOutgoing`
-   je obriše bez drain prozora dok stara živa replika još draina
-
-Postavka (paralelan stack `-p freeze`, apiserver :27080, agentsim :27780):
+Setup (parallel stack `-p freeze`, apiserver :27080, agentsim :27780):
 
 ```bash
 mkdir demo && cd demo
@@ -178,381 +172,358 @@ conductor init -n freeze-demo
 conductor add --service --name web --image nginx:alpine
 printf '[deploy]\nnum_replicas = 2\nregion = "us-east-1"\nrestart_max_retries = 5\ndrain_seconds = 10\ncpu = "200m"\nmemory = "128Mi"\n' > config.toml
 conductor up -s web
-A=<id replike>   # iz GET :27080/v1/topology
+A=<replica id>   # from GET :27080/v1/topology
 curl -XPOST localhost:27780/chaos -d "{\"action\":\"replica_crashloop\",\"replica\":\"$A\"}"
 conductor status                                   # active (degraded) 1/2
-curl -XPOST localhost:27080/v1/replicas/$A/restart # 200; 409 ako nije failed, 404 nepoznat
-curl -XDELETE localhost:27080/v1/replicas/$A       # ručna zamena
-conductor up -s web                                # v2 pokupi frozen kao failed outgoing
+curl -XPOST localhost:27080/v1/replicas/$A/restart # 200; 409 if not failed, 404 unknown
+curl -XDELETE localhost:27080/v1/replicas/$A       # manual replacement
+conductor up -s web                                # v2 picks up frozen as failed outgoing
 ```
 
-Izmereno (2026-09-18, reconcile 2s, agentsim tick 1s, restart_max 5, poller
-nad `/v1/topology` koji loguje samo promene):
+Measured (2026-09-18, reconcile 2s, agentsim tick 1s, restart_max 5):
 
-- **freeze**: chaos 17:42:55 → `restarts` 1..5 po sekundi → +7s replika A
-  `failed`, `healthy=false`, `restart_count` zaleđen na 6 (u drugom prolazu
-  na 7 — tick od 2s ju je uhvatio jedan restart kasnije); deployment ceo
-  period `active`, `healthy=1/2 observed=2`; agentsim `/agents` za A-in host
-  `containers: []` (kontejner obrisan, izveštaji stali); **nema nove
-  replike** ni posle 10+ tikova; `conductor status` → `active (degraded)  2  1/2`
+- **freeze**: chaos 17:42:55 → `restarts` 1..5 per second → +7s replica A
+  `failed`, `healthy=false`, `restart_count` frozen at 6; deployment `active`
+  the whole time, `healthy=1/2 observed=2`; agentsim `/agents` shows
+  `containers: []` for A's host; **no new replica** even after 10+ ticks;
+  `conductor status` → `active (degraded)  2  1/2`
 - **restart**: `POST …/restart` 17:43:27 (200) → +1s `health_check`
-  `restart_count=0` → +2s `active healthy=true`, deployment `2/2`, status
-  bez `(degraded)`. Replika se vratila na isti host (slot još slobodan);
-  drugi `restart` → 409, restart žive replike → 409, nepoznat id → 404
-- **delete**: crashloop 17:43:46 → frozen +8s → `DELETE` 17:43:58 → red
-  `GONE` odmah, `observed=1` → +2s nova replika `pending` → +4s
-  `health_check` na istom hostu → +5s `active`, `2/2`
-- **redeploy**: crashloop 17:44:48 → frozen +8s → `conductor up` (v2)
-  17:45:00 → +2s v2 kanarinac → +5s healthy → +6s druga v2 → +9s healthy,
-  `2/2` → +10s živa v1 `draining` (traffic switch) → **+12s frozen v1 `GONE`**
-  (`reapFailedOutgoing`, bez drain prozora, dok živa još draina) → +21s živa
-  v1 `GONE` (drain 10s) → +23s v2 `active 2/2`
-- **stateful** (`add --database --engine postgres --name pg`, `volume add
-  --mount /var/lib/postgresql/data --size 2 -s pg`, `up -s pg -f pg-config.toml`
-  sa `num_replicas=1`): crashloop 17:50:01 → frozen +5s (`restart_count` 6);
-  10s posle: `active healthy=0/1 observed=1`, **nema create**, lease u
-  `volume_leases` i dalje na frozen replici (live). `POST …/restart` 17:50:17
-  → +3s `active healthy=true`, na **istom hostu kao volumen** (`ue1-small-1`,
-  pinovana grana placera), lease ponovo uzet istom replikom
+  `restart_count=0` → +2s `active healthy=true`, deployment `2/2`, no
+  `(degraded)`. Second `restart` → 409, restart of a live replica → 409,
+  unknown id → 404
+- **delete**: crashloop 17:43:46 → frozen +8s → `DELETE` 17:43:58 → row `GONE`
+  immediately, `observed=1` → +2s new replica `pending` → +5s `active`, `2/2`
+- **redeploy**: crashloop 17:44:48 → frozen +8s → `conductor up` (v2) 17:45:00 →
+  +2s v2 canary → +9s second v2 healthy, `2/2` → +10s live v1 `draining`
+  (traffic switch) → **+12s frozen v1 `GONE`** (`reapFailedOutgoing`, no drain
+  window, while the live one is still draining) → +21s live v1 `GONE` →
+  +23s v2 `active 2/2`
+- **stateful** (`pg` with a volume, `num_replicas=1`): crashloop 17:50:01 →
+  frozen +5s; 10s later `active healthy=0/1 observed=1`, **no create**, the
+  lease still held by the frozen replica. `POST …/restart` 17:50:17 → +3s
+  `active healthy=true` on the **same host as the volume** (pinned placer
+  branch), lease reacquired by the same replica
 
-Napomena (zabeleženo, nije popravljano): SQL pojas `ReserveReplicaOnHost` ne
-broji `failed` replike u kapacitet hosta, in-memory ledger placera
-(`placer.go`) ih broji — dva ledgera se ne slažu dok replika stoji frozen.
-Zato restart ide kroz hostless `replacing`, ne "na isti host".
+Note (recorded, not fixed): the SQL belt `ReserveReplicaOnHost` does not count
+`failed` replicas toward host capacity, while the placer's in-memory ledger
+(`placer.go`) does — the two ledgers disagree while a replica sits frozen. That
+is why restart goes through hostless `replacing` rather than "same host".
 
-## 5. Zaglavljen health check — progress deadline
+## 5. Stuck health check — progress deadline
 
-Zahtev: deploy koji nikad ne postane healthy ne sme da visi večno.
+Requirement: a deploy that never becomes healthy must not hang forever.
 
-- chaos `replica_stall_health` <replica> → kontejner se podigne, probe nikad ne prođu
-- replika stoji u `health_check`; progress-deadline putanja je obara i
-  rollout se završava kao failed umesto da visi
+- chaos `replica_stall_health <replica>` → the container starts, probes never pass
+- the replica sits in `health_check`; the progress-deadline path fails it and
+  the rollout ends as failed instead of hanging
 
-Izmereno kroz chaos-ui (progress_deadline=60): kanarinac stall → deployment `failed`
-za 56s, served revision ostao na staroj verziji. Napomena: kontejner postoji na agentu
-tek ~3s posle deploya, stall pre toga vraća 404 (`no agent runs replica`).
+Measured (progress_deadline=60): canary stall → deployment `failed` in 56s, the
+served revision stayed on the old version. Note: the container exists on the
+agent only ~3s after the deploy; a stall before that returns 404
+(`no agent runs replica`).
 
-## 6. Zombi agent + stateful lease — single writer
+## 6. Zombie agent + stateful lease — single writer
 
-Zahtev: particionisan-ali-živ agent ne sme da drži volume zauvek niti da
-vaskrsne otpisanu repliku.
+Requirement: a partitioned-but-alive agent must not hold a volume forever nor
+resurrect a written-off replica.
 
-- stateful servis (`conductor add --database ...` + volume), replika drži lease
-- `kill-host` njenog hosta; posle 2min replika ide u `replacing`
-- agent nastavi da šalje healthy za nju (zombi): observacije padaju na SQL
-  guard (`replacing` je orchestrator-owned) i — bitno — **ne obnavljaju lease**
-- lease istekne 90s od poslednje observacije koja je stvarno prošla; tek tad
-  zamenska replika sme `AcquireVolumeLease` → single writer očuvan, failover
-  nije blokiran
+- stateful service (`conductor add --database ...` + volume), the replica holds
+  the lease
+- `host_kill` its host; after 2min the replica goes `replacing`
+- the agent keeps reporting it healthy (zombie): observations hit the SQL guard
+  (`replacing` is orchestrator-owned) and — crucially — **do not renew the lease**
+- the lease expires 90s after the last observation that actually landed; only
+  then may the replacement replica `AcquireVolumeLease` → single writer
+  preserved, failover not blocked
 
-Izmereno kroz chaos-ui (2026-09-11): replacing na +125s, replika ostaje hostless (pin na
-volume hosta), lease istekao ~+90s; recover → ista replika nazad na isti host active za 4s
-i lease ponovo uzet.
+Measured: `replacing` at +125s, replica stays hostless (pinned to the volume's
+host), lease expired ~+90s; recover → the same replica returns to the same host,
+`active` in 4s, lease reacquired.
 
-## Regularni scenariji (bez chaosa)
+## Regular scenarios (no chaos)
 
 ### 7. Scale up / down
 
-- `conductor scale us-east-1=4 -s web` → placer dodaje replike uz anti-affinity
-  (širi po hostovima pre nego što duplira)
-- `conductor scale us-east-1=2 -s web` → višak ide u `draining`, reap posle
-  `drain_seconds`; traffic pointer se NE dira (scale-down nije rollout)
+- `conductor scale us-east-1=4 -s web` → the placer adds replicas with
+  anti-affinity (spreads across hosts before doubling up)
+- `conductor scale us-east-1=2 -s web` → surplus goes `draining`, reaped after
+  `drain_seconds`; the traffic pointer is NOT touched (scale-down is not a rollout)
 
-Izmereno: 2→4 active+healthy za **8s** (spread na 3 hosta); 4→2: draining na
-+9s, reaped na +12s (drain window 10s). Kroz chaos-ui (2026-09-11): 2→4 za 5s, 4→2 za 11s.
+Measured: 2→4 active+healthy in **8s** (spread over 3 hosts); 4→2: draining at
++9s, reaped at +12s (drain window 10s).
 
-### 8. Novi deploy — blue/green
+### 8. New deploy — blue/green
 
-- izmeni spec/image pa `conductor up -s web` → v2 replike se dižu paralelno sa
-  v1; kad su sve healthy, traffic switch je atomski batch (SetServedRevision +
-  drain starih u istoj transakciji); v1 replike se drain-uju pa reap-uju
-- pad v2 (crash/stall pre nego što postane healthy) → progress deadline obara
-  rollout kao failed, v1 ostaje da služi
+- change the spec/image, then `conductor up -s web` → v2 replicas come up
+  alongside v1; once all are healthy the traffic switch is one atomic batch
+  (SetServedRevision + drain of the old ones in the same transaction); v1
+  replicas drain, then are reaped
+- if v2 fails (crash/stall before healthy) → the progress deadline fails the
+  rollout, v1 keeps serving
 
-Izmereno: `up` v2 → v2 current (2 active) i v1 reaped za **12s**. Kroz chaos-ui
-(2026-09-11): deploy forma → v2 served i v1 reaped za 21-22s (drain 10s).
+Measured: `up` v2 → v2 current (2 active) and v1 reaped in **12s**; through
+chaos-ui 21-22s (drain 10s).
 
-### 9. Stateful servis — volume, lease, recreate
+### 9. Stateful service — volume, lease, recreate
 
 - `conductor add --database --engine postgres --name pg` +
   `conductor volume add --mount /var/lib/postgresql/data --size 2 -s pg` +
-  `conductor up -s pg -f pg-config.toml` (num_replicas=1 — stateful je single
+  `conductor up -s pg -f pg-config.toml` (num_replicas=1 — stateful is single
   instance)
-- volume je per environment-service, ne per service (od 2026-09-19,
-  migracija 00007): `volume *` traži projekat, environment i servis kao `up`
-  i `scale` — `-e` se podrazumeva iz linka, a `conductor init` linkuje
-  `production`, pa komande gore rade bez `-e`. Isti servis u drugom
-  environmentu ima svoj disk (9a).
-- placer prvo smesti volume (3D bin-pack: cpu/mem/disk), replika prati volume
-  host; lease se uzima u istoj transakciji kao dodela hosta
-- redeploy (`up` opet) je recreate, ne blue/green: stara replika ode, nova
-  preuzima lease — nikad dva pisca
+- a volume belongs to an environment-service, not a service (migration 00007):
+  `volume *` resolves project, environment and service like `up` and `scale` —
+  `-e` defaults to the linked environment, and `conductor init` links
+  `production`, so the commands above work without `-e`. The same service in
+  another environment gets its own disk (9a).
+- the placer places the volume first (3D bin-pack: cpu/mem/disk), the replica
+  follows the volume's host; the lease is taken in the same transaction as the
+  host assignment
+- a redeploy (`up` again) is recreate, not blue/green: the old replica goes, the
+  new one takes over the lease — never two writers
 
-Izmereno: deploy→active+lease za **13s** (replika i volume na istom hostu);
-recreate v1→v2 sa lease handover-om za **19s**, ceo period tačno 1 živa replika.
-2026-09-11: deploy→active+lease 6s; recreate: stara draining → reaped +13s, nova
-scheduling +16s, active + lease +18s.
+Measured: deploy→active+lease in **13s** (replica and volume on the same host);
+recreate v1→v2 with lease handover in **19s**, exactly one live replica the
+whole time.
 
-#### 9a. Jedan servis u dva environmenta — dva volumena, dva lease-a
+#### 9a. One service in two environments — two volumes, two leases
 
-Do 2026-09-19 je `volumes.service_id` pokazivao na `services`, pa je servis
-vezan u dva environmenta delio jedan disk; reconciler je indeksirao volumene
-po `(service_id, region)`, dva desired reda (jedan po environmentu) su
-rezolvirala isti volume i drugi environment nikad nije dobio lease.
-`ListActiveVolumes` je imao `DISTINCT` koji je tu koliziju samo maskirao.
-Sad volume pripada `environment_services` redu — istom `replicaSlot{
-EnvironmentServiceID, Region}` ključu po kom engine vodi sve ostalo
-(`volumeKey` je obrisan, indeks je `map[replicaSlot]volume`,
-`serviceDemand` poredi slot, `DISTINCT` je otišao). `UNIQUE
-(environment_service_id, mount_path)`: isti mount na istom servisu u drugom
-environmentu je drugi disk, ne `ErrExists`. `ON DELETE RESTRICT` ostaje —
-odvezivanje servisa iz environmenta sa volumenom pada glasno. Bez backfill-a:
-baza je dev-only, migracija briše postojeće volumene (leases, pa
-`replicas.volume_id = NULL`, pa volumes) i menja vlasnika; wipe stack-a ostaje
-eksplicitan (`make stack-fresh`).
+A volume belongs to an `environment_services` row — the same
+`replicaSlot{EnvironmentServiceID, Region}` key the engine uses for everything
+else. `UNIQUE (environment_service_id, mount_path)`: the same mount on the same
+service in another environment is a different disk, not `ErrExists`.
+`ON DELETE RESTRICT` stays — unbinding a service that has a volume fails loudly.
 
-Koraci (postavka kao u 9; `environment create` klonira bindinge iz
-linkovanog environmenta, pa `pg` završi vezan i u `staging`):
+Steps (setup as in 9; `environment create` clones the bindings from the linked
+environment, so `pg` ends up bound in `staging` too):
 
 ```bash
-conductor init -n env-demo                                   # linkuje production
+conductor init -n env-demo                                   # links production
 conductor add --database --engine postgres --name pg
 conductor volume add --mount /var/lib/postgresql/data --size 2 -s pg
 conductor up -s pg -f pg-config.toml
-conductor environment create -n staging                      # klon production → pg vezan i tu
+conductor environment create -n staging                      # clone of production → pg bound here too
 conductor volume add --mount /var/lib/postgresql/data --size 2 -s pg -e staging
 conductor up -s pg -e staging -f pg-config.toml
-conductor volume list -s pg              # samo production-ov
-conductor volume list -s pg -e staging   # samo staging-ov
+conductor volume list -s pg              # production's only
+conductor volume list -s pg -e staging   # staging's only
 conductor volume list -s pg -e nosuch    # "service "pg" in env-demo/nosuch: not found"
 ```
 
-Očekivano: dva reda u `volumes` sa različitim `environment_service_id`, dva
-lease-a, dve `active` replike svaka pinovana na svoj volume; u engine logu
-nijedan hold, nijedan lease konflikt.
+Expected: two `volumes` rows with different `environment_service_id`, two
+leases, two `active` replicas each pinned to its own volume; no holds and no
+lease conflicts in the engine log.
 
-Izmereno (2026-09-19 UTC, agentsim tick 1s, reconcile 2s, oba `up` u istoj
-sekundi):
+Measured (2026-09-19 UTC, agentsim tick 1s, reconcile 2s, both `up` in the same
+second):
 
-- `up` production + `up` staging 10:33:10 → jedan pass 10:33:11
-  `place_volume:2 create:2` (oba volumena na `ue1-small-1`) → 10:33:13
-  `assign_host:2` → 10:33:15 `recreateComplete` za oba slota (**5s**,
-  `holds=0` u svakom passu)
-- baza 10:33:50: dva `attached` 2GiB volumena (es `d50a447f` production,
-  `153b14b7` staging), dva živa lease-a, replike `bb1e6124`/`eff42a10`
-  `active|healthy`, svaka na svom volumenu
-- §11 na production volumenu dok staging gleda: `--size 4` 10:34:20 →
-  `resizing` 10:34:22 → `attached` 4GiB 10:34:23 (**3s**); `--size 100` →
-  CLI "short 38GiB", `resize_pending` 10:34:26 (**3s**); drugi `update` →
-  "is resize_pending; revert or wait"; `revert` 10:34:26 → `attached` 4GiB,
-  `previous` NULL 10:34:28 (**2s**). Staging volume ceo period `attached
-  2GiB/2GiB` — grow po `(environment_service_id, mount_path)` ne dira
-  komšiju.
+- 10:33:10 both `up` → one pass 10:33:11 `place_volume:2 create:2` (both volumes
+  on `ue1-small-1`) → 10:33:13 `assign_host:2` → 10:33:15 `recreateComplete` for
+  both slots (**5s**, `holds=0` in every pass)
+- state at 10:33:50: two `attached` 2GiB volumes, two live leases, two
+  `active|healthy` replicas each on its own volume
+- the full §11 grow/park/revert cycle run on the production volume while the
+  staging volume stayed `attached 2GiB/2GiB` throughout — grow keyed by
+  `(environment_service_id, mount_path)` does not touch the neighbour
 
-### 10. Operator akcije
+### 10. Operator actions
 
-- `cordon` (UI → apiserver): host ostaje da služi postojeće, ne dobija novo;
-  primenjuje se samo na `open` (409 za `draining` — cordon bi izbrisao drain)
-- `drain` (UI → apiserver): graciozna evakuacija stateless replika, host na
-  kraju sam završi u `cordoned` — detalji i merenja u 12. Uvek prolazi (nema
-  `force`, 409 samo ako već draina)
-- `uncordon` (samo API, `POST /v1/hosts/{id}/uncordon`): vraća i `cordoned` i
-  `draining` host u `open` i briše `drain_started_at` — tako se drain otkazuje
-- `restart` replike (UI "Restart (thaw)" na `failed` replici →
-  `POST /v1/replicas/{id}/restart`): odmrzava repliku zamrznutu u 4b — red ide u
-  hostless `replacing` sa `restart_count=0`, placer je smesti sledeći tick
-  (isti put kao smrt hosta; "isti host" nije garantovan jer DB pojas failed
-  repliku ne broji u kapacitet, pa je slot mogao biti popunjen). 404 nepoznat
-  id, 409 ako replika nije `failed` — živu repliku restartuje agent, ne
+- `cordon` (UI → apiserver): the host keeps serving what it has, receives
+  nothing new; only allowed on `open` (409 for `draining` — cordon would erase
+  the drain)
+- `drain` (UI → apiserver): graceful evacuation of stateless replicas, the host
+  ends up `cordoned` on its own — details and measurements in 12. Always
+  succeeds (no `force`, 409 only if already draining)
+- `uncordon` (API only, `POST /v1/hosts/{id}/uncordon`): returns both `cordoned`
+  and `draining` hosts to `open` and clears `drain_started_at` — this is how a
+  drain is cancelled
+- replica `restart` (UI "Restart (thaw)" on a `failed` replica →
+  `POST /v1/replicas/{id}/restart`): thaws a replica frozen in 4b — the row goes
+  hostless `replacing` with `restart_count=0`, the placer places it next tick
+  (same path as host death; "same host" is not guaranteed, since the DB belt
+  doesn't count a failed replica toward capacity). 404 unknown id, 409 if the
+  replica isn't `failed` — a live replica is restarted by the agent, not the
   control plane
-- `delete` replike (UI "Orphan", `DELETE /v1/replicas/{id}`): na zamrznutoj
-  replici je ovo ručna "jedna zamena" — red nestane, `rollingRampUp` vidi
-  deficit i napravi novu
-- `conductor rollback`: vrati prethodnu verziju deploymenta
+- replica `delete` (UI "Orphan", `DELETE /v1/replicas/{id}`): on a frozen
+  replica this is the manual "one replacement" — the row disappears,
+  `rollingRampUp` sees the deficit and creates a new one
+- `conductor rollback`: restore the previous deployment version
 
-### 11. Volume resize — grow-only, engine je gate za prostor, `resize_pending` + `revert`
+### 11. Volume resize — grow-only, engine gates space, `resize_pending` + `revert`
 
-Zahtev: `conductor volume update --size N` mora da poraste disk uživo bez
-restarta replike (kao Railway live resize); shrink ne postoji; zahtev koji host
-ne može da primi ne sme da završi u `failed` nego čeka dok se prostor ne pojavi
-— ali dok čeka, mora da se **vidi** kao stanje, ne sme da blokira druge volumene
-na hostu, i operator mora da može da ga **povuče** (`volume revert`).
+Requirement: `conductor volume update --size N` must grow the disk live without
+restarting the replica (like Railway live resize); shrink does not exist; a
+request the host cannot take must not end in `failed` but wait until space
+appears — and while waiting it must be **visible** as a state, must not block
+other volumes on the host, and the operator must be able to **take it back**
+(`volume revert`).
 
-Model (v2, 2026-09-18):
+Model:
 
-- **Engine je jedini pisac `volumes.status`.** CLI/project pišu samo
-  `desired_size_bytes` (+ `previous_desired_size_bytes`, cilj za revert).
-- **Desired postaje rezervacija tek kad je odobren.** Ledger tereti
-  `VolumeSizing.Committed()`: `resizing → desired`; inače `observed` ako je
-  agent javio; inače `desired` (sveže plasiranje). Istu formulu koristi
-  downlink (`volumeTargetSize`) i CLI advisory — neodobren grow od 100GiB ne
-  sprečava novi volume da sleti na host.
-- **Grow je delta item kroz `fits`.** `resize` item nosi `GrowDelta()`
-  (Committed je već naplatio ono što je na disku), preskače `DiskReserve`
-  (rezerva postoji baš za grow-ove) i cpu/mem headroom; ista poredba za svaki
-  item. Odobren grow se odmah upiše u ledger — drugi grow na istom hostu u
-  istom ticku vidi prvi (redosled po `id`).
-- **Novi status `resize_pending`** = tačno "grow tražen, host nema mesta".
-  Piše ga engine (`MarkVolumeResizePending`), nikad CLI. Važi i za nezdrav
-  host (van ledgera — ništa tu ne staje): grow se parkira, pa `revert` ostaje
-  dostupan dok je host dole, a settle grana ne treba ledger — revertovan volume
-  je `attached` već na sledećem ticku, ne kad se host vrati.
-- **Jedan grow u letu.** `update` prolazi samo za `pending` (neplasiran) ili
-  `attached` **i konvergiran** (`observed == desired`, ili nikad javljeno);
+- **The engine is the only writer of `volumes.status`.** CLI/project write only
+  `desired_size_bytes` (+ `previous_desired_size_bytes`, the revert target).
+- **Desired becomes a reservation only once approved.** The ledger charges
+  `VolumeSizing.Committed()`: `resizing → desired`; otherwise `observed` if the
+  agent has reported; otherwise `desired` (fresh placement). The downlink
+  (`volumeTargetSize`) and the CLI advisory use the same formula — an unapproved
+  100GiB grow does not stop a new volume from landing on the host.
+- **Grow is a delta item through `fits`.** The `resize` item carries
+  `GrowDelta()` (Committed already charged what is on disk), skips `DiskReserve`
+  (the reserve exists precisely for grows) and cpu/mem headroom. An approved
+  grow is written to the ledger immediately — a second grow on the same host in
+  the same tick sees the first (ordered by `id`).
+- **New status `resize_pending`** = exactly "grow requested, host has no room".
+  Written by the engine (`MarkVolumeResizePending`), never by the CLI. It also
+  applies to an unhealthy host (outside the ledger): the grow is parked, so
+  `revert` stays available while the host is down, and the settle branch needs
+  no ledger — a reverted volume is `attached` on the very next tick, not when
+  the host returns.
+- **One grow in flight.** `update` is accepted only for `pending` (unplaced) or
+  `attached` **and converged** (`observed == desired`, or never reported);
   grow-only (`size > desired`).
-- **`volume revert`** vraća `desired` na `previous_desired_size_bytes`
-  (puni `update`, briše `revert` → radi jednom). Dozvoljen **samo** iz
-  `resize_pending`. Ne u `resizing` (odobreno = obećano agentu; zaglavljen
-  resize je posao za budući watchdog/alarm, ne za revert). Ne dira status —
-  engine sam settle-uje `resize_pending → attached` jer sad važi
-  `observed >= desired`.
-- SQL predikati u `Mark*` ostaju eksplicitni (commit-time pojas mora u bazi) i
-  zrcale `VolumeSizing.Drifting`/`CaughtUp`; izgubljena trka = drop, sledeći
-  tick odlučuje ponovo.
+- **`volume revert`** resets `desired` to `previous_desired_size_bytes` (a full
+  `update`, clearing `revert` → works once). Allowed **only** from
+  `resize_pending`. Not from `resizing` (approved = promised to the agent; a
+  stuck resize is a job for a future watchdog/alarm, not for revert). It does
+  not touch status — the engine settles `resize_pending → attached` itself since
+  `observed >= desired` now holds.
+- SQL predicates in `Mark*` stay explicit (the commit-time belt must live in the
+  database) and mirror `VolumeSizing.Drifting`/`CaughtUp`; a lost race is a
+  drop, the next tick decides again.
 
 ```
 pending ──place──▶ attached ──drift, fits───────────────▶ resizing ──observed≥desired──▶ attached
                       │                                      ▲
-                      └──drift, !fits──▶ resize_pending ─────┘ (fits na nekom kasnijem ticku)
+                      └──drift, !fits──▶ resize_pending ─────┘ (fits on some later tick)
                                              │
                                              └──revert──▶ desired=previous ──engine: observed≥desired──▶ attached
 ```
 
 | status | `update` (grow-only) | `revert` |
 |---|---|---|
-| `pending` (neplasiran), `attached` konvergiran | ✅ | ❌ (`previous` je ionako NULL) |
-| `attached` sa driftom (≤2s prozor dok engine ne klasifikuje) | ❌ "grow already requested; revert first" | ❌ "not classified yet, retry" |
+| `pending` (unplaced), `attached` converged | ✅ | ❌ (`previous` is NULL anyway) |
+| `attached` with drift (≤2s window before the engine classifies) | ❌ "grow already requested; revert first" | ❌ "not classified yet, retry" |
 | `resize_pending` | ❌ "is resize_pending; revert or wait" | ✅ |
 | `resizing` | ❌ | ❌ "nothing to revert" |
 
-Koraci (postavka kao u 9: stateful `pg`, `volume add --size 2`, `up`; volume
-je sleteo na `ue1-small-1` — 80GB, budžet 64GiB; sve `volume` komande dole
-ciljaju linkovani `production` — za drugi environment dodaj `-e`, volume je
-per environment-service):
+Steps (setup as in 9: stateful `pg`, `volume add --size 2`, `up`; the volume
+landed on `ue1-small-1` — 80GB, budget 64GiB; all `volume` commands below target
+the linked `production` — add `-e` for another environment):
 
-- grow sa mestom: `volume update --mount /var/lib/postgresql/data --size 4 -s pg`
-  → CLI "host has room"; `resizing` na sledećem ticku; agent naraste i javi;
+- grow with room: `volume update --mount /var/lib/postgresql/data --size 4 -s pg`
+  → CLI "host has room"; `resizing` next tick; the agent grows and reports;
   `attached`
-- grow bez mesta: `--size 100` → CLI "host is short 36GiB … waits as
-  resize_pending (volume revert takes it back)"; odmah drugi `update` →
-  "already has a grow requested (4G → 100G); revert first"; posle ticka
-  `volume list` pokazuje `SIZE 100GiB / ON DISK 4GiB / resize_pending`;
-  `update` sad → "is resize_pending; revert or wait"
-- drugi volume pored pending grow-a: `cordon` medium i large (da placer mora
-  na small), `add --database --name pg2`, `volume add --mount /data --size 30
-  -s pg2`, `up -s pg2` → sleti na isti host (30 ≤ 64 − 4 − 12.8); po staroj
-  logici (desired kao rezervacija) host bi izgledao 40GiB prekomitovan
+- grow without room: `--size 100` → CLI "host is short 36GiB … waits as
+  resize_pending (volume revert takes it back)"; an immediate second `update` →
+  "already has a grow requested (4G → 100G); revert first"; after the tick
+  `volume list` shows `SIZE 100GiB / ON DISK 4GiB / resize_pending`; `update`
+  now → "is resize_pending; revert or wait"
+- another volume alongside a pending grow: `cordon` medium and large (to force
+  the placer onto small), `add --database --name pg2`,
+  `volume add --mount /data --size 30 -s pg2`, `up -s pg2` → lands on the same
+  host (30 ≤ 64 − 4 − 12.8); under the old logic (desired as reservation) the
+  host would have looked 40GiB overcommitted
 - `volume revert --mount /var/lib/postgresql/data -s pg` → "reverted … → 4GiB
-  (engine settles on next tick)"; `attached` na sledećem ticku; drugi `revert`
-  → "is attached; nothing to revert"
-- prostor se pojavi: `--size 60` → `resize_pending` (delta 56 > 64−4−30);
-  `update hosts set disk_bytes=200G` → engine sam odobri → `resizing` →
-  `attached` na 60GiB, bez akcije operatera
-- chaos `volume_stall_resize <volume>` pa `--size 70` (ima mesta): engine
-  odobri (`resizing`), agent nikad ne javi → volume **stoji `resizing`**,
-  `ON DISK` zaostaje; `update` → "is resizing; revert or wait"; `revert` →
-  "is resizing; nothing to revert" — nema CLI izlaza iz `resizing`, namerno;
-  `volume_heal` → agent naraste i engine settle-uje. Nema timeout-a ni
-  `failed` (isti stav kao 4).
+  (engine settles on next tick)"; `attached` next tick; a second `revert` →
+  "is attached; nothing to revert"
+- space appears: `--size 60` → `resize_pending` (delta 56 > 64−4−30);
+  `update hosts set disk_bytes=200G` → the engine approves by itself →
+  `resizing` → `attached` at 60GiB, no operator action
+- chaos `volume_stall_resize <volume>` then `--size 70` (room exists): the engine
+  approves (`resizing`), the agent never reports → the volume **sits in
+  `resizing`**, `ON DISK` lags; `update` → "is resizing; revert or wait";
+  `revert` → "is resizing; nothing to revert" — there is deliberately no CLI
+  exit from `resizing`; `volume_heal` → the agent grows and the engine settles.
+  No timeout, no `failed` (same stance as 4).
 
-Izmereno (2026-09-18 UTC, agentsim tick 1s, reconcile 2s; replika
-`active|healthy|restart_count=0` ceo period, lease netaknut):
+Measured (2026-09-18 UTC, agentsim tick 1s, reconcile 2s; replica
+`active|healthy|restart_count=0` throughout, lease untouched):
 
-- deploy 15:25:59 → volume `attached` 2GiB + replika `active` 15:26:07
-- `--size 4` 15:26:47 → `resizing` 15:26:49 (agent već 4GiB) → `attached`
-  15:26:50 (**3s**)
-- `--size 100` 15:27:22 → `resize_pending` 15:27:24 (**2s**); zatim samo
-  DEBUG "still waiting" svaki tick, status ne mrda
-- `up -s pg2` (30GiB) 15:28:04 → volume `attached` na `ue1-small-1` 15:28:07,
-  replika `active` 15:28:11 — pored parkiranog 100GiB zahteva
+- deploy 15:25:59 → volume `attached` 2GiB + replica `active` 15:26:07
+- `--size 4` 15:26:47 → `attached` 15:26:50 (**3s**)
+- `--size 100` 15:27:22 → `resize_pending` 15:27:24 (**2s**); afterwards only a
+  DEBUG "still waiting" per tick, status unchanged
+- `up -s pg2` (30GiB) 15:28:04 → volume `attached` on `ue1-small-1` 15:28:07,
+  replica `active` 15:28:11 — alongside the parked 100GiB request
 - `revert` 15:29:08 → `attached` 4GiB 15:29:09 (**1s**), `previous` NULL
 - `--size 60` 15:29:12 (CLI short 26GiB) → `resize_pending` 15:29:15; host
-  80→200GB 15:29:17 → `resizing` 15:29:18 → agent 60GiB 15:29:19 →
-  `attached` 15:29:20 (**3s** od diska)
-- stall 15:29:55 + `--size 70` → `resizing` 15:29:57, `ON DISK` 60GiB stoji
-  4+ ticka; `volume_heal` 15:30:01 → `attached` 70GiB 15:30:03 (**2s**)
+  80→200GB 15:29:17 → `resizing` 15:29:18 → `attached` 15:29:20 (**3s** from disk)
+- stall 15:29:55 + `--size 70` → `resizing` 15:29:57, `ON DISK` stuck at 60GiB
+  for 4+ ticks; `volume_heal` 15:30:01 → `attached` 70GiB 15:30:03 (**2s**)
 
-Ponovljeno 17:15 UTC posle rebase-a na main (freeze/restart replika): isti
-ishodi, iste latencije (grow 3s, park 2s, revert 1s, heal 4s).
+Engine log: one INFO `volume grow waiting for host space` when parking, then
+DEBUG `still waiting` per tick; `volume grow approved` /
+`volume resized from=<status>` on flips.
 
-Engine log: jedan INFO `volume grow waiting for host space` pri parkiranju,
-posle toga DEBUG `still waiting` po ticku; `volume grow approved` /
-`volume resized from=<status>` na flipovima.
+#### Through chaos-ui
 
-#### Kroz chaos-ui (od 2026-09-19)
+Volumes travel with the topology (`GET /v1/topology` → `services[].volumes`, one
+`TopologyVolumes` query joining hosts, keyed by `environment_service_id`; a
+stateless service carries `[]`), so a stateful service gets one row per volume
+below its replica table: MOUNT | HOST | SIZE (desired, with `← previous` while a
+revert target exists) | ON DISK (observed, orange while lagging; `—` until the
+agent reports) | STATUS badge (`attached` green, `resizing` blue,
+`resize_pending` orange, `pending` grey) | ⋯ menu. Two lanes, as with replicas:
+**Grow** and **Revert** are operator intent and go to the control plane
+(`POST /v1/volumes/resize` and `/v1/volumes/revert`; guards stay in `project`,
+`ErrInvalid` → 409 with the message the CLI prints, `ErrNotFound` → 404);
+**Stall resize** and **Heal** go to agentsim (`volume_stall_resize` /
+`volume_heal` with the volume UUID from the row). GiB in the form, bytes on the
+wire; API identity is `(target, mount_path)` as in the CLI, not the UUID.
 
-Volumeni putuju sa topologijom (`GET /v1/topology` → `services[].volumes`,
-jedan upit `TopologyVolumes` join hosts, ključ `environment_service_id`;
-stateless servis nosi `[]`), pa stateful servis ispod tabele replika dobija red
-po volumenu: MOUNT | HOST | SIZE (desired, sa `← prethodni` dok postoji cilj za
-revert) | ON DISK (observed, narandžasto dok zaostaje; `—` dok agent nije javio)
-| STATUS badge (`attached` zeleno, `resizing` plavo, `resize_pending`
-narandžasto, `pending` sivo) | ⋯ meni. Dve trake kao za replike: **Grow** i
-**Revert** su operatorska namera i idu na control plane (`POST
-/v1/volumes/resize` i `/v1/volumes/revert`; guardovi ostaju u `project`,
-`ErrInvalid` → 409 sa porukom koju i CLI ispisuje, `ErrNotFound` → 404);
-**Stall resize** i **Heal** idu na agentsim (`volume_stall_resize` /
-`volume_heal` sa UUID-em volumena iz reda). GiB u formi, bajtovi na žici;
-identitet na API-ju je `(target, mount_path)` kao u CLI-u, ne UUID.
+- **Grow…** is offered only for `pending` or `attached` without drift (the same
+  condition `update` accepts): inline GiB field → Activity
+  `resize /var/lib/postgresql/data → 6GiB`; when the host has no room the
+  response carries `waiting_for_space` + `shortfall_bytes` and the row shows the
+  hint "host short 38GiB — parked as resize_pending" before the engine changes
+  the status
+- **Revert** only from `resize_pending`: Activity `revert … → 6GiB`; a second
+  click → 409 "is attached; nothing to revert"
+- **Stall resize** only for `attached` converged (so it catches the *next* grow),
+  then Grow → the volume sits in `resizing`, ON DISK lags; **Heal** → the agent
+  grows, the engine settles
 
-- **Grow…** se nudi samo za `pending` ili `attached` bez drifta (isti uslov
-  koji `update` prihvata): inline polje GiB → Activity `resize
-  /var/lib/postgresql/data → 6GiB`; kad host nema mesta odgovor nosi
-  `waiting_for_space` + `shortfall_bytes` i red dobija hint "host short 38GiB —
-  parked as resize_pending" pre nego što engine promeni status
-- **Revert** samo iz `resize_pending`: Activity `revert … → 6GiB`; drugi klik
-  → 409 "is attached; nothing to revert"
-- **Stall resize** samo za `attached` konvergiran (da zakači *sledeći* grow),
-  pa Grow → volumen stoji `resizing`, ON DISK zaostaje; **Heal** → agent
-  naraste, engine settle-uje
+Measured (2026-09-19 UTC, through the UI routes `/api/volumes/resize` and
+`/api/chaos`): same latencies as the CLI path — grow 3s, park 2s, revert <1s,
+heal 1s. The 409/404 messages come back verbatim from `project`: a second grow
+while one is in flight → "already has a grow requested (6G → 100G); revert
+first"; after the tick → "is resize_pending; revert or wait for it to attach";
+unknown mount → 404.
 
-Izmereno (2026-09-19 UTC, akcije kroz UI rute `/api/volumes/resize` i
-`/api/chaos`; production `pg` 4GiB na `ue1-small-1` pored staging `pg` 2GiB,
-budžet 64GiB; replika `active|healthy|restart_count=0` ceo period):
+Not verified by clicking in a browser: the Activity log and the hint are page
+state after a click, and the scenario was driven through the same Next routes
+the buttons call. Table and badge rendering was checked with a headless
+screenshot in the `resize_pending` and `resizing` states.
 
-- grow 4→6 11:45:58 → `resizing` 11:45:59 → `attached` 11:46:01 (**3s**)
-- grow →100 11:46:27 → odgovor `waiting_for_space, shortfall 38GiB` odmah;
-  `resize_pending` 11:46:29 (**2s**); drugi grow iste sekunde → 409 "already
-  has a grow requested (6G → 100G); revert first"; posle ticka → 409 "is
-  resize_pending; revert or wait for it to attach"; nepoznat mount → 404
-- revert 11:47:19 → `attached` 6GiB 11:47:19 (**<1s**), `previous` NULL
-- stall 11:47:22 + grow →8 11:47:22 → `resizing` 11:47:24, ON DISK 6GiB stoji
-  30s+; heal 11:47:56 → `attached` 8GiB 11:47:57 (**1s**), engine
-  `volume resized from=resizing`
+### 12. Host drain — graceful evacuation
 
-Nije provereno klikom u browseru: Activity log i hint su stanje stranice posle
-klika, a scenario je vožen kroz iste Next rute koje dugmad zovu. Render tabele
-i badge-ova proveren headless screenshot-om u `resize_pending` (100GiB ← 6GiB,
-ON DISK 6GiB) i `resizing` (8GiB ← 6GiB) stanju.
+Requirement: the operator says "take everything off this host" and service
+capacity must never drop below desired. Stateful replicas (with a volume) are
+**not moved** — the disk is local; they stay and the operator migrates them
+manually later.
 
-### 12. Drain hosta — graciozna evakuacija
+Model: no new rule, no new Intent. `POST /v1/hosts/{id}/drain` writes
+`status='draining'`, `drain_started_at=now()`. The snapshot carries
+`host_draining` per replica (LEFT JOIN hosts), and the engine narrows that to
+stateless replicas. Two changes in the rolling cascade:
 
-Zahtev: operator kaže "skini sve sa ovog hosta" i kapacitet servisa nikad ne
-sme da padne ispod desired. Stateful replike (volume) se **ne sele** — disk je
-lokalan; ostaju na hostu i operator ih migrira ručno kasnije.
+- `healthyTargets` does not count a replica on a draining host → `rollingRampUp`
+  creates the surge itself (replacements are created while the old ones still
+  serve)
+- `rollingScaleDown` sorts draining-host replicas first, then newest-first → once
+  the replacement is healthy, the surplus that leaves is exactly the old ones
 
-Model: nema novog pravila ni Intent-a. `POST /v1/hosts/{id}/drain` upiše
-`status='draining'`, `drain_started_at=now()`. Snapshot svakoj replici nosi
-`host_draining` (LEFT JOIN hosts), a engine to sužava na stateless replike
-(volume-pinovana ne odlazi sa hostom). Dve izmene u rolling kaskadi:
+`notAllHealthy` between them looks at raw `Healthy`, not capacity — otherwise a
+healthy replica on a draining host would hold the group forever before the
+replacement even existed. The end of a drain is decided by the watchdog sweep:
+`CompleteDrainedHosts` moves `draining → cordoned` when the host has no live
+stateless replicas (`phase NOT IN (reaped, failed)` — it waits for the **reap**,
+not the drain, since a drained replica still serves until the window expires).
+The placer ledger holds all `host_healthy` hosts; `status='open'` filters only
+`pick` (free placement); the DB belt `ReserveReplicaOnHost` does the same:
+`host_healthy AND (status='open' OR volume_id IS NOT NULL)`.
 
-- `healthyTargets` ne broji repliku na draining hostu → `rollingRampUp` sam
-  pravi surge (zamene se kreiraju dok stare još služe)
-- `rollingScaleDown` sortira draining-host replike prve, pa newest-first →
-  kad je zamena healthy, višak koji odlazi su tačno stare
-
-`notAllHealthy` između njih gleda sirovo `Healthy`, ne kapacitet — inače bi
-zdrava replika na draining hostu držala grupu zauvek pre nego što zamena
-uopšte nastane. Kraj draina odlučuje watchdog sweep: `CompleteDrainedHosts`
-prebaci `draining → cordoned` kad na hostu nema živih stateless replika
-(`phase NOT IN (reaped, failed)` — čeka **reap**, ne drain, jer drained
-replika još služi do isteka prozora). Placer ledger sadrži sve `host_healthy`
-hostove, `status='open'` filtrira samo `pick` (slobodno smeštanje); DB pojas
-`ReserveReplicaOnHost` isto: `host_healthy AND (status='open' OR volume_id
-IS NOT NULL)`.
-
-Postavka (svi podscenariji; 3 web replike u us-east-1 da anti-affinity stavi
-po jednu na svaki od 3 hosta):
+Setup (all sub-scenarios; 3 web replicas in us-east-1 so anti-affinity puts one
+on each of the 3 hosts):
 
 ```bash
 make stack-up && make build
@@ -564,162 +535,173 @@ printf '[deploy]\nnum_replicas = 3\nregion = "us-east-1"\ndrain_seconds = 10\ncp
 curl -s localhost:7080/v1/hosts | jq -r '.[] | "\(.hostname) \(.id) healthy=\(.host_healthy) \(.status) repl=\(.replicas_on_host)"'
 ```
 
-`GET /v1/hosts` (i topology `hosts`) vraća `host_healthy`, `status`,
-`drain_started_at`, `replicas_on_host` — drain se prati odatle ili iz
-chaos-ui Hosts panela (dva badge-a: health + status, "draining since …",
-broj replika).
+`GET /v1/hosts` (and topology `hosts`) returns `host_healthy`, `status`,
+`drain_started_at`, `replicas_on_host` — track a drain from there or from the
+chaos-ui Hosts panel (two badges: health + status, "draining since …", replica
+count).
 
-#### 12a. Drain hosta sa stateless replikom — surge pa scale-down
+#### 12a. Drain a host with a stateless replica — surge, then scale-down
 
 - `curl -XPOST localhost:7080/v1/hosts/<ue1-medium-1>/drain`
-- sledeći tick: `rollingRampUp → create` (jedna zamena; kanarinac ako na
-  draining hostu stoje **sve** replike grupe, inače ceo deficit odjednom)
-- zamena dobije open host, healthy → `rollingScaleDown → drain` stare
-- stara `draining` još služi `drain_seconds`, pa `reapDrained → destroy`
-- sweep ≤5s posle: `watchdog -> drain complete, host cordoned`; host ostaje
-  `healthy`, `drain_started_at` se briše
+- next tick: `rollingRampUp → create` (one replacement; a canary if **all**
+  replicas of the group sit on the draining host, otherwise the whole deficit at
+  once)
+- the replacement gets an open host, becomes healthy → `rollingScaleDown → drain`
+  the old one
+- the old one keeps serving for `drain_seconds` while `draining`, then
+  `reapDrained → destroy`
+- sweep ≤5s later: `watchdog -> drain complete, host cordoned`; the host stays
+  `healthy` and `drain_started_at` is cleared
 
-Izmereno (2026-09-18, reconcile 2s, drain_seconds 10): drain 10:15:08 →
-create +1s → zamena `active+healthy` +4s → stara `draining` +5s → `reaped`
-+15s → host `cordoned` +17s. Broj healthy web replika ceo period ≥ 3.
+Measured (2026-09-18, reconcile 2s, drain_seconds 10): drain 10:15:08 → create
++1s → replacement `active+healthy` +4s → old one `draining` +5s → `reaped` +15s
+→ host `cordoned` +17s. Healthy web replicas ≥ 3 the whole time.
 
-#### 12b. Drain + smrt hosta sa stateful i stateless replikama (reboot)
+#### 12b. Drain + host death with stateful and stateless replicas (reboot)
 
-Postavka dodatno: `add --database --engine postgres --name pg`, `volume add
---mount /var/lib/postgresql/data --size 2 -s pg`, `up -s pg -f pg-config.toml`
-(num_replicas=1, us-east-1). pg je sleteo na `ue1-small-1` uz 2 web replike.
+Extra setup: `add --database --engine postgres --name pg`,
+`volume add --mount /var/lib/postgresql/data --size 2 -s pg`,
+`up -s pg -f pg-config.toml` (num_replicas=1, us-east-1). pg landed on
+`ue1-small-1` next to 2 web replicas.
 
-- `drain <ue1-small-1>` i odmah chaos `host_kill <ue1-small-1>` (agent zaćuti):
-  `curl -XPOST localhost:7780/chaos -d '{"action":"host_kill","host":"<id>"}'`
-- web: 2 zamene odjednom (postoji healthy web na drugom hostu, kanarinac nije
-  potreban) → healthy → stare 2 `draining` → reap → **sweep cordonira host dok
-  je mrtav**: kraj draina se čita iz redova replika, ne iz heartbeat-a
-- pg ostaje vezan (stateful se ne seli); +30s host `unhealthy`; +2min
-  `MarkHostDown` oslobodi pg → `replacing`, hostless, pinovan na volume čiji
-  je host van ledgera → čeka (assign_host se odbacuje svaki tick)
-- `status` posle smrti ostaje `cordoned` (MarkHostDown dira samo `host_healthy`)
-- chaos `host_recover` → heartbeat vrati `healthy`, status i dalje `cordoned`;
-  pinovana grana placera ignoriše status → pg nazad na **isti** host, lease
-  ponovo uzet, active
+- `drain <ue1-small-1>` and immediately chaos `host_kill <ue1-small-1>` (the
+  agent goes silent)
+- web: 2 replacements at once (a healthy web exists on another host, no canary
+  needed) → healthy → the old 2 `draining` → reaped → **the sweep cordons the
+  host while it is dead**: the end of a drain is read from replica rows, not
+  from heartbeats
+- pg stays bound (stateful does not move); +30s host `unhealthy`; +2min
+  `MarkHostDown` releases pg → `replacing`, hostless, pinned to a volume whose
+  host is out of the ledger → waits (assign_host is rejected every tick)
+- `status` after death stays `cordoned` (MarkHostDown only touches `host_healthy`)
+- chaos `host_recover` → heartbeat restores `healthy`, status still `cordoned`;
+  the pinned placer branch ignores status → pg returns to the **same** host,
+  lease reacquired, active
 
-Izmereno (2026-09-18): drain+kill 10:17:22 → 2× create +1s → zamene active +6s
-→ stare draining +6s → reaped +15s → `cordoned` +18s → `unhealthy` +33s →
-MarkHostDown +2min03s (pg `replacing`, hostless) → recover 10:20:14 → healthy
-+1s → pg `health_check` na istom hostu +2s → `active` +3s. web ceo period 3
-healthy.
+Measured (2026-09-18): drain+kill 10:17:22 → 2× create +1s → replacements active
++6s → old ones draining +6s → reaped +15s → `cordoned` +18s → `unhealthy` +33s →
+MarkHostDown +2min03s (pg `replacing`, hostless) → recover 10:20:14 → healthy +1s
+→ pg `health_check` on the same host +2s → `active` +3s. web 3 healthy throughout.
 
-#### 12c. Drain hosta na kome je samo stateful
+#### 12c. Drain a host that holds only stateful
 
-- host sa samo pg (posle 12b): `uncordon` pa `drain`
-- nema šta da se seli → prvi sweep: `cordoned`, pg netaknut, `active`
+- host with only pg on it (after 12b): `uncordon`, then `drain`
+- nothing to move → first sweep: `cordoned`, pg untouched, `active`
 
-Izmereno: drain 10:20:32 → `cordoned` 10:20:36 (jedan sweep). Ovo je i
-signal operatoru: host je "prazan koliko može automatski", ostatak je ručno.
+Measured: drain 10:20:32 → `cordoned` 10:20:36 (one sweep). This is also the
+signal to the operator: the host is "as empty as automation can make it", the
+rest is manual.
 
-#### 12d. Otkazivanje draina / uncordon
+#### 12d. Cancelling a drain / uncordon
 
-- `POST /v1/hosts/{id}/uncordon` na `draining` ili `cordoned` → 200, `status=open`,
-  `drain_started_at=null`; host odmah ponovo prima placement
-- `cordon` na `draining` → 409 (ne brisati drain nehotice); `drain` na
-  `cordoned` → 200 (cordon se "pojačava" u evakuaciju)
+- `POST /v1/hosts/{id}/uncordon` on `draining` or `cordoned` → 200,
+  `status=open`, `drain_started_at=null`; the host accepts placement again
+  immediately
+- `cordon` on `draining` → 409 (don't erase a drain by accident); `drain` on
+  `cordoned` → 200 (a cordon is "upgraded" to an evacuation)
 
-Izmereno: uncordon 10:16:36 → `open`, `drain_started_at` null istog sekunda.
+Measured: uncordon 10:16:36 → `open`, `drain_started_at` null the same second.
 
-#### 12e. Zaglavljen drain — WARN, bez akcije
+#### 12e. Stalled drain — WARN, no action
 
-Kad zamena nema gde (region bez open hosta sa kapacitetom, ili zamena nikad
-ne postane healthy), drain stoji: stara replika služi, host `draining`.
+When the replacement has nowhere to go (no open host with capacity in the
+region, or it never becomes healthy), the drain sits: the old replica serves,
+the host stays `draining`.
 
-- `cordon` sve ostale hostove u regionu koji imaju mesta; `drain` host sa replikom
-- `rollingRampUp → create`, zamena `pending` hostless; `anyHostlessReplicas`
-  emituje `assign_host` svaki tick, placer ga odbacuje (nema open hosta)
-- posle `drainStalledAfter` (10min): `watchdog -> drain stalled, still holding
-  stateless replicas draining_for=…` WARN u svakom sweep-u; `GET /v1/hosts`
-  pokazuje `drain_started_at` star 10+ min i `replicas_on_host > 0`
-- ništa se ne dešava samo od sebe — čovek oslobodi kapacitet (`uncordon`,
-  novi host) i drain se sam nastavi
+- `cordon` every other host in the region that has room; `drain` the host with
+  the replica
+- `rollingRampUp → create`, replacement `pending` hostless; `anyHostlessReplicas`
+  emits `assign_host` every tick, the placer rejects it (no open host)
+- after `drainStalledAfter` (10min): `watchdog -> drain stalled, still holding
+  stateless replicas draining_for=…` WARN every sweep; `GET /v1/hosts` shows
+  `drain_started_at` 10+ min old and `replicas_on_host > 0`
+- nothing resolves by itself — a human frees capacity (`uncordon`, a new host)
+  and the drain continues on its own
 
-Izmereno (2026-09-18): cordon `ue1-medium-1` + drain `ue1-large-1` 10:21:10 →
-create +1s, zamena `pending` bez hosta → prvi WARN 10:31:15
-(`draining_for=10m5s`), pa svakih 5s → uncordon `ue1-medium-1` 10:31:29 →
-zamena `active` +3s → stara `draining` +4s → `reaped` +14s → `cordoned`
-+17s. Stara replika služila celih 10min čekanja; broj healthy web ≥ 3.
+Measured (2026-09-18): cordon `ue1-medium-1` + drain `ue1-large-1` 10:21:10 →
+create +1s, replacement `pending` with no host → first WARN 10:31:15
+(`draining_for=10m5s`), then every 5s → uncordon `ue1-medium-1` 10:31:29 →
+replacement `active` +3s → old one `draining` +4s → `reaped` +14s → `cordoned`
++17s. The old replica served through all 10min of waiting; healthy web ≥ 3.
 
-Napomena: dok zamena čeka host, `anyHostlessReplicas` loguje `assign_host`
-na INFO svaki tick (2s) — isto kao za pinovanu repliku na mrtvom hostu (12b);
-pre-postojeći šum, nije deo drain-a.
+Note: while the replacement waits for a host, `anyHostlessReplicas` logs
+`assign_host` at INFO every tick (2s) — same as for a pinned replica on a dead
+host (12b); pre-existing noise, not part of drain.
 
-### 13. Log stream — replay, resume, restart engine-a
+### 13. Log stream — replay, resume, engine restart
 
-Engine drži poslednjih 5000 linija u ring buffer-u (`internal/logbuf`) i servira
-ih preko SSE na `CONDUCTOR_LOGS_ADDR` (`:7090`); chaos-ui ih samo prosleđuje
-browseru na `/api/logs/stream`, pa engine ostaje privatan. Nema više deljenog
-log volume-a ni tail-ovanja fajla — svaka linija ima monotoni `id`, i to je ono
-čime se reconnect nastavlja.
+The engine keeps the last 5000 lines in a ring buffer (`internal/logbuf`) and
+serves them over SSE on `CONDUCTOR_LOGS_ADDR` (`:7090`); chaos-ui only relays
+them to the browser at `/api/logs/stream`, so the engine stays private. No
+shared log volume, no file tailing — every line has a monotonic `id`, and that
+is what a reconnect resumes from.
 
-Zahtev: novootvorena Logs strana mora da pokaže istoriju, prekinuta veza da se
-nastavi tamo gde je stala, a spor čitalac ne sme da uspori engine.
+Requirement: a freshly opened Logs page must show history, a broken connection
+must resume where it stopped, and a slow reader must not slow down the engine.
 
 ```bash
-curl -N 'http://localhost:7090/logs/stream?tail=3'                 # direktno sa engine-a
-curl -N 'http://localhost:3000/api/logs/stream?tail=2'             # kroz UI relay (ono što browser zove)
+curl -N 'http://localhost:7090/logs/stream?tail=3'                 # straight from the engine
+curl -N 'http://localhost:3000/api/logs/stream?tail=2'             # through the UI relay (what the browser calls)
 curl -N -H 'Last-Event-ID: 23' 'http://localhost:3000/api/logs/stream?tail=800'
-docker restart conductor-engine                                     # reconnect pod otvorenom stranom
+docker restart conductor-engine                                     # reconnect with the page open
 ```
 
-- `?tail=N` → N linija backlog-a pa live tail; `data:` je nepromenjena slog
-  TextHandler linija, pa `parseLine` u UI-ju radi isto što je radio nad fajlom
-- `?since=N` i `Last-Event-ID: N` → samo `id > N`; header pobeđuje query, jer
-  EventSource sam šalje header pri svom reconnect-u
-- `: heartbeat` na 20s prolazi kroz oba proxy hop-a (Railway edge + Next relay
-  ne smeju da ubiju idle konekciju)
-- spor čitalac se ne čeka: kad mu se bafer (256) napuni, kanal se zatvara i
-  klijent se vraća sa svojim poslednjim id-em — logger piše na tick petlji
-  engine-a, pa blokiranje nije opcija
-- restart engine-a resetuje id prostor; resume sa starim (većim) id-em bi inače
-  čekao da novi proces dobroji dotle → server tada servira fresh tail
+- `?tail=N` → N lines of backlog, then live tail; `data:` is the unchanged
+  TextHandler line, so `parseLine` in the UI does exactly what it did over the file
+- `?since=N` and `Last-Event-ID: N` → only `id > N`; the header wins over the
+  query, since EventSource sends the header itself on its own reconnect
+- `: heartbeat` every 20s passes through both proxy hops (Railway edge + Next
+  relay must not kill an idle connection)
+- a slow reader is not waited for: when its buffer (256) fills, the channel is
+  closed and the client comes back with its last id — the logger writes on the
+  engine's tick loop, so blocking is not an option
+- an engine restart resets the id space; a resume with an old (higher) id would
+  otherwise wait for the new process to count up to it → the server serves a
+  fresh tail instead
 
-Izmereno (2026-09-19):
+Measured (2026-09-19):
 
-- `?tail=3` → backlog id 13–15 odmah, pa live id 16, 17… na svakih 2s (snapshot
-  kadenca engine-a); `?since=15` → prva linija id 16; `Last-Event-ID: 23` uz
-  `?tail=800` → prva linija id 24 (header pobeđuje query)
-- operator akcija vidljiva u streamu kroz relay: `POST
-  /v1/replicas/<id>/restart` u 14:06:33 → `reconcile -> rule fired
+- `?tail=3` → backlog id 13–15 immediately, then live id 16, 17… every 2s
+  (engine snapshot cadence); `?since=15` → first line id 16; `Last-Event-ID: 23`
+  with `?tail=800` → first line id 24 (header wins)
+- operator action visible in the stream through the relay:
+  `POST /v1/replicas/<id>/restart` at 14:06:33 → `reconcile -> rule fired
   rule=anyHostlessReplicas intents=[assign_host]` 14:06:33.987 → `engine -> pass
   applied` 14:06:34.003
-- 30s capture: 16 linija (~32 lin/min na idle DEBUG-u) i tačno 1 heartbeat →
-  5000 linija ringa ≈ 2.5h idle istorije, ~600 KB
-- Logs strana (headless Chrome): na otvaranju 240 redova, najstariji
-  `storage: connected` od pre 8min (dakle replay, ne samo live), status
-  "streaming from the engine", +3 reda za 6s
-- `docker restart conductor-engine` u +6.4s → baner "stream down" u +7.9s →
-  "streaming from the engine" u +9.5s, sa fresh tail-om novog procesa (14 → 19
-  redova), bez reload-a strane
+- 30s capture: 16 lines (~32 lines/min at idle DEBUG) and exactly 1 heartbeat →
+  a 5000-line ring ≈ 2.5h of idle history, ~600 KB
+- Logs page (headless Chrome): 240 rows on open, oldest `storage: connected`
+  from 8min earlier (so replay, not just live), status "streaming from the
+  engine", +3 rows in 6s
+- `docker restart conductor-engine` at +6.4s → "stream down" banner at +7.9s →
+  "streaming from the engine" at +9.5s with a fresh tail from the new process
+  (14 → 19 rows), no page reload
 
-## Kroz chaos-ui (localhost:3000)
+## Through chaos-ui (localhost:3000)
 
-Chaos tab pokriva sve akcije, po targetu:
+The Chaos tab covers every action, by target:
 
-- **Replika**: Crash (terminal `failed`), Crash loop (restart_count raste dok
-  ne pukne budžet), Stall health checks (progress-deadline putanja), Heal
-  (skini chaos), Delete row (orphan simulacija — jedini direktan DB upis)
-- **Deployment**: Crash deployment / Stall rollout — fan-out iste agent-akcije
-  na sve žive replike deploymenta
-- **Host**: Kill host (agent zaćuti → `unhealthy` na ~30s → mrtav na 2min),
-  Recover (prvi heartbeat vraća `healthy`), Cordon i Drain (operator desired
-  state preko apiserver-a). Hosts panel nosi dva badge-a: health
-  (`healthy|unhealthy`) i status (`cordoned|draining`, `open` se ne prikazuje),
-  plus broj replika i "draining since …" dok drain traje
-- **Volume** (red ispod replika stateful servisa; MOUNT | HOST | SIZE | ON
-  DISK | STATUS): Grow… (inline GiB, control plane; hint "host short N GiB —
-  parked as resize_pending" kad nema mesta), Revert (samo `resize_pending`,
-  control plane), Stall resize / Heal (agentsim `volume_stall_resize` /
-  `volume_heal`). Koraci i merenja u §11 "Kroz chaos-ui".
+- **Replica**: Crash (terminal `failed`), Crash loop (restart_count grows until
+  the budget breaks), Stall health checks (progress-deadline path), Heal (clear
+  chaos), Delete row (orphan simulation — the only direct DB write)
+- **Deployment**: Crash deployment / Stall rollout — fan-out of the same agent
+  action to every live replica of the deployment
+- **Host**: Kill host (agent goes silent → `unhealthy` at ~30s → dead at 2min),
+  Recover (first heartbeat restores `healthy`), Cordon and Drain (operator
+  desired state through the apiserver). The Hosts panel carries two badges:
+  health (`healthy|unhealthy`) and status (`cordoned|draining`; `open` is not
+  shown), plus replica count and "draining since …" while a drain runs
+- **Volume** (row below the replicas of a stateful service; MOUNT | HOST | SIZE |
+  ON DISK | STATUS): Grow… (inline GiB, control plane; hint "host short N GiB —
+  parked as resize_pending" when there is no room), Revert (only
+  `resize_pending`, control plane), Stall resize / Heal (agentsim
+  `volume_stall_resize` / `volume_heal`). Steps and measurements in §11 "Through
+  chaos-ui".
 
-Sve agent-observable akcije UI prosleđuje agentsim control API-ju
-(`AGENTSIM_URL`, u stacku `http://agentsim:7780`) — chaos putuje pravim
-transportom (agent laže/ćuti preko gRPC-a), pa ga sledeći report ne može
-pregaziti. Curl ekvivalent: `POST :7780/chaos` sa istim `action` poljem. Tranzicije gledaj na Topology tabu i u Logs
+Every agent-observable action is forwarded by the UI to the agentsim control API
+(`AGENTSIM_URL`, `http://agentsim:7780` in the stack) — chaos travels over the
+real transport (the agent lies or goes silent over gRPC), so the next report
+cannot overwrite it. curl equivalent: `POST :7780/chaos` with the same `action`
+field. Watch transitions on the Topology tab and in Logs
 (`watchdog -> stale hosts out of scheduling`, `watchdog -> host down`,
 `reconcile -> rule fired`).

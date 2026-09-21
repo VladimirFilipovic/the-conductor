@@ -1,0 +1,97 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: conductor-postgres
+    environment:
+      POSTGRES_USER: conductor
+      POSTGRES_PASSWORD: conductor
+      POSTGRES_DB: conductor
+    ports:
+      - "5432:5432"
+    volumes:
+      - conductor-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U conductor -d conductor"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  engine:
+    # Profiled so the plain `docker compose up` (make db-up / migrate-fresh) still
+    # starts only Postgres; the full stack comes up via `make stack-up`.
+    profiles: ["stack"]
+    build:
+      context: .
+      dockerfile: Dockerfile.engine
+    container_name: conductor-engine
+    environment:
+      CONDUCTOR_DATABASE_URL: postgres://conductor:conductor@postgres:5432/conductor?sslmode=disable
+      CONDUCTOR_LOG_FILE: /var/log/conductor/engine.log
+      LOG_LEVEL: DEBUG
+      # Force a schema drop + rebuild on this start: CONDUCTOR_FRESH=1 make stack-up.
+      # Without it the entrypoint rebuilds only when db/migrations changed.
+      CONDUCTOR_FRESH: ${CONDUCTOR_FRESH:-0}
+    volumes:
+      - conductor-logs:/var/log/conductor
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  apiserver:
+    profiles: ["stack"]
+    build:
+      context: .
+      dockerfile: Dockerfile.engine
+    container_name: conductor-apiserver
+    # Same image as the engine; the entrypoint skips migrate/seed for any mode
+    # but engine and instead waits for the engine to have seeded the fleet.
+    command: ["apiserver"]
+    environment:
+      CONDUCTOR_DATABASE_URL: postgres://conductor:conductor@postgres:5432/conductor?sslmode=disable
+      LOG_LEVEL: DEBUG
+    ports:
+      # AgentAPI gRPC (agents dial in) and OperatorAPI HTTP.
+      - "7443:7443"
+      - "7080:7080"
+    depends_on:
+      - engine
+    restart: unless-stopped
+
+  agentsim:
+    profiles: ["stack"]
+    build:
+      context: .
+      dockerfile: Dockerfile.agentsim
+    container_name: conductor-agentsim
+    ports:
+      # Chaos control API — chaos-ui (and curl) hit it.
+      - "7780:7780"
+    depends_on:
+      - apiserver
+    restart: unless-stopped
+
+  chaos-ui:
+    profiles: ["stack"]
+    build:
+      context: ./chaos-ui
+      dockerfile: Dockerfile
+    container_name: conductor-chaos-ui
+    environment:
+      LOG_FILE: /var/log/conductor/engine.log
+      AGENTSIM_URL: http://agentsim:7780
+      CONTROL_PLANE_URL: http://apiserver:7080
+    ports:
+      # Override when 3000 is taken locally: CHAOS_UI_PORT=3001 make stack-up
+      - "${CHAOS_UI_PORT:-3000}:3000"
+    volumes:
+      # Read-only: the UI only tails the engine's log, never writes it.
+      - conductor-logs:/var/log/conductor:ro
+    # No database link: every read and write goes through the apiserver.
+    depends_on:
+      - apiserver
+    restart: unless-stopped
+
+volumes:
+  conductor-pgdata:
+  conductor-logs:
