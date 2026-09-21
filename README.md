@@ -1,63 +1,108 @@
 # Conductor
 
-A Railway-style deployment platform, built from scratch in Go — CLI, control plane, and a reconciliation engine that turns *"I want 5 replicas of this in us-east-1"* into reality, one tick at a time.
+A container orchestrator, written from scratch in Go. You declare what you want
+running — *5 replicas of this image in us-east-1, 500m CPU, healthcheck on
+`/health`* — and a closed control loop makes the fleet match, one tick at a
+time, and keeps it matching while hosts die underneath it.
 
 ## What it does
 
-You describe a service (image or repo, replicas, resources, health checks) and `conductor up` commits that as desired state in Postgres. The engine's closed loop does the rest:
+The whole system is one idea: **desired state** and **observed state** are
+separate, and a loop closes the gap between them.
 
-- **Watchdog** — sweeps host heartbeats (ingested by the apiserver's AgentAPI); marks dead hosts down and frees their replicas for re-placement
-- **Reconciler** — diffs desired vs observed state, plans intents (create, drain, destroy), and bin-packs replicas onto hosts (best-fit decreasing, capacity ledger, anti-affinity)
-- **Actuator** — applies each intent in its own transaction; conflicts are dropped and self-heal next tick
+- **Desired state** is what you asked for. `conductor up` (or the UI) commits it
+  to Postgres. Nothing else writes it.
+- **Observed state** is what the fleet reports. Host agents heartbeat their
+  replicas in over gRPC. Nothing else writes it.
+- **The engine** reads both and makes reality move.
 
-On top of that loop: blue/green rollouts with atomic traffic switch, stateful services with single-writer volume leases, restart budgets, and a chaos UI for watching it all break and recover.
+Each tick, in order:
 
-This is a learning project — the interesting part is the engine, not production readiness.
+1. **Watchdog** — sweeps heartbeats. A host silent past the threshold is marked
+   down, and its replicas are freed for re-placement.
+2. **Reconciler** — diffs desired against observed and emits *intents* (create,
+   drain, destroy), placing new replicas with best-fit-decreasing bin-packing
+   against a capacity ledger, honouring anti-affinity and volume pinning.
+3. **Actuator** — applies each intent in its own transaction. Conflicts are
+   dropped, not retried; the next tick re-derives them from fresh state.
 
-## Layout
+The loop is **level-triggered**: a pass runs to completion, then waits. A slow,
+failed, or skipped pass isn't an outage — the next pass sees the same gap and
+closes it. That property is what the rest is built on: blue/green rollouts with
+an atomic traffic switch, stateful services held to a single writer by volume
+leases, restart budgets that fail a bad deploy instead of crash-looping forever,
+and progress deadlines for rollouts that never go healthy.
 
-| Path | What |
-|---|---|
-| `cmd/` | `conductor` CLI (init, add, up, scale, status…) — see `cmd/README.md` |
-| `internal/engine/` | watchdog sweep → reconciler → actuator loop, placement, supervisor |
-| `internal/api/` | apiserver: `AgentAPI` (agent gRPC, uplink into `ObservedState`), `OperatorAPI` (operator HTTP `/v1/...`, writes via `DesiredState`) |
-| `internal/storage/` | Postgres control plane (sqlc, goose migrations in `db/`) |
-| `agentsim/` | simulated host agents — the deliberate chaos injection point |
-| `chaos-ui/` | Next.js dashboard — a pure HTTP client of the apiserver + the engine log |
+`agentsim` exists to break all of it on purpose, and `chaos-ui` to watch it
+recover.
+
+This is a learning project. The interesting part is the engine, not production
+readiness.
 
 ## Quick start
 
-Requires Go, Docker, and [goose](https://github.com/pressly/goose).
+Needs Go, Docker, and [goose](https://github.com/pressly/goose).
 
 ```bash
-make db-up migrate seed        # Postgres + schema + a seeded host fleet
-make build                     # → ./build/conductor
+make db-up migrate seed         # Postgres + schema + a seeded host fleet
+make build                      # → ./build/conductor
 
-./build/conductor init -n demo # create project, link this dir
+./build/conductor init -n demo  # create project, link this directory
 ./build/conductor add --service --name web --image nginx:alpine
-./build/conductor up -s web    # commit desired state
-./build/conductor status       # watch the loop converge
+./build/conductor up -s web     # commit desired state
+./build/conductor status        # watch the loop converge
 ```
 
-Or run the whole thing — engine, apiserver, agent fleet, chaos UI — in containers:
+Identity (project / environment / service) comes from the folder link written by
+`init`, or from `-p/-e/-s`, or from `CONDUCTOR_*` env vars — in that order of
+precedence. Build and deploy settings come from a `config.toml` next to your
+service; see `example/config.toml`.
+
+Or run everything — engine, apiserver, simulated agent fleet, UI — in containers:
 
 ```bash
-make stack-up                  # http://localhost:3000
+make stack-up                   # UI on http://localhost:3000
 ```
 
-The UI never touches Postgres: it reads topology and writes desired state over
-the apiserver's HTTP control plane (`CONTROL_PLANE_URL`, default `:7080`), so
-UI and CLI commit through the same project layer and the same rules. Chaos is
-the exception — agent-observable failures go to agentsim (`AGENTSIM_URL`) so
-they travel the real gRPC transport.
+| Port | What |
+|---|---|
+| `3000` | chaos UI (`CHAOS_UI_PORT` to move it) |
+| `7080` | OperatorAPI — HTTP control plane |
+| `7443` | AgentAPI — gRPC, agents dial in |
+| `7090` | engine log stream (SSE): `curl -N localhost:7090/logs/stream` |
+| `7780` | agentsim chaos control API |
+| `5432` | Postgres |
 
-Deploy settings live in a `config.toml` next to your service (see `example/config.toml`); identity (project/env/service) comes from the folder link or `-p/-e/-s` flags.
+## Components
+
+| Path | What |
+|---|---|
+| `cmd/` | `conductor` CLI — init, add, up, scale, down, volume, status… (`cmd/README.md`) |
+| `internal/engine/` | the loop: watchdog → reconciler → actuator, plus placement, volume leases, supervisor |
+| `internal/api/` | apiserver. `AgentAPI` (gRPC) writes `ObservedState`; `OperatorAPI` (HTTP `/v1/…`) writes `DesiredState` |
+| `internal/project/` | the rules — every desired-state write, from CLI or UI, goes through here |
+| `internal/storage/` | Postgres control plane; sqlc-generated queries, goose migrations in `db/` |
+| `internal/deployspec/` | `config.toml` parsing, with `[environments.NAME.*]` overrides |
+| `builder/` | source-to-image extension point; the default no-op synthesizes a ref so the control plane works with no build pipeline |
+| `agentsim/` | simulated host agents — the deliberate chaos injection point |
+| `chaos-ui/` | Next.js dashboard |
+| `proto/agentpb/` | the agent wire protocol |
+| `docs/scenarios.md` | failure scenarios as repeatable steps, with measured results |
+
+Chaos is routed on purpose. Agent-observable failure (a host going silent, an
+agent lying about a replica) goes to agentsim so it travels the real gRPC
+transport. Operator actions (cordon, drain, delete a replica) go to the control
+plane. The UI holds no database credentials at all — it reads topology and
+writes desired state over `CONTROL_PLANE_URL`, so UI and CLI commit through the
+same project layer and the same rules.
 
 ## Development
 
 ```bash
-make test          # unit + e2e (e2e drives real ticks against an in-memory store)
-make lint          # golangci-lint
-make sqlc          # regenerate queries after editing db/queries/
-make migrate-fresh # wipe + re-apply migrations (stack equivalent: make stack-fresh)
+make test           # unit + e2e (e2e drives real ticks against an in-memory store)
+make lint           # golangci-lint
+make sqlc           # regenerate queries after editing db/queries/
+make migrate-fresh  # wipe + re-apply migrations (stack equivalent: make stack-fresh)
+make ui-dev         # Next.js dev server against a running apiserver
+make stack-logs     # follow every stack service
 ```
