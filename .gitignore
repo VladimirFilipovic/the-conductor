@@ -38,3 +38,5 @@ Thumbs.db
 
 # Lavish artifacts
 .lavish/
+
+/node_modules/
