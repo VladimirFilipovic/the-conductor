@@ -677,6 +677,59 @@ Measured (2026-09-19):
   "streaming from the engine" at +9.5s with a fresh tail from the new process
   (14 → 19 rows), no page reload
 
+### 14. On Railway — same scenarios, real private network
+
+The stack from `.railway/railway.ts` (`railway config apply`): Postgres, engine,
+apiserver, agentsim, chaos-ui; only chaos-ui has a public domain. Every step
+below goes through that domain (`/api/desired`, `/api/chaos`, `/api/topology`,
+`/api/logs/stream`), so each call crosses the Railway edge, the Next relay and
+the private `*.railway.internal` network before it reaches a Go service.
+
+```bash
+U=https://chaos-ui-production.up.railway.app
+curl -XPOST $U/api/desired -d '{"action":"create_project","name":"chaos-demo","environment":"production"}'
+curl -XPOST $U/api/desired -d '{"action":"create_service","project":"chaos-demo","name":"web"}'
+curl -XPOST $U/api/desired -d '{"action":"bind_service","environmentId":"<env>","serviceId":"<svc>","image":"nginx:alpine"}'
+curl -XPOST $U/api/desired -d '{"action":"deploy","project":"chaos-demo","environment":"production","service":"web","imageRef":"nginx:alpine","replicas":{"us-east-1":2}}'
+curl -XPOST $U/api/chaos   -d '{"action":"host_kill","id":"<host>"}'
+railway redeploy --service engine -y
+```
+
+Requirement: the behaviour measured on the docker stack holds on Railway —
+private DNS, IPv6-only internal network, the edge in front of SSE, and
+Railway's own redeploy mechanics.
+
+Measured (2026-09-26):
+
+- boot, no depends_on: engine migrated (goose v7) and seeded 7 hosts, apiserver
+  left its wait loop, agentsim's 7 agents connected over gRPC to
+  `apiserver.railway.internal:7443`; all five SUCCESS ~2.5min after apply
+- deploy 2× us-east-1 at 08:46:59 → both `active` by 08:47:11, on two hosts
+- SSE through the edge: 99 lines of replay in the first second, then one line
+  every 2.02s (max gap 2.12s), `: heartbeat` at 20.4s — no buffering;
+  `Last-Event-ID: 112` → first line id 113
+- §1 blip: kill 08:49:28 → unhealthy 08:50:01 (33s) → recover 08:50:11 →
+  healthy 08:50:13; replicas never moved
+- §2 death: kill 08:50:20 → unhealthy 08:50:57 → replica on `ue1-large-1` and
+  `active` 08:52:27 (2min07s); the recovered host rejoined empty
+- §3 `railway redeploy --service engine`: new container up 08:53:04.9
+  (`goose: no migrations to run`, seed kept `ew1-medium-1` cordoned), 0
+  unhealthy hosts, no replica restarted — **but the old engine ticked until
+  08:53:08.1 and stopped at 08:53:09.5: two reconcile loops for ~4.6s.**
+  `replicas: 1` does not cover Railway's overlap on redeploy; there is no
+  leader lock
+- §7 scale to 3× us-east-1 + 1× eu-west-1 at 08:54:49 → all 4 `active` by
+  08:54:57; the eu replica skipped the cordoned `ew1-medium-1`
+- crash 08:55:05 → `failed` 08:55:08 (terminal, as designed); operator restart
+  08:56:00 → `scheduling` → `active` 08:56:03
+- `railway redeploy --service apiserver` 08:56:13: the UI answered 200
+  throughout, new listeners 08:56:25.8, all 7 agents reconnected 08:56:31.7,
+  0 unhealthy hosts
+
+Note: `railway config plan` keeps reporting `deploy.restartPolicy* (null →
+ON_FAILURE/10)` on all four services after a successful apply, while the API
+returns `ON_FAILURE`/10 for them — a CLI 5.57.12 read-back diff, not drift.
+
 ## Through chaos-ui (localhost:3000)
 
 The Chaos tab covers every action, by target:
