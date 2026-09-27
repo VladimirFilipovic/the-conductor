@@ -179,6 +179,68 @@ func (q *Queries) ListHostReplicaCounts(ctx context.Context) ([]ListHostReplicaC
 	return items, nil
 }
 
+const listHostUsage = `-- name: ListHostUsage :many
+SELECT h.id AS host_id,
+       coalesce(r.cpu, 0)::bigint AS cpu_millicores,
+       coalesce(r.mem, 0)::bigint AS mem_bytes,
+       coalesce(v.disk, 0)::bigint AS disk_bytes
+FROM hosts h
+LEFT JOIN (
+    SELECT host_id, sum(cpu_millicores) AS cpu, sum(mem_bytes) AS mem
+    FROM replicas
+    WHERE host_id IS NOT NULL AND phase <> 'reaped'
+    GROUP BY host_id
+) r ON r.host_id = h.id
+LEFT JOIN (
+    SELECT host_id,
+           sum(CASE WHEN status = 'resizing' OR coalesce(observed_size_bytes, 0) <= 0
+                    THEN desired_size_bytes ELSE observed_size_bytes END) AS disk
+    FROM volumes
+    WHERE host_id IS NOT NULL
+    GROUP BY host_id
+) v ON v.host_id = h.id
+`
+
+type ListHostUsageRow struct {
+	HostID        uuid.UUID `json:"host_id"`
+	CpuMillicores int64     `json:"cpu_millicores"`
+	MemBytes      int64     `json:"mem_bytes"`
+	DiskBytes     int64     `json:"disk_bytes"`
+}
+
+// Allocated capacity per host, charged the way the placer's ledger charges it
+// (internal/engine/placer.go newLedger) so the UI's fill bars predict where
+// the next replica can land: every non-reaped replica holds its cpu/mem
+// (failed ones keep their reservation until reaped), and a volume holds its
+// committed size — desired while resizing or never reported, else observed.
+func (q *Queries) ListHostUsage(ctx context.Context) ([]ListHostUsageRow, error) {
+	rows, err := q.db.QueryContext(ctx, listHostUsage)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListHostUsageRow
+	for rows.Next() {
+		var i ListHostUsageRow
+		if err := rows.Scan(
+			&i.HostID,
+			&i.CpuMillicores,
+			&i.MemBytes,
+			&i.DiskBytes,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listProjectNames = `-- name: ListProjectNames :many
 
 SELECT name FROM projects

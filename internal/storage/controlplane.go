@@ -24,6 +24,7 @@ type controlPlaneQuerier interface {
 	// ErrNotFound when no such row, ErrConflict when it exists but is not failed.
 	RestartReplica(ctx context.Context, replicaID uuid.UUID) error
 	ListHostReplicaCounts(ctx context.Context) (map[uuid.UUID]int64, error)
+	ListHostUsage(ctx context.Context) (map[uuid.UUID]HostUsage, error)
 
 	UpsertApiserverInstance(ctx context.Context, id uuid.UUID, startedAt, now time.Time) error
 	DeregisterApiserverInstance(ctx context.Context, id uuid.UUID) error
@@ -82,6 +83,27 @@ func (q querier) RestartReplica(ctx context.Context, replicaID uuid.UUID) error 
 	default:
 		return ErrConflict
 	}
+}
+
+// HostUsage is what a host has allocated, in the units hosts.* capacity uses.
+type HostUsage struct {
+	CPUMillicores int64
+	MemBytes      int64
+	DiskBytes     int64
+}
+
+// ListHostUsage is allocated cpu/mem/disk per host, charged as the placer's
+// ledger charges it; every host is present, idle ones at zero.
+func (q querier) ListHostUsage(ctx context.Context) (map[uuid.UUID]HostUsage, error) {
+	rows, err := q.queries.ListHostUsage(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[uuid.UUID]HostUsage, len(rows))
+	for _, r := range rows {
+		out[r.HostID] = HostUsage{CPUMillicores: r.CpuMillicores, MemBytes: r.MemBytes, DiskBytes: r.DiskBytes}
+	}
+	return out, nil
 }
 
 // ListHostReplicaCounts is live (non-terminal) replicas per host; hosts with

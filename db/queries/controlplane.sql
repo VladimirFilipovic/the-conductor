@@ -37,6 +37,32 @@ FROM replicas
 WHERE host_id IS NOT NULL AND phase NOT IN ('reaped', 'failed')
 GROUP BY host_id;
 
+-- Allocated capacity per host, charged the way the placer's ledger charges it
+-- (internal/engine/placer.go newLedger) so the UI's fill bars predict where
+-- the next replica can land: every non-reaped replica holds its cpu/mem
+-- (failed ones keep their reservation until reaped), and a volume holds its
+-- committed size — desired while resizing or never reported, else observed.
+-- name: ListHostUsage :many
+SELECT h.id AS host_id,
+       coalesce(r.cpu, 0)::bigint AS cpu_millicores,
+       coalesce(r.mem, 0)::bigint AS mem_bytes,
+       coalesce(v.disk, 0)::bigint AS disk_bytes
+FROM hosts h
+LEFT JOIN (
+    SELECT host_id, sum(cpu_millicores) AS cpu, sum(mem_bytes) AS mem
+    FROM replicas
+    WHERE host_id IS NOT NULL AND phase <> 'reaped'
+    GROUP BY host_id
+) r ON r.host_id = h.id
+LEFT JOIN (
+    SELECT host_id,
+           sum(CASE WHEN status = 'resizing' OR coalesce(observed_size_bytes, 0) <= 0
+                    THEN desired_size_bytes ELSE observed_size_bytes END) AS disk
+    FROM volumes
+    WHERE host_id IS NOT NULL
+    GROUP BY host_id
+) v ON v.host_id = h.id;
+
 -- Register-or-refresh in one statement: the heartbeat re-creates the row if
 -- it vanished (a dev schema rebuild while the apiserver kept running), so an
 -- instance can't silently drop out of the watchdog's grace computation.

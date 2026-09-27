@@ -284,3 +284,46 @@ func TestHostTransitionsAndReservationBelt(t *testing.T) {
 		t.Fatalf("stateless reservation onto reopened host = %v, want ok", err)
 	}
 }
+
+// Usage is charged the way the placer's ledger charges it, so the UI's fill
+// bars agree with placement: a failed replica keeps its reservation until
+// reaped, and a volume holds its committed size — observed once reported,
+// desired while a grow is in flight.
+func TestListHostUsageChargesLikeTheLedger(t *testing.T) {
+	ctx := context.Background()
+	c := newTestClient(t)
+	f := newHostFixture(t, c, "open", time.Now())
+
+	f.replica(t, "active", uuid.Nil)
+	f.replica(t, "failed", uuid.Nil)
+	f.replica(t, "reaped", uuid.Nil)
+
+	attached, err := c.CreateVolume(ctx, f.es.ID, "data", "us-east-1", "/data", 4<<30)
+	if err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	growing, err := c.CreateVolume(ctx, f.es.ID, "logs", "us-east-1", "/logs", 3<<30)
+	if err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	place := func(id uuid.UUID, status string, observed int64) {
+		t.Helper()
+		_, err := c.pool.ExecContext(ctx,
+			"UPDATE volumes SET host_id = $2, status = $3, observed_size_bytes = $4 WHERE id = $1",
+			id, f.hostID, status, observed)
+		if err != nil {
+			t.Fatalf("place volume: %v", err)
+		}
+	}
+	place(attached.ID, "attached", 2<<30)
+	place(growing.ID, "resizing", 1<<30)
+
+	usage, err := c.ListHostUsage(ctx)
+	if err != nil {
+		t.Fatalf("ListHostUsage: %v", err)
+	}
+	want := HostUsage{CPUMillicores: 200, MemBytes: 2 << 20, DiskBytes: 2<<30 + 3<<30}
+	if got := usage[f.hostID]; got != want {
+		t.Fatalf("usage = %+v, want %+v (active+failed replicas, attached observed + resizing desired)", got, want)
+	}
+}

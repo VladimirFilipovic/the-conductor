@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"time"
 
+	"conductor/internal/config"
+	"conductor/internal/storage"
 	"conductor/internal/storage/db"
 
 	"github.com/google/uuid"
@@ -28,9 +30,21 @@ type hostJSON struct {
 	CPUMillicores  int32      `json:"cpu_millicores"`
 	MemBytes       int64      `json:"mem_bytes"`
 	DiskBytes      int64      `json:"disk_bytes"`
+	// Volumes pack against the budget, not raw disk; the rest is ephemeral
+	// space the placer never hands out, so a fill bar over disk_bytes would
+	// read as room that doesn't exist.
+	DiskBudgetBytes int64         `json:"disk_budget_bytes"`
+	Used            hostUsageJSON `json:"used"`
 }
 
-func hostsJSON(hosts []db.Host, replicas map[uuid.UUID]int64) []hostJSON {
+type hostUsageJSON struct {
+	CPUMillicores int64 `json:"cpu_millicores"`
+	MemBytes      int64 `json:"mem_bytes"`
+	DiskBytes     int64 `json:"disk_bytes"`
+}
+
+func hostsJSON(hosts []db.Host, replicas map[uuid.UUID]int64, usage map[uuid.UUID]storage.HostUsage) []hostJSON {
+	placement := config.DefaultPlacement()
 	out := make([]hostJSON, len(hosts))
 	for i, h := range hosts {
 		out[i] = hostJSON{
@@ -40,6 +54,12 @@ func hostsJSON(hosts []db.Host, replicas map[uuid.UUID]int64) []hostJSON {
 			ReplicasOnHost: replicas[h.ID],
 			LastHeartbeat:  nullTime(h.LastHeartbeat),
 			CPUMillicores:  h.CpuMillicores, MemBytes: h.MemBytes, DiskBytes: h.DiskBytes,
+			DiskBudgetBytes: placement.DiskBudget(h.DiskBytes),
+			Used: hostUsageJSON{
+				CPUMillicores: usage[h.ID].CPUMillicores,
+				MemBytes:      usage[h.ID].MemBytes,
+				DiskBytes:     usage[h.ID].DiskBytes,
+			},
 		}
 	}
 	return out
@@ -56,7 +76,12 @@ func (o *OperatorAPI) listHosts(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, hostsJSON(hosts, counts))
+	usage, err := o.store.ListHostUsage(r.Context())
+	if err != nil {
+		writeInternalError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, hostsJSON(hosts, counts, usage))
 }
 
 // hostTransition adapts one operator write: 400 for a bad id, 409 when the

@@ -24,6 +24,7 @@ const maxRequestBytes = 1 << 20
 type FleetReader interface {
 	ListAgentHosts(ctx context.Context) ([]db.Host, error)
 	ListHostReplicaCounts(ctx context.Context) (map[uuid.UUID]int64, error)
+	ListHostUsage(ctx context.Context) (map[uuid.UUID]storage.HostUsage, error)
 	ListReplicas(ctx context.Context) ([]db.Replica, error)
 	ListDeploymentReplicaIDs(ctx context.Context, deploymentID uuid.UUID) ([]uuid.UUID, error)
 
