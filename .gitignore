@@ -40,3 +40,6 @@ Thumbs.db
 .lavish/
 
 /node_modules/
+
+# Per-developer folder link (conductor link)
+.conductor/
