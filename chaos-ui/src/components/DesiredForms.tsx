@@ -193,6 +193,12 @@ function ServiceForm({ onDone }: { onDone: () => void }) {
   useEffect(() => {
     if (s.project !== "all") setProject(s.project);
   }, [s.project]);
+  // Regions arrive with meta after mount; seed one replica so the common case
+  // is a single click instead of a disabled button.
+  const firstRegion = s.meta.regions[0];
+  useEffect(() => {
+    if (firstRegion) setCounts((c) => (Object.keys(c).length ? c : { [firstRegion]: 1 }));
+  }, [firstRegion]);
 
   const envs = s.meta.environments.filter((e) => e.project_name === project);
   const deploying = environment !== "";
