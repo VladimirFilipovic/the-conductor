@@ -546,7 +546,7 @@ const topologyReplicas = `-- name: TopologyReplicas :many
 SELECT r.id, r.region, h.hostname, r.host_id, r.phase, r.healthy,
        r.desired_status, r.restart_count, r.last_exit_reason, r.updated_at,
        d.version AS dep_version, d.is_current, d.id AS deployment_id,
-       es.id AS es_id
+       es.id AS es_id, r.cpu_millicores, r.mem_bytes, r.volume_id
 FROM replicas r
 JOIN deployments          d  ON d.id = r.deployment_id
 JOIN environment_services es ON es.id = d.environment_service_id
@@ -579,6 +579,9 @@ type TopologyReplicasRow struct {
 	IsCurrent      bool           `json:"is_current"`
 	DeploymentID   uuid.UUID      `json:"deployment_id"`
 	EsID           uuid.UUID      `json:"es_id"`
+	CpuMillicores  int32          `json:"cpu_millicores"`
+	MemBytes       int64          `json:"mem_bytes"`
+	VolumeID       uuid.NullUUID  `json:"volume_id"`
 }
 
 // Every replica of every version (not just the current one): a superseded or
@@ -607,6 +610,9 @@ func (q *Queries) TopologyReplicas(ctx context.Context, arg TopologyReplicasPara
 			&i.IsCurrent,
 			&i.DeploymentID,
 			&i.EsID,
+			&i.CpuMillicores,
+			&i.MemBytes,
+			&i.VolumeID,
 		); err != nil {
 			return nil, err
 		}

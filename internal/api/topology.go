@@ -101,6 +101,9 @@ type topologyReplicaJSON struct {
 	IsCurrent            bool       `json:"is_current"`
 	EnvironmentServiceID uuid.UUID  `json:"environment_service_id"`
 	DeploymentID         uuid.UUID  `json:"deployment_id"`
+	// PlacementBlocker says why an unplaced replica is stuck (no host has
+	// room, none open); null when it is placed or a host fits.
+	PlacementBlocker *string `json:"placement_blocker"`
 }
 
 // topologyVolumeJSON is a volume as the tree shows it. Sizes are bytes on the
@@ -220,7 +223,8 @@ func (o *OperatorAPI) readTopology(ctx context.Context, filter storage.TopologyF
 	}
 
 	return topologyJSON{
-		Tree:   buildTree(projects, environments, buildServiceNodes(services, desired, replicas, volumes)),
+		Tree: buildTree(projects, environments,
+			buildServiceNodes(services, desired, replicas, volumes, placementBlockers(replicas, hosts, hostUsage))),
 		Hosts:  hostsJSON(hosts, hostReplicas, hostUsage),
 		Served: servedRowsJSON(served),
 	}, nil
@@ -231,6 +235,7 @@ func buildServiceNodes(
 	desired []db.TopologyDesiredRegionsRow,
 	replicas []db.TopologyReplicasRow,
 	volumes []db.TopologyVolumesRow,
+	blockers map[uuid.UUID]string,
 ) []serviceNode {
 	replicasByService := make(map[uuid.UUID][]topologyReplicaJSON, len(services))
 	for _, rep := range replicas {
@@ -241,6 +246,7 @@ func buildServiceNodes(
 			LastExitReason: nullStr(rep.LastExitReason), UpdatedAt: rep.UpdatedAt,
 			DeploymentVersion: rep.DepVersion, IsCurrent: rep.IsCurrent,
 			EnvironmentServiceID: rep.EsID, DeploymentID: rep.DeploymentID,
+			PlacementBlocker: optionalStr(blockers[rep.ID]),
 		})
 	}
 

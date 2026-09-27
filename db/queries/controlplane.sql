@@ -138,7 +138,7 @@ WHERE (@project::text = '' OR e.project_name = @project)
 SELECT r.id, r.region, h.hostname, r.host_id, r.phase, r.healthy,
        r.desired_status, r.restart_count, r.last_exit_reason, r.updated_at,
        d.version AS dep_version, d.is_current, d.id AS deployment_id,
-       es.id AS es_id
+       es.id AS es_id, r.cpu_millicores, r.mem_bytes, r.volume_id
 FROM replicas r
 JOIN deployments          d  ON d.id = r.deployment_id
 JOIN environment_services es ON es.id = d.environment_service_id
