@@ -29,6 +29,9 @@ export interface ReplicaRow {
   is_current: boolean;
   environment_service_id: string;
   deployment_id: string;
+  // Why an unplaced replica is stuck (no host has room, none open); null once
+  // placed or when a host fits and the next tick should place it.
+  placement_blocker: string | null;
 }
 
 // A volume as the topology carries it. Sizes are bytes on the wire (the UI

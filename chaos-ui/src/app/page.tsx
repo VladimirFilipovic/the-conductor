@@ -30,6 +30,7 @@ import type {
   Topology,
   ServiceNode,
   HostRow,
+  ReplicaRow,
   ServedRow,
   ServiceTarget,
 } from "@/lib/api";
@@ -259,6 +260,24 @@ function ServiceRow({
   const trafficLagging =
     d && servedVersions.some((v) => v != null && v !== d.version);
 
+  // "6/8 healthy" alone hides WHERE the gap is and why: name each short region,
+  // the placement blocker holding it (if any), and who serves it meanwhile.
+  const lagging: LaggingRegion[] = d
+    ? svc.regions
+        .filter((r) => r.healthy < r.desired)
+        .map((r) => {
+          const servedBy = served.find((sr) => sr.region === r.region)?.deployment_version;
+          return {
+            ...r,
+            blocker:
+              svc.replicas.find(
+                (rep) => rep.region === r.region && rep.is_current && rep.placement_blocker,
+              )?.placement_blocker ?? null,
+            servedBy: servedBy != null && servedBy !== d.version ? servedBy : null,
+          };
+        })
+    : [];
+
   const menu: MenuItem[] = [
     {
       key: "deploy",
@@ -361,6 +380,8 @@ function ServiceRow({
         </span>
       </div>
 
+      {d && lagging.length > 0 && <RegionNotes regions={lagging} version={d.version} />}
+
       {form === "deploy" && (
         <DeployForm
           target={target}
@@ -398,7 +419,9 @@ function ServiceRow({
         />
       )}
 
-      {svc.replicas.length > 0 && <ReplicaTable svc={svc} chaos={chaos} />}
+      {svc.replicas.length > 0 && (
+        <ReplicaTable svc={svc} served={served} version={d?.version} chaos={chaos} />
+      )}
       {svc.stateful && svc.volumes.length > 0 && (
         <VolumeTable svc={svc} target={target} />
       )}
@@ -406,25 +429,91 @@ function ServiceRow({
   );
 }
 
-function ReplicaTable({ svc, chaos }: { svc: ServiceNode; chaos: ChaosFn }) {
+type LaggingRegion = ServiceNode["regions"][number] & {
+  blocker: string | null;
+  servedBy: number | null;
+};
+
+// One line per region below desired: the count, the reason it can't progress
+// (when the API knows one), and the older version still carrying its traffic.
+function RegionNotes({ regions, version }: { regions: LaggingRegion[]; version: number }) {
+  return (
+    <ul className="mt-2 space-y-1 rounded-md border border-amber-400/40 bg-amber-500/5 px-3 py-2 text-xs">
+      {regions.map((r) => (
+        <li key={r.region} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+          <span className="mono font-medium text-[var(--color-fg)]">{r.region}</span>
+          <span className="text-amber-700">
+            {r.healthy}/{r.desired} v{version} healthy
+          </span>
+          {r.blocker ? (
+            <span className="text-red-700">· stuck: {r.blocker}</span>
+          ) : (
+            <span className="text-[var(--color-faint)]">· rolling out</span>
+          )}
+          {r.servedBy != null && (
+            <span className="text-[var(--color-muted)]">
+              · v{r.servedBy} keeps serving until v{version} is healthy here
+            </span>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+// A replica of an older version is still around only because a rollout (or
+// rollback) hasn't retired it yet; say which of the three states it is in.
+function previousRole(r: ReplicaRow, served: ServedRow[]): string {
+  if (r.phase === "draining") return "draining";
+  const serving = served.some(
+    (sr) => sr.region === r.region && sr.deployment_id === r.deployment_id,
+  );
+  return serving && r.healthy ? "still serving traffic" : "waiting to retire";
+}
+
+function ReplicaTable({
+  svc,
+  served,
+  version,
+  chaos,
+}: {
+  svc: ServiceNode;
+  served: ServedRow[];
+  version: number | undefined;
+  chaos: ChaosFn;
+}) {
   const multiRegion = svc.regions.length > 1;
   return (
     <div className="mt-2.5 overflow-x-auto">
       <table className="w-full border-collapse text-left text-xs">
         <tbody className="text-[var(--color-muted)]">
           {svc.replicas.map((r) => (
-            <tr key={r.id} className="border-t border-[var(--color-border-soft)]">
+            <tr
+              key={r.id}
+              className={`border-t border-[var(--color-border-soft)] ${
+                r.is_current ? "" : "bg-[var(--color-panel-2)] opacity-75"
+              }`}
+              title={
+                r.is_current
+                  ? undefined
+                  : `Left over from v${r.deployment_version}; the engine retires it once v${version ?? "?"} is healthy in ${r.region}.`
+              }
+            >
               <td className="mono w-24 py-1.5 pr-3 text-[var(--color-fg)]">
                 {shortId(r.id)}
               </td>
               <td className="mono py-1.5 pr-3">
-                {r.hostname ?? "unplaced"}
+                {r.hostname ?? (
+                  <span className={r.placement_blocker ? "text-red-700" : undefined}>
+                    unplaced
+                  </span>
+                )}
                 {multiRegion && (
                   <span className="text-[var(--color-faint)]"> · {r.region}</span>
                 )}
               </td>
               <td className="py-1.5 pr-3">
-                <span className="flex items-center gap-1.5">
+                <span className="flex flex-wrap items-center gap-1.5">
                   <Badge
                     className={phaseClass(r.phase)}
                     title={r.last_exit_reason ?? undefined}
@@ -432,8 +521,18 @@ function ReplicaTable({ svc, chaos }: { svc: ServiceNode; chaos: ChaosFn }) {
                     {r.phase}
                   </Badge>
                   {!r.is_current && (
-                    <span className="text-[var(--color-faint)]">
-                      v{r.deployment_version}
+                    <>
+                      <Badge className="border-slate-400/50 bg-slate-500/10 text-slate-600">
+                        previous v{r.deployment_version}
+                      </Badge>
+                      <span className="text-[var(--color-faint)]">
+                        {previousRole(r, served)}
+                      </span>
+                    </>
+                  )}
+                  {r.placement_blocker && (
+                    <span className="text-red-700" title={r.placement_blocker}>
+                      no host available: {r.placement_blocker}
                     </span>
                   )}
                   {r.restart_count > 0 && (
