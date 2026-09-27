@@ -251,3 +251,63 @@ func TestRevertVolumeStatusMapping(t *testing.T) {
 		})
 	}
 }
+
+// One POST /v1/services takes the service from nothing to a committed first
+// version: the handler hands create, bind and deploy to the project layer as a
+// single launch, with the deploy aimed at the service it just named.
+func TestCreateServiceLaunchesIntoEnvironment(t *testing.T) {
+	desired := &fakeDesired{}
+	body := `{"project":"acme","name":"api","environment":"production",
+	          "source":{"image":"nginx:1.27"},
+	          "deploy":{"cpu_millicores":250,"mem_bytes":268435456,"replicas":{"us-west-2":1}}}`
+	rec := do(t, NewOperatorAPI(&fakeOperatorStore{}, desired), http.MethodPost, "/v1/services", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body)
+	}
+	if desired.launch.Environment != "production" || desired.launch.Source.Image != "nginx:1.27" {
+		t.Errorf("launch = %+v", desired.launch)
+	}
+	dep := desired.launchDeploy
+	if dep == nil || dep.Service != "api" || dep.ImageRef != "nginx:1.27" || dep.CPUMillicores != 250 {
+		t.Fatalf("deploy = %+v, want the new service deployed from its bound image", dep)
+	}
+	if v := decodeBody[launchedJSON](t, rec).Version; v != 1 {
+		t.Errorf("version = %d, want 1", v)
+	}
+}
+
+func TestCreateServiceWithoutEnvironmentStaysBare(t *testing.T) {
+	desired := &fakeDesired{}
+	rec := do(t, NewOperatorAPI(&fakeOperatorStore{}, desired), http.MethodPost, "/v1/services",
+		`{"project":"acme","name":"api"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body)
+	}
+	if desired.launch.Service != "" {
+		t.Error("a bare create went through the launch path")
+	}
+}
+
+func TestCreateServiceRejectsIncompleteLaunch(t *testing.T) {
+	spec := `"deploy":{"cpu_millicores":250,"mem_bytes":1,"replicas":{"r":1}}`
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"deploy without environment", `{"project":"a","name":"s","source":{"image":"i"},` + spec + `}`},
+		{"deploy without image", `{"project":"a","name":"s","environment":"e","source":{"repo":"o/r"},` + spec + `}`},
+		{"deploy without replicas", `{"project":"a","name":"s","environment":"e","source":{"image":"i"},"deploy":{"cpu_millicores":1,"mem_bytes":1}}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			desired := &fakeDesired{}
+			rec := do(t, NewOperatorAPI(&fakeOperatorStore{}, desired), http.MethodPost, "/v1/services", tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body)
+			}
+			if desired.launch.Service != "" {
+				t.Error("a rejected launch still reached the project layer")
+			}
+		})
+	}
+}

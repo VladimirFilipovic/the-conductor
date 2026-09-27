@@ -27,8 +27,9 @@ type DesiredState interface {
 	CreateEnvironment(ctx context.Context, projectName, sourceEnv, name string) (project.CreateEnvironmentResult, error)
 	CreateService(ctx context.Context, projectName, name string, stateful bool) (db.Service, error)
 	BindService(ctx context.Context, in project.BindServiceInput) (db.EnvironmentService, error)
+	LaunchService(ctx context.Context, in project.AddServiceInput, dep *project.DeployInput) (db.Service, *project.DeployResult, error)
 	Deploy(ctx context.Context, in project.DeployInput) (project.DeployResult, error)
-	Scale(ctx context.Context, in project.ScaleInput) error
+	Scale(ctx context.Context, in project.ScaleInput) (project.ScaleResult, error)
 	// Volume grow and its one-shot take-back. Every guard — grow-only, one grow
 	// in flight, revert only from resize_pending — is the project layer's; the
 	// handlers translate JSON and map the sentinels.
@@ -55,6 +56,13 @@ type createServiceRequest struct {
 	Project  string `json:"project"`
 	Name     string `json:"name"`
 	Stateful bool   `json:"stateful"`
+	// Environment binds the new service there with Source in the same tx, and
+	// Deploy then commits its first version from Source.Image — the UI's "one
+	// form to a running service". All three empty is the bare project-level
+	// create, bound later per environment.
+	Environment string         `json:"environment"`
+	Source      project.Source `json:"source"`
+	Deploy      *deploySpec    `json:"deploy"`
 }
 
 type bindServiceRequest struct {
@@ -74,7 +82,13 @@ type serviceTarget struct {
 
 type deployRequest struct {
 	serviceTarget
-	ImageRef         string           `json:"image_ref"`
+	ImageRef string `json:"image_ref"`
+	deploySpec
+}
+
+// deploySpec is a deployment's sizing and rollout knobs, shared by an explicit
+// deploy and the first deploy a service launch carries.
+type deploySpec struct {
 	CPUMillicores    int32            `json:"cpu_millicores"`
 	MemBytes         int64            `json:"mem_bytes"`
 	DrainSeconds     int32            `json:"drain_seconds"`
@@ -88,6 +102,11 @@ type deployRequest struct {
 type scaleRequest struct {
 	serviceTarget
 	Replicas map[string]int32 `json:"replicas"`
+	// Optional new per-replica limits; a change commits a new version rather
+	// than patching counts in place (see project.ScaleInput).
+	CPUMillicores int32  `json:"cpu_millicores"`
+	MemBytes      int64  `json:"mem_bytes"`
+	CreatedBy     string `json:"created_by"`
 }
 
 // A volume is addressed the way the CLI addresses it: the service target plus
@@ -130,6 +149,19 @@ type servicesJSON struct {
 
 type environmentServiceJSON struct {
 	ID uuid.UUID `json:"id"`
+}
+
+// launchedJSON is the created service plus, when the launch carried a deploy,
+// the version it committed; 0 means created (and maybe bound), not deployed.
+type launchedJSON struct {
+	serviceJSON
+	Version int32 `json:"version,omitempty"`
+}
+
+// scaledJSON's Version is set only when new limits made the scale a resize.
+type scaledJSON struct {
+	OK      bool  `json:"ok"`
+	Version int32 `json:"version,omitempty"`
 }
 
 type deployedJSON struct {
@@ -222,17 +254,39 @@ func (o *OperatorAPI) createService(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.Project == "" || req.Name == "" {
-		writeError(w, http.StatusBadRequest, errors.New("project and name are required"))
+	if err := req.validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	svc, err := o.desired.CreateService(r.Context(), req.Project, req.Name, req.Stateful)
+	if req.Environment == "" {
+		svc, err := o.desired.CreateService(r.Context(), req.Project, req.Name, req.Stateful)
+		if err != nil {
+			writeDomainError(w, r, err)
+			return
+		}
+		slog.Info("operatorapi -> service created", "project", req.Project, "service", req.Name)
+		writeJSON(w, http.StatusCreated, launchedJSON{serviceJSON: serviceJSON{ID: svc.ID, Name: svc.Name, Stateful: svc.Stateful}})
+		return
+	}
+
+	t := target.Target{Project: req.Project, Environment: req.Environment, Service: req.Name}
+	var dep *project.DeployInput
+	if req.Deploy != nil {
+		in := req.Deploy.input(t, req.Source.Image)
+		dep = &in
+	}
+	svc, res, err := o.desired.LaunchService(r.Context(),
+		project.AddServiceInput{Target: t, Stateful: req.Stateful, Source: req.Source}, dep)
 	if err != nil {
 		writeDomainError(w, r, err)
 		return
 	}
-	slog.Info("operatorapi -> service created", "project", req.Project, "service", req.Name)
-	writeJSON(w, http.StatusCreated, serviceJSON{ID: svc.ID, Name: svc.Name, Stateful: svc.Stateful})
+	out := launchedJSON{serviceJSON: serviceJSON{ID: svc.ID, Name: svc.Name, Stateful: svc.Stateful}}
+	if res != nil {
+		out.Version = res.Version
+	}
+	slog.Info("operatorapi -> service launched", "target", t, "version", out.Version)
+	writeJSON(w, http.StatusCreated, out)
 }
 
 func (o *OperatorAPI) bindService(w http.ResponseWriter, r *http.Request) {
@@ -270,18 +324,7 @@ func (o *OperatorAPI) deploy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	res, err := o.desired.Deploy(r.Context(), project.DeployInput{
-		Target:           req.target(),
-		ImageRef:         req.ImageRef,
-		CPUMillicores:    req.CPUMillicores,
-		MemBytes:         req.MemBytes,
-		DrainSeconds:     req.DrainSeconds,
-		RestartMax:       req.RestartMax,
-		ProgressDeadline: req.ProgressDeadline,
-		Replicas:         req.Replicas,
-		CommitMessage:    req.CommitMessage,
-		CreatedBy:        req.CreatedBy,
-	})
+	res, err := o.desired.Deploy(r.Context(), req.input(req.target(), req.ImageRef))
 	if err != nil {
 		writeDomainError(w, r, err)
 		return
@@ -299,12 +342,16 @@ func (o *OperatorAPI) scale(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := o.desired.Scale(r.Context(), project.ScaleInput{Target: req.target(), Replicas: req.Replicas}); err != nil {
+	res, err := o.desired.Scale(r.Context(), project.ScaleInput{
+		Target: req.target(), Replicas: req.Replicas,
+		CPUMillicores: req.CPUMillicores, MemBytes: req.MemBytes, CreatedBy: req.CreatedBy,
+	})
+	if err != nil {
 		writeDomainError(w, r, err)
 		return
 	}
-	slog.Info("operatorapi -> scaled", "target", req.serviceTarget, "replicas", req.Replicas)
-	writeJSON(w, http.StatusOK, okJSON{OK: true})
+	slog.Info("operatorapi -> scaled", "target", req.serviceTarget, "replicas", req.Replicas, "resize_version", res.Version)
+	writeJSON(w, http.StatusOK, scaledJSON{OK: true, Version: res.Version})
 }
 
 func (o *OperatorAPI) resizeVolume(w http.ResponseWriter, r *http.Request) {
@@ -369,18 +416,58 @@ func (r deployRequest) validate() error {
 	if r.ImageRef == "" {
 		return errors.New("image_ref is required")
 	}
-	if r.CPUMillicores <= 0 || r.MemBytes <= 0 {
+	return r.deploySpec.validate()
+}
+
+func (d deploySpec) validate() error {
+	if d.CPUMillicores <= 0 || d.MemBytes <= 0 {
 		return errors.New("cpu_millicores and mem_bytes must be positive")
 	}
-	if r.DrainSeconds < 0 || r.RestartMax < 0 || r.ProgressDeadline < 0 {
+	if d.DrainSeconds < 0 || d.RestartMax < 0 || d.ProgressDeadline < 0 {
 		return errors.New("drain_seconds, restart_max and progress_deadline must be >= 0")
 	}
-	return validateReplicas(r.Replicas)
+	return validateReplicas(d.Replicas)
+}
+
+func (d deploySpec) input(t target.Target, imageRef string) project.DeployInput {
+	return project.DeployInput{
+		Target:           t,
+		ImageRef:         imageRef,
+		CPUMillicores:    d.CPUMillicores,
+		MemBytes:         d.MemBytes,
+		DrainSeconds:     d.DrainSeconds,
+		RestartMax:       d.RestartMax,
+		ProgressDeadline: d.ProgressDeadline,
+		Replicas:         d.Replicas,
+		CommitMessage:    d.CommitMessage,
+		CreatedBy:        d.CreatedBy,
+	}
+}
+
+// validate orders the launch: a deploy needs a binding to land on, and the
+// binding's image is what it deploys — the UI builds nothing from a repo.
+func (r createServiceRequest) validate() error {
+	if r.Project == "" || r.Name == "" {
+		return errors.New("project and name are required")
+	}
+	if r.Deploy == nil {
+		return nil
+	}
+	if r.Environment == "" {
+		return errors.New("deploy needs an environment to bind the service into")
+	}
+	if r.Source.Image == "" {
+		return errors.New("deploy needs source.image")
+	}
+	return r.Deploy.validate()
 }
 
 func (r scaleRequest) validate() error {
 	if err := r.serviceTarget.validate(); err != nil {
 		return err
+	}
+	if r.CPUMillicores < 0 || r.MemBytes < 0 {
+		return errors.New("cpu_millicores and mem_bytes must be positive when given")
 	}
 	return validateReplicas(r.Replicas)
 }

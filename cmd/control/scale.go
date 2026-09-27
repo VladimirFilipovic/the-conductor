@@ -52,7 +52,7 @@ func cmdScale(args []string) error {
 	}
 	defer func() { _ = store.Close() }()
 
-	if err := project.New(store).Scale(ctx, project.ScaleInput{Target: t.Target, Replicas: replicas}); err != nil {
+	if _, err := project.New(store).Scale(ctx, project.ScaleInput{Target: t.Target, Replicas: replicas}); err != nil {
 		return err
 	}
 

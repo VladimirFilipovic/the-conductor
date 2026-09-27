@@ -234,6 +234,7 @@ function ServiceRow({
 }) {
   const path = `${target.project}/${target.environment}/${target.service}`;
   const d = svc.deployment;
+  const limits = d ? { cpu: d.cpu_millicores, memBytes: d.mem_bytes } : undefined;
   const [form, setForm] = useState<"deploy" | "scale" | null>(null);
   const toggle = (f: "deploy" | "scale") => setForm(form === f ? null : f);
 
@@ -337,6 +338,7 @@ function ServiceRow({
           target={target}
           label={path}
           defaultImage={d?.image_ref}
+          limits={limits}
           current={svc.regions}
           onDone={() => setForm(null)}
         />
@@ -345,6 +347,7 @@ function ServiceRow({
         <ScaleForm
           target={target}
           label={path}
+          limits={limits}
           current={svc.regions}
           onDone={() => setForm(null)}
         />

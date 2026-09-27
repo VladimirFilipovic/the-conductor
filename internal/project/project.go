@@ -83,6 +83,10 @@ type DeploymentStore interface {
 	// Replica-count mutations backing `conductor scale`/`down`.
 	CurrentDeploymentID(ctx context.Context, projectName, environment, service string) (uuid.UUID, error)
 	ZeroDeploymentRegions(ctx context.Context, deploymentID uuid.UUID) error
+
+	// Resize path: a scale that changes cpu/mem re-commits the current spec.
+	GetCurrentDeploymentSpec(ctx context.Context, environmentServiceID uuid.UUID) (db.Deployment, error)
+	ListDeploymentRegions(ctx context.Context, deploymentID uuid.UUID) ([]db.ListDeploymentRegionsRow, error)
 }
 
 type Service struct {
@@ -202,6 +206,36 @@ func addService(ctx context.Context, st ProjectStore, in AddServiceInput, source
 	return svc, nil
 }
 
+// LaunchService is AddService plus, when dep is non-nil, the service's first
+// deploy — one tx, so a deploy the rules reject (stateful cap, bad target)
+// leaves no bound-but-undeployed service behind for the operator to clean up.
+// dep's Target is taken from in; the caller only fills the spec.
+func (s *Service) LaunchService(ctx context.Context, in AddServiceInput, dep *DeployInput) (db.Service, *DeployResult, error) {
+	source, err := json.Marshal(in.Source)
+	if err != nil {
+		return db.Service{}, nil, err
+	}
+
+	var (
+		svc db.Service
+		res *DeployResult
+	)
+	err = s.store.WithTx(ctx, func(st storage.Querier) error {
+		if svc, err = addService(ctx, st, in, source); err != nil || dep == nil {
+			return err
+		}
+		spec := *dep
+		spec.Target = in.Target
+		out, err := deploy(ctx, st, spec)
+		res = &out
+		return err
+	})
+	if err != nil {
+		return db.Service{}, nil, err
+	}
+	return svc, res, nil
+}
+
 // CreateService registers a service in the project without binding it to any
 // environment. `conductor add` does both in one step because it always stands
 // in an environment; the operator UI creates the service once and binds it per
@@ -261,6 +295,7 @@ type DeployInput struct {
 	ImageRef         string
 	CPUMillicores    int32
 	MemBytes         int64
+	Env              json.RawMessage
 	Healthcheck      json.RawMessage
 	DrainSeconds     int32
 	RestartMax       int32
@@ -310,7 +345,7 @@ func deploy(ctx context.Context, st DeploymentStore, in DeployInput) (DeployResu
 		ImageRef:             in.ImageRef,
 		CpuMillicores:        in.CPUMillicores,
 		MemBytes:             in.MemBytes,
-		Env:                  json.RawMessage("{}"),
+		Env:                  orEmptyJSON(in.Env),
 		Healthcheck:          orEmptyJSON(in.Healthcheck),
 		DrainSeconds:         in.DrainSeconds,
 		RestartMax:           in.RestartMax,

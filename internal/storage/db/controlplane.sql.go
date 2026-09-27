@@ -623,7 +623,7 @@ func (q *Queries) TopologyServed(ctx context.Context, arg TopologyServedParams) 
 const topologyServices = `-- name: TopologyServices :many
 SELECT es.id AS es_id, es.environment_id, s.name AS service, s.stateful,
        d.id AS deployment_id, d.version, d.status, d.image_ref, d.created_at,
-       d.created_by, d.commit_message
+       d.created_by, d.commit_message, d.cpu_millicores, d.mem_bytes
 FROM environment_services es
 JOIN environments e ON e.id = es.environment_id
 JOIN services     s ON s.id = es.service_id
@@ -650,6 +650,8 @@ type TopologyServicesRow struct {
 	CreatedAt     sql.NullTime   `json:"created_at"`
 	CreatedBy     sql.NullString `json:"created_by"`
 	CommitMessage sql.NullString `json:"commit_message"`
+	CpuMillicores sql.NullInt32  `json:"cpu_millicores"`
+	MemBytes      sql.NullInt64  `json:"mem_bytes"`
 }
 
 // One row per service binding plus its active deploy commit; the deployment
@@ -675,6 +677,8 @@ func (q *Queries) TopologyServices(ctx context.Context, arg TopologyServicesPara
 			&i.CreatedAt,
 			&i.CreatedBy,
 			&i.CommitMessage,
+			&i.CpuMillicores,
+			&i.MemBytes,
 		); err != nil {
 			return nil, err
 		}

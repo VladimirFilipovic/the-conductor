@@ -86,7 +86,7 @@ ORDER BY project_name, name;
 -- name: TopologyServices :many
 SELECT es.id AS es_id, es.environment_id, s.name AS service, s.stateful,
        d.id AS deployment_id, d.version, d.status, d.image_ref, d.created_at,
-       d.created_by, d.commit_message
+       d.created_by, d.commit_message, d.cpu_millicores, d.mem_bytes
 FROM environment_services es
 JOIN environments e ON e.id = es.environment_id
 JOIN services     s ON s.id = es.service_id

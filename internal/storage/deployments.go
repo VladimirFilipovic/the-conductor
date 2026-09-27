@@ -31,6 +31,10 @@ type deploymentQuerier interface {
 	// Replica-count mutations backing `conductor scale`/`down`.
 	CurrentDeploymentID(ctx context.Context, projectName, environment, service string) (uuid.UUID, error)
 	ZeroDeploymentRegions(ctx context.Context, deploymentID uuid.UUID) error
+
+	// Resize path: a scale that changes cpu/mem re-commits the current spec.
+	GetCurrentDeploymentSpec(ctx context.Context, environmentServiceID uuid.UUID) (db.Deployment, error)
+	ListDeploymentRegions(ctx context.Context, deploymentID uuid.UUID) ([]db.ListDeploymentRegionsRow, error)
 }
 
 func (q querier) GetEnvironmentService(ctx context.Context, projectName, environment, service string) (db.GetEnvironmentServiceRow, error) {
@@ -77,6 +81,21 @@ func (q querier) GetCurrentDeployment(ctx context.Context, environmentServiceID 
 		return db.GetCurrentDeploymentRow{}, err
 	}
 	return row, nil
+}
+
+func (q querier) GetCurrentDeploymentSpec(ctx context.Context, environmentServiceID uuid.UUID) (db.Deployment, error) {
+	row, err := q.queries.GetCurrentDeploymentSpec(ctx, environmentServiceID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.Deployment{}, fmt.Errorf("no current deployment (run `conductor up` first): %w", ErrNotFound)
+	}
+	if err != nil {
+		return db.Deployment{}, err
+	}
+	return row, nil
+}
+
+func (q querier) ListDeploymentRegions(ctx context.Context, deploymentID uuid.UUID) ([]db.ListDeploymentRegionsRow, error) {
+	return q.queries.ListDeploymentRegions(ctx, deploymentID)
 }
 
 func (q querier) GetDeploymentByVersion(ctx context.Context, environmentServiceID uuid.UUID, version int32) (db.GetDeploymentByVersionRow, error) {

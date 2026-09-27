@@ -140,6 +140,8 @@ type fakeDesired struct {
 	createdEnv     string
 	deploy         project.DeployInput
 	scale          project.ScaleInput
+	launch         project.AddServiceInput
+	launchDeploy   *project.DeployInput
 
 	// Volume calls record the (target, mount) they were addressed with; resize
 	// answers with resizeOutcome so the advisory passthrough is exercised.
@@ -166,14 +168,23 @@ func (f *fakeDesired) BindService(context.Context, project.BindServiceInput) (db
 	return db.EnvironmentService{ID: uuid.New()}, f.err
 }
 
+func (f *fakeDesired) LaunchService(_ context.Context, in project.AddServiceInput, dep *project.DeployInput) (db.Service, *project.DeployResult, error) {
+	f.launch, f.launchDeploy = in, dep
+	svc := db.Service{ID: uuid.New(), Name: in.Service, Stateful: in.Stateful}
+	if dep == nil {
+		return svc, nil, f.err
+	}
+	return svc, &project.DeployResult{Version: 1, Replicas: dep.Replicas}, f.err
+}
+
 func (f *fakeDesired) Deploy(_ context.Context, in project.DeployInput) (project.DeployResult, error) {
 	f.deploy = in
 	return project.DeployResult{Version: 7, Replicas: in.Replicas}, f.err
 }
 
-func (f *fakeDesired) Scale(_ context.Context, in project.ScaleInput) error {
+func (f *fakeDesired) Scale(_ context.Context, in project.ScaleInput) (project.ScaleResult, error) {
 	f.scale = in
-	return f.err
+	return project.ScaleResult{}, f.err
 }
 
 func (f *fakeDesired) ResizeVolume(_ context.Context, t target.Target, mount string, size int64) (project.ResizeOutcome, error) {

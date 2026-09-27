@@ -163,50 +163,132 @@ function EnvironmentForm({ onDone }: { onDone: () => void }) {
   );
 }
 
+// Railway-style: one form from nothing to a running service. Environment and
+// image are optional — left empty, the service is only registered in the
+// project and bound per environment later ("Bind service to environment").
 function ServiceForm({ onDone }: { onDone: () => void }) {
   const s = useStore();
   const [project, setProject] = useState("");
   const [name, setName] = useState("");
   const [stateful, setStateful] = useState(false);
+  const [environment, setEnvironment] = useState("");
+  const [imageRef, setImageRef] = useState("nginx:1.27");
+  const [deployNow, setDeployNow] = useState(true);
+  const [counts, setCounts] = useState<Record<string, number>>({});
+  const spec = useDeploySpec();
   const submit = useSubmit();
   useEffect(() => {
     if (s.project !== "all") setProject(s.project);
   }, [s.project]);
+
+  const envs = s.meta.environments.filter((e) => e.project_name === project);
+  const launching = environment !== "";
+  const deploying = launching && deployNow;
+  const replicas = Object.fromEntries(
+    Object.entries(counts).filter(([, v]) => v > 0),
+  );
+  const ready =
+    project !== "" &&
+    name !== "" &&
+    (!launching || imageRef !== "") &&
+    (!deploying || Object.keys(replicas).length > 0);
+
   return (
-    <div className="flex flex-wrap items-end gap-3">
-      <F label="project">
-        <ProjectSelect value={project} onChange={setProject} />
-      </F>
-      <F label="service name">
-        <input
-          className="input mono"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="api"
-        />
-      </F>
-      <label className="flex items-center gap-2 pb-2 text-sm text-[var(--color-muted)]">
-        <input
-          type="checkbox"
-          checked={stateful}
-          onChange={(e) => setStateful(e.target.checked)}
-        />
-        stateful
-      </label>
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-end gap-3">
+        <F label="project">
+          <ProjectSelect
+            value={project}
+            onChange={(p) => {
+              setProject(p);
+              setEnvironment("");
+            }}
+          />
+        </F>
+        <F label="service name">
+          <input
+            className="input mono"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="api"
+          />
+        </F>
+        <F label="environment (optional)">
+          <select
+            className="input mono"
+            value={environment}
+            onChange={(e) => setEnvironment(e.target.value)}
+          >
+            <option value="">— bind later</option>
+            {envs.map((e) => (
+              <option key={e.id} value={e.name}>
+                {e.name}
+              </option>
+            ))}
+          </select>
+        </F>
+        {launching && (
+          <F label="image">
+            <input
+              className="input mono"
+              value={imageRef}
+              onChange={(e) => setImageRef(e.target.value)}
+            />
+          </F>
+        )}
+        <label className="flex items-center gap-2 pb-2 text-sm text-[var(--color-muted)]">
+          <input
+            type="checkbox"
+            checked={stateful}
+            onChange={(e) => setStateful(e.target.checked)}
+          />
+          stateful
+        </label>
+        {launching && (
+          <label className="flex items-center gap-2 pb-2 text-sm text-[var(--color-muted)]">
+            <input
+              type="checkbox"
+              checked={deployNow}
+              onChange={(e) => setDeployNow(e.target.checked)}
+            />
+            deploy now
+          </label>
+        )}
+      </div>
+      {deploying && (
+        <>
+          {spec.fields}
+          <RegionCounts counts={counts} setCounts={setCounts} />
+        </>
+      )}
       <button
         className="btn btn-accent"
-        disabled={!project || !name}
+        disabled={!ready}
         onClick={async () => {
           if (
             await submit(
-              { action: "create_service", project, name, stateful },
-              "create service",
+              {
+                action: "create_service",
+                project,
+                name,
+                stateful,
+                environment,
+                imageRef,
+                deploy: deploying
+                  ? spec.body(replicas, `chaos-ui:${s.session}`)
+                  : undefined,
+              },
+              deploying
+                ? "create + deploy service"
+                : launching
+                  ? "create + bind service"
+                  : "create service",
             )
           )
             onDone();
         }}
       >
-        Create service
+        {deploying ? "Create & deploy" : launching ? "Create & bind" : "Create service"}
       </button>
     </div>
   );
@@ -318,24 +400,21 @@ export function DeployForm({
   target,
   label,
   defaultImage,
+  limits,
   current,
   onDone,
 }: {
   target: ServiceTarget;
   label: string;
   defaultImage?: string;
+  limits?: Limits;
   current: { region: string; desired: number }[];
   onDone: () => void;
 }) {
   const s = useStore();
   const submit = useSubmit();
   const [imageRef, setImageRef] = useState(defaultImage || "nginx:1.27");
-  const [cpu, setCpu] = useState(500);
-  const [memMb, setMemMb] = useState(512);
-  const [drain, setDrain] = useState(30);
-  const [restartMax, setRestartMax] = useState(5);
-  const [deadline, setDeadline] = useState(600);
-  const [msg, setMsg] = useState("");
+  const spec = useDeploySpec(limits);
   const [counts, setCounts] = useState<Record<string, number>>(() =>
     Object.fromEntries(current.map((r) => [r.region, r.desired])),
   );
@@ -350,20 +429,8 @@ export function DeployForm({
             onChange={(e) => setImageRef(e.target.value)}
           />
         </F>
-        <NumField label="cpu (m)" value={cpu} onChange={setCpu} />
-        <NumField label="mem (MB)" value={memMb} onChange={setMemMb} />
-        <NumField label="drain (s)" value={drain} onChange={setDrain} />
-        <NumField label="restart_max" value={restartMax} onChange={setRestartMax} />
-        <NumField label="deadline (s)" value={deadline} onChange={setDeadline} />
-        <F label="commit_message" wide>
-          <input
-            className="input"
-            value={msg}
-            onChange={(e) => setMsg(e.target.value)}
-            placeholder="deploy via chaos-ui"
-          />
-        </F>
       </div>
+      {spec.fields}
       <RegionCounts counts={counts} setCounts={setCounts} />
       <div className="flex items-center gap-2">
         <button
@@ -376,15 +443,11 @@ export function DeployForm({
                   action: "deploy",
                   ...target,
                   imageRef,
-                  cpuMillicores: cpu,
-                  memBytes: memMb * MB,
-                  drainSeconds: drain,
-                  restartMax,
-                  progressDeadline: deadline,
-                  commitMessage: msg,
-                  createdBy: `chaos-ui:${s.session}`,
-                  replicas: Object.fromEntries(
-                    Object.entries(counts).filter(([, v]) => v > 0),
+                  ...spec.body(
+                    Object.fromEntries(
+                      Object.entries(counts).filter(([, v]) => v > 0),
+                    ),
+                    `chaos-ui:${s.session}`,
                   ),
                 },
                 `deploy ${label}`,
@@ -403,27 +466,54 @@ export function DeployForm({
   );
 }
 
+// Replicas and per-replica limits in one panel, as Railway's Scale section has
+// them. Counts alone patch the current version in place; a limit change is a
+// new version of the same spec (blue/green), which the button says up front.
 export function ScaleForm({
   target,
   label,
+  limits,
   current,
   onDone,
 }: {
   target: ServiceTarget;
   label: string;
+  limits?: Limits;
   current: { region: string; desired: number }[];
   onDone: () => void;
 }) {
+  const s = useStore();
   const submit = useSubmit();
   const [counts, setCounts] = useState<Record<string, number>>(() =>
     Object.fromEntries(current.map((r) => [r.region, r.desired])),
   );
+  const [cpu, setCpu] = useState(limits?.cpu ?? 0);
+  const [memMb, setMemMb] = useState(limits ? limits.memBytes / MB : 0);
+  const resizing =
+    !!limits && (cpu !== limits.cpu || memMb * MB !== limits.memBytes);
+
   return (
     <div className="panel-soft mt-3 space-y-3 p-3">
       <RegionCounts counts={counts} setCounts={setCounts} />
+      {limits && (
+        <div>
+          <span className="label">limits per replica</span>
+          <div className="flex flex-wrap items-end gap-3">
+            <NumField label="cpu (m)" value={cpu} onChange={setCpu} />
+            <NumField label="mem (MB)" value={memMb} onChange={setMemMb} />
+          </div>
+          {resizing && (
+            <p className="mt-2 text-xs text-[var(--color-muted)]">
+              new limits redeploy the current spec as a new version
+              (blue/green); counts alone apply in place
+            </p>
+          )}
+        </div>
+      )}
       <div className="flex items-center gap-2">
         <button
           className="btn btn-accent"
+          disabled={resizing && (cpu <= 0 || memMb <= 0)}
           onClick={async () => {
             if (
               await submit(
@@ -431,14 +521,19 @@ export function ScaleForm({
                   action: "scale",
                   ...target,
                   replicas: counts,
+                  ...(resizing && {
+                    cpuMillicores: cpu,
+                    memBytes: memMb * MB,
+                    createdBy: `chaos-ui:${s.session}`,
+                  }),
                 },
-                `scale ${label}`,
+                resizing ? `resize ${label}` : `scale ${label}`,
               )
             )
               onDone();
           }}
         >
-          Apply scale
+          {resizing ? "Redeploy with new limits" : "Apply scale"}
         </button>
         <button className="btn" onClick={onDone}>
           Cancel
@@ -446,6 +541,53 @@ export function ScaleForm({
       </div>
     </div>
   );
+}
+
+export interface Limits {
+  cpu: number;
+  memBytes: number;
+}
+
+// The deployment spec knobs shared by Deploy and the Service launch: state
+// plus the rendered fields, and body() in the shape /api/desired expects.
+function useDeploySpec(limits?: Limits) {
+  const [cpu, setCpu] = useState(limits?.cpu ?? 500);
+  const [memMb, setMemMb] = useState(limits ? limits.memBytes / MB : 512);
+  const [drain, setDrain] = useState(30);
+  const [restartMax, setRestartMax] = useState(5);
+  const [deadline, setDeadline] = useState(600);
+  const [msg, setMsg] = useState("");
+
+  const fields = (
+    <div className="flex flex-wrap items-end gap-3">
+      <NumField label="cpu (m)" value={cpu} onChange={setCpu} />
+      <NumField label="mem (MB)" value={memMb} onChange={setMemMb} />
+      <NumField label="drain (s)" value={drain} onChange={setDrain} />
+      <NumField label="restart_max" value={restartMax} onChange={setRestartMax} />
+      <NumField label="deadline (s)" value={deadline} onChange={setDeadline} />
+      <F label="commit_message" wide>
+        <input
+          className="input"
+          value={msg}
+          onChange={(e) => setMsg(e.target.value)}
+          placeholder="deploy via chaos-ui"
+        />
+      </F>
+    </div>
+  );
+
+  const body = (replicas: Record<string, number>, createdBy: string) => ({
+    cpuMillicores: cpu,
+    memBytes: memMb * MB,
+    drainSeconds: drain,
+    restartMax,
+    progressDeadline: deadline,
+    commitMessage: msg,
+    createdBy,
+    replicas,
+  });
+
+  return { fields, body };
 }
 
 function NumField({

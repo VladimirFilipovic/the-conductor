@@ -57,6 +57,8 @@ export interface ServiceNode {
     version: number;
     status: string;
     image_ref: string;
+    cpu_millicores: number;
+    mem_bytes: number;
     created_at: string;
     created_by: string | null;
     commit_message: string | null;
@@ -212,12 +214,28 @@ export function createEnvironment(project: string, name: string) {
   return post<{ id: string }>("/v1/environments", { project, name });
 }
 
+// The first deploy a service launch carries: a DeployInput minus the target
+// (the service being created) and the image (the binding's source.image).
+export type DeploySpec = Omit<DeployInput, keyof ServiceTarget | "image_ref">;
+
+// launch, when given, binds the new service into that environment and — with
+// a deploy spec — commits its first version, all in one apiserver transaction.
 export function createService(
   project: string,
   name: string,
   stateful: boolean,
+  launch?: { environment: string; image: string; deploy?: DeploySpec },
 ) {
-  return post<ServiceRef>("/v1/services", { project, name, stateful });
+  return post<ServiceRef & { version?: number }>("/v1/services", {
+    project,
+    name,
+    stateful,
+    ...(launch && {
+      environment: launch.environment,
+      source: { image: launch.image },
+      deploy: launch.deploy,
+    }),
+  });
 }
 
 export function bindService(
@@ -251,10 +269,17 @@ export function deploy(input: DeployInput) {
   );
 }
 
-export function scale(target: ServiceTarget, replicas: Record<string, number>) {
-  return post<{ ok: boolean }>("/v1/deployments/scale", {
+// limits that differ from the current version make the apiserver commit a new
+// one (same spec, new limits); version comes back set only in that case.
+export function scale(
+  target: ServiceTarget,
+  replicas: Record<string, number>,
+  limits?: { cpu_millicores: number; mem_bytes: number; created_by: string },
+) {
+  return post<{ ok: boolean; version?: number }>("/v1/deployments/scale", {
     ...target,
     replicas,
+    ...limits,
   });
 }
 

@@ -50,6 +50,17 @@ ON CONFLICT (deployment_id, region) DO UPDATE SET replicas = EXCLUDED.replicas;
 SELECT id, version FROM deployments
 WHERE environment_service_id = $1 AND is_current;
 
+-- The whole current commit: a resize (scale with new cpu/mem) re-commits it
+-- verbatim under the new limits, so every field has to survive the copy.
+-- name: GetCurrentDeploymentSpec :one
+SELECT * FROM deployments
+WHERE environment_service_id = $1 AND is_current;
+
+-- name: ListDeploymentRegions :many
+SELECT region, replicas FROM deployment_regions
+WHERE deployment_id = $1
+ORDER BY region;
+
 -- name: GetDeploymentByVersion :one
 SELECT id, version FROM deployments
 WHERE environment_service_id = @environment_service_id AND version = @version;

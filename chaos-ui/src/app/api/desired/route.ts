@@ -6,6 +6,7 @@ import {
   bindService,
   deploy,
   scale,
+  type DeploySpec,
   type ServiceTarget,
 } from "@/lib/api";
 import { failed } from "@/lib/route";
@@ -31,9 +32,24 @@ export async function POST(req: NextRequest) {
       case "create_environment":
         await createEnvironment(str(body.project), str(body.name));
         break;
-      case "create_service":
-        await createService(str(body.project), str(body.name), Boolean(body.stateful));
-        break;
+      case "create_service": {
+        // An environment turns the create into a launch: bind with the image,
+        // and deploy it too when the form sent a spec.
+        const environment = str(body.environment);
+        const res = await createService(
+          str(body.project),
+          str(body.name),
+          Boolean(body.stateful),
+          environment
+            ? {
+                environment,
+                image: str(body.imageRef),
+                deploy: body.deploy ? spec(body.deploy as Record<string, unknown>) : undefined,
+              }
+            : undefined,
+        );
+        return NextResponse.json({ ok: true, version: res.version });
+      }
       case "bind_service":
         await bindService(str(body.environmentId), str(body.serviceId), {
           image: str(body.image),
@@ -44,20 +60,24 @@ export async function POST(req: NextRequest) {
         const res = await deploy({
           ...target(body),
           image_ref: str(body.imageRef),
-          cpu_millicores: num(body.cpuMillicores, 500),
-          mem_bytes: num(body.memBytes, 536870912),
-          drain_seconds: num(body.drainSeconds, 30),
-          restart_max: num(body.restartMax, 5),
-          progress_deadline: num(body.progressDeadline, 600),
-          commit_message: str(body.commitMessage),
-          created_by: str(body.createdBy),
-          replicas: replicas(body.replicas),
+          ...spec(body),
         });
         return NextResponse.json({ ok: true, ...res });
       }
-      case "scale":
-        await scale(target(body), replicas(body.replicas));
-        break;
+      case "scale": {
+        const res = await scale(
+          target(body),
+          replicas(body.replicas),
+          body.cpuMillicores
+            ? {
+                cpu_millicores: num(body.cpuMillicores, 0),
+                mem_bytes: num(body.memBytes, 0),
+                created_by: str(body.createdBy),
+              }
+            : undefined,
+        );
+        return NextResponse.json({ ok: true, version: res.version });
+      }
       default:
         return NextResponse.json({ error: `unknown action ${action}` }, { status: 400 });
     }
@@ -65,6 +85,19 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     return failed(err);
   }
+}
+
+function spec(body: Record<string, unknown>): DeploySpec {
+  return {
+    cpu_millicores: num(body.cpuMillicores, 500),
+    mem_bytes: num(body.memBytes, 536870912),
+    drain_seconds: num(body.drainSeconds, 30),
+    restart_max: num(body.restartMax, 5),
+    progress_deadline: num(body.progressDeadline, 600),
+    commit_message: str(body.commitMessage),
+    created_by: str(body.createdBy),
+    replicas: replicas(body.replicas),
+  };
 }
 
 function target(body: Record<string, unknown>): ServiceTarget {

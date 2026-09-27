@@ -124,6 +124,37 @@ func (q *Queries) GetCurrentDeployment(ctx context.Context, environmentServiceID
 	return i, err
 }
 
+const getCurrentDeploymentSpec = `-- name: GetCurrentDeploymentSpec :one
+SELECT id, environment_service_id, version, is_current, image_ref, cpu_millicores, mem_bytes, env, healthcheck, drain_seconds, restart_max, commit_message, created_by, status, created_at, progress_deadline FROM deployments
+WHERE environment_service_id = $1 AND is_current
+`
+
+// The whole current commit: a resize (scale with new cpu/mem) re-commits it
+// verbatim under the new limits, so every field has to survive the copy.
+func (q *Queries) GetCurrentDeploymentSpec(ctx context.Context, environmentServiceID uuid.UUID) (Deployment, error) {
+	row := q.db.QueryRowContext(ctx, getCurrentDeploymentSpec, environmentServiceID)
+	var i Deployment
+	err := row.Scan(
+		&i.ID,
+		&i.EnvironmentServiceID,
+		&i.Version,
+		&i.IsCurrent,
+		&i.ImageRef,
+		&i.CpuMillicores,
+		&i.MemBytes,
+		&i.Env,
+		&i.Healthcheck,
+		&i.DrainSeconds,
+		&i.RestartMax,
+		&i.CommitMessage,
+		&i.CreatedBy,
+		&i.Status,
+		&i.CreatedAt,
+		&i.ProgressDeadline,
+	)
+	return i, err
+}
+
 const getDeploymentByVersion = `-- name: GetDeploymentByVersion :one
 SELECT id, version FROM deployments
 WHERE environment_service_id = $1 AND version = $2
@@ -184,6 +215,40 @@ func (q *Queries) GetEnvironmentService(ctx context.Context, arg GetEnvironmentS
 		&i.Stateful,
 	)
 	return i, err
+}
+
+const listDeploymentRegions = `-- name: ListDeploymentRegions :many
+SELECT region, replicas FROM deployment_regions
+WHERE deployment_id = $1
+ORDER BY region
+`
+
+type ListDeploymentRegionsRow struct {
+	Region   string `json:"region"`
+	Replicas int32  `json:"replicas"`
+}
+
+func (q *Queries) ListDeploymentRegions(ctx context.Context, deploymentID uuid.UUID) ([]ListDeploymentRegionsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listDeploymentRegions, deploymentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListDeploymentRegionsRow
+	for rows.Next() {
+		var i ListDeploymentRegionsRow
+		if err := rows.Scan(&i.Region, &i.Replicas); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const markCurrentRolledBack = `-- name: MarkCurrentRolledBack :exec

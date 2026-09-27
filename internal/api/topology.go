@@ -70,6 +70,8 @@ type deploymentJSON struct {
 	Version       int32     `json:"version"`
 	Status        string    `json:"status"`
 	ImageRef      string    `json:"image_ref"`
+	CPUMillicores int32     `json:"cpu_millicores"`
+	MemBytes      int64     `json:"mem_bytes"`
 	CreatedAt     time.Time `json:"created_at"`
 	CreatedBy     *string   `json:"created_by"`
 	CommitMessage *string   `json:"commit_message"`
@@ -283,6 +285,8 @@ func currentDeployment(svc db.TopologyServicesRow) *deploymentJSON {
 		Version:       svc.Version.Int32,
 		Status:        svc.Status.String,
 		ImageRef:      svc.ImageRef.String,
+		CPUMillicores: svc.CpuMillicores.Int32,
+		MemBytes:      svc.MemBytes.Int64,
 		CreatedAt:     svc.CreatedAt.Time,
 		CreatedBy:     nullStr(svc.CreatedBy),
 		CommitMessage: nullStr(svc.CommitMessage),
