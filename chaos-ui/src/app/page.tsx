@@ -300,7 +300,7 @@ function ServiceRow({
           {
             key: "rollback",
             label: "Rollback…",
-            hint: "Back to an earlier version as it was committed: image, limits, replica counts.",
+            hint: "Back to an earlier version's image and limits; replica counts stay as they are.",
             onSelect: () => toggle("rollback"),
           },
         ]

@@ -303,8 +303,9 @@ export function scale(
   });
 }
 
-// Re-points the service at an earlier version's row, verbatim: image, limits
-// and that version's replica counts. toVersion omitted ⇒ the previous one.
+// Re-points the service at an earlier version's row: its image and limits,
+// with the current replica counts carried over. toVersion omitted ⇒ the
+// previous one.
 export function rollback(target: ServiceTarget, toVersion?: number) {
   return post<{ ok: boolean; from: number; to: number }>(
     "/v1/deployments/rollback",

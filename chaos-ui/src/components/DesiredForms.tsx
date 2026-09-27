@@ -421,9 +421,9 @@ function BindForm({ onDone }: { onDone: () => void }) {
 const MB = 1024 * 1024;
 const DEFAULT_MOUNT = "/var/lib/postgresql/data";
 
-// Rollback takes an existing version as it was committed — its limits and its
-// replica counts too — so a resize or a scale that bumped the version is undone
-// by stepping back one.
+// Rollback takes an existing version's code as it was committed — image and
+// limits, so a resize that bumped the version is undone by stepping back one —
+// but keeps today's replica counts: scale is never rolled back.
 export function RollbackForm({
   target,
   label,
@@ -462,8 +462,8 @@ export function RollbackForm({
         </button>
       </div>
       <p className="text-xs text-[var(--color-muted)]">
-        now v{current} · the chosen version comes back with its own image,
-        limits and replica counts, rolled out like a deploy
+        now v{current} · the chosen version comes back with its own image and
+        limits, rolled out like a deploy · replica counts stay as they are now
       </p>
     </div>
   );
