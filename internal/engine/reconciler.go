@@ -288,6 +288,7 @@ func logFirings(firings []ruleFiring, placed []Intent) {
 var rollingCascade = []rule{
 	deploymentFrozen,          // status failed → hold everything until unlock
 	crashLooping,              // restart_count > restart_max → fail the rollout, or freeze the replica if active
+	trimHostlessExcess,        // above desired with unplaced targets → destroy those first
 	anyHostlessReplicas,       // target lost its host → re-place
 	newHealthOpenPastDeadline, // health gate open too long → fail (stalled)
 	notAllHealthy,             // newest not yet healthy, within deadline → hold
@@ -304,6 +305,7 @@ var rollingCascade = []rule{
 var recreateCascade = []rule{
 	deploymentFrozen,
 	crashLooping,
+	trimHostlessExcess,
 	anyHostlessReplicas,
 	newHealthOpenPastDeadline,
 	notAllHealthy,
@@ -379,6 +381,50 @@ func destroyAll(rs []replica) []Intent {
 		intents[i] = Intent{Kind: IntentDestroy, ReplicaID: r.ID, VolumeID: r.VolumeID}
 	}
 	return intents
+}
+
+// trimHostlessExcess must sit above anyHostlessReplicas: a replica no host can
+// fit keeps that rule matching every tick, and the one-rule-per-tick cascade
+// would never reach scale-down — lowering the count could not unstick the
+// group. Hostless replicas are the cheapest excess (no container, no traffic),
+// so they go straight to destroy; what is left of the excess falls through to
+// the regular scale-down once nothing is hostless.
+var trimHostlessExcess = rule{
+	name: "trimHostlessExcess",
+	when: func(rg replicaGroup) bool {
+		return stayingExcess(rg) > 0 && slices.ContainsFunc(rg.TargetReplicas, hostless)
+	},
+	then: func(rg replicaGroup) []Intent {
+		n := stayingExcess(rg)
+		var intents []Intent
+		for _, r := range rg.TargetReplicas {
+			if len(intents) == n {
+				break
+			}
+			if hostless(r) {
+				// No VolumeID: an unplaced replica never bound the lease, and
+				// releasing by volume could drop a lease someone else holds.
+				intents = append(intents, Intent{Kind: IntentDestroy, ReplicaID: r.ID})
+			}
+		}
+		return intents
+	},
+}
+
+func excess(rg replicaGroup) int {
+	return len(rg.TargetReplicas) + len(rg.FrozenReplicas) - int(rg.Desired.Replicas)
+}
+
+// stayingExcess leaves out replicas on draining hosts: their hostless
+// surge replacements are the evacuation itself, not excess to trim.
+func stayingExcess(rg replicaGroup) int {
+	leaving := 0
+	for _, r := range rg.TargetReplicas {
+		if r.HostDraining {
+			leaving++
+		}
+	}
+	return excess(rg) - leaving
 }
 
 var anyHostlessReplicas = rule{
@@ -495,10 +541,10 @@ func heldSlots(rg replicaGroup) int32 {
 var rollingScaleDown = rule{
 	name: "rollingScaleDown",
 	when: func(rg replicaGroup) bool {
-		return len(rg.TargetReplicas)+len(rg.FrozenReplicas) > int(rg.Desired.Replicas)
+		return excess(rg) > 0
 	},
 	then: func(rg replicaGroup) []Intent {
-		n := len(rg.TargetReplicas) + len(rg.FrozenReplicas) - int(rg.Desired.Replicas)
+		n := excess(rg)
 		// Frozen replicas are the excess nobody misses: dead containers with no
 		// traffic to bleed, so they go first and straight to destroy — no drain
 		// window. Only what's left of the excess costs a live replica.

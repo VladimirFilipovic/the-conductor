@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"conductor/internal/config"
 	"conductor/internal/domain"
 
 	"github.com/google/uuid"
@@ -322,6 +323,80 @@ func TestAnyHostlessReplicasEmitsAssignHost(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("then() = %v, want %v", got, want)
+	}
+}
+
+func TestTrimHostlessExcessRule(t *testing.T) {
+	placed := replica{ID: uuid.New(), HostID: uuid.New(), Healthy: true}
+	leaving := replica{ID: uuid.New(), HostID: uuid.New(), Healthy: true, HostDraining: true}
+	hostless := replica{ID: uuid.New()}
+
+	tests := []struct {
+		name string
+		in   replicaGroup
+		want bool
+	}{
+		{
+			name: "above desired with a hostless target fires",
+			in:   replicaGroup{Desired: desiredState{Replicas: 1}, TargetReplicas: []replica{placed, hostless}},
+			want: true,
+		},
+		{
+			name: "at desired with a hostless target holds (placement's job)",
+			in:   replicaGroup{Desired: desiredState{Replicas: 2}, TargetReplicas: []replica{placed, hostless}},
+			want: false,
+		},
+		{
+			name: "above desired with every target placed holds (scale-down's job)",
+			in:   replicaGroup{Desired: desiredState{Replicas: 1}, TargetReplicas: []replica{placed, placed}},
+			want: false,
+		},
+		{
+			name: "surge replacement for a draining host is not excess",
+			in:   replicaGroup{Desired: desiredState{Replicas: 2}, TargetReplicas: []replica{placed, leaving, hostless}},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := trimHostlessExcess.when(tt.in); got != tt.want {
+				t.Errorf("trimHostlessExcess.when() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// Only the excess goes, and only hostless replicas: a stuck group scaled from
+// 4 to 3 keeps its placed replicas and one of the two unplaced ones. No
+// VolumeID rides along — the replica never bound the lease.
+func TestTrimHostlessExcessDestroysOnlyExcess(t *testing.T) {
+	placed1 := replica{ID: uuid.New(), HostID: uuid.New(), Healthy: true}
+	placed2 := replica{ID: uuid.New(), HostID: uuid.New(), Healthy: true}
+	lost1 := replica{ID: uuid.New(), VolumeID: uuid.New()}
+	lost2 := replica{ID: uuid.New()}
+
+	got := trimHostlessExcess.then(replicaGroup{
+		Desired:        desiredState{Replicas: 3},
+		TargetReplicas: []replica{placed1, lost1, placed2, lost2},
+	})
+
+	want := []Intent{{Kind: IntentDestroy, ReplicaID: lost1.ID}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("then() = %v, want %v", got, want)
+	}
+}
+
+// The cascade order is the fix: with an unplaceable replica in the group,
+// anyHostlessReplicas would match every tick and shadow scale-down.
+func TestRollingCascadeTrimsBeforeReplacing(t *testing.T) {
+	r := NewReconciler(config.DefaultPlacement())
+	got := r.planIntents([]replicaGroup{{
+		Desired:        desiredState{DeploymentID: uuid.New(), Replicas: 1, Status: domain.DeploymentActive},
+		TargetReplicas: []replica{{ID: uuid.New(), HostID: uuid.New(), Healthy: true}, {ID: uuid.New()}},
+	}})
+	if len(got) != 1 || got[0].Kind != IntentDestroy {
+		t.Fatalf("planIntents() = %v, want a single destroy of the hostless replica", got)
 	}
 }
 

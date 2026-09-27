@@ -1144,6 +1144,36 @@ func (l *loop) servingReplicas(dep uuid.UUID) int {
 	return n
 }
 
+// Scaling past capacity and back: the replica no host could fit must not pin
+// the group — lowering the count retires it and the deployment stays active.
+func TestE2EScaleDownRetiresUnplaceableReplica(t *testing.T) {
+	l := newLoop(t)
+	slot := replicaSlot{uuid.New(), "eu-west-1"}
+	l.addHost(1 << 30)
+	v1 := l.deploy(slot, uuid.New(), 1, false)
+	l.ms.deployment(v1).cpu = 1200 // two never fit one 2000m host
+	l.rollout(v1)
+
+	l.ms.deployment(v1).replicas = 2
+	for range 3 {
+		l.tick()
+		l.agentConverge()
+	}
+	if n := len(l.replicasOf(v1)); n != 2 {
+		t.Fatalf("after scale-up: v1 replicas = %d, want 2 (one stuck unplaced)", n)
+	}
+
+	l.ms.deployment(v1).replicas = 1
+	l.tick()
+	reps := l.replicasOf(v1)
+	if len(reps) != 1 || reps[0].hostID == uuid.Nil || !reps[0].healthy {
+		t.Fatalf("after scale-down: replicas = %v, want the one placed healthy replica", l.describeReplicas())
+	}
+	if got := l.ms.deployment(v1).status; got != string(domain.DeploymentActive) {
+		t.Fatalf("status = %s, want active", got)
+	}
+}
+
 // A region the current deployment dropped: draining its leftovers clears the
 // traffic pointer, so status never reports it serving a reaped revision.
 func TestE2EOrphanRegionClearsServedRevision(t *testing.T) {
