@@ -35,7 +35,18 @@ export default function LogsPage() {
 
     es.onopen = () => setConnection("live");
     es.onerror = () => setConnection("down");
-    es.onmessage = (e) => pending.push(parseLine(e.data));
+    // The engine's SSE id is the ring's line id, so it is stable across buffer
+    // trims — index keys would shift and re-render every row once the cap hits.
+    // An engine restart numbers from zero again; the epoch keeps those keys
+    // distinct from the lines of the previous process still on screen.
+    let epoch = 0;
+    let lastId = -1;
+    es.onmessage = (e) => {
+      const id = Number(e.lastEventId);
+      if (id <= lastId) epoch++;
+      lastId = id;
+      pending.push(parseLine(`${epoch}:${e.lastEventId}`, e.data));
+    };
 
     const flush = setInterval(() => {
       if (pending.length === 0) return;
@@ -116,7 +127,7 @@ export default function LogsPage() {
             {lines.length === 0 ? "waiting for log lines…" : "no lines match the current filter"}
           </div>
         ) : (
-          visible.map((l, i) => <LogRow key={i} line={l} />)
+          visible.map((l) => <LogRow key={l.id} line={l} />)
         )}
       </div>
     </div>

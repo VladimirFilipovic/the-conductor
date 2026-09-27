@@ -1,4 +1,5 @@
 export interface LogLine {
+  id: string;
   raw: string;
   time: string | null;
   level: string | null;
@@ -39,8 +40,8 @@ function unquote(v: string): string {
   return v;
 }
 
-export function parseLine(raw: string): LogLine {
-  const out: LogLine = { raw, time: null, level: null, msg: null, attrs: [] };
+export function parseLine(id: string, raw: string): LogLine {
+  const out: LogLine = { id, raw, time: null, level: null, msg: null, attrs: [] };
   for (const tok of tokenize(raw)) {
     const eq = tok.indexOf("=");
     if (eq === -1) continue;
