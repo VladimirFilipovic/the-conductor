@@ -1,10 +1,10 @@
 # Chaos scenarios
 
-Real situations the system must survive, reduced to repeatable steps. All run
-against the docker stack (`make stack-up`) with the local agentsim fleet. Chaos
-always goes through agents (chaos-ui Chaos tab, or the agentsim control API on
-:7780), never straight into the database — the agent lies or goes silent over
-the real gRPC transport.
+Real situations the system must survive, reduced to repeatable steps. They run
+against the docker stack (`make stack-up`) with the local agentsim fleet; §14
+replays the core ones on Railway. Chaos always goes through agents (the ⋯ menus
+in chaos-ui, or the agentsim control API on :7780), never straight into the
+database — the agent lies or goes silent over the real gRPC transport.
 
 chaos-ui has no database access at all: it reads topology and writes desired
 state through the apiserver control plane (`CONTROL_PLANE_URL`, default :7080),
@@ -36,14 +36,20 @@ Heartbeat never touches `status`; host death never clears a drain.
 ```bash
 make stack-up      # postgres + engine + apiserver + agentsim + chaos-ui (localhost:3000)
 make build
-# in an empty folder:
-./build/conductor init -n chaos-demo
-./build/conductor add --service --name web --image nginx:alpine
-./build/conductor up -s web                    # config.toml: 2 replicas, us-east-1
+mkdir demo && cd demo
+../build/conductor init -n chaos-demo
+../build/conductor add --service --name web --image nginx:alpine
+printf '[deploy]\nnum_replicas = 2\nregion = "us-east-1"\ndrain_seconds = 10\ncpu = "200m"\nmemory = "128Mi"\n' > config.toml
+../build/conductor up -s web
 ```
 
+`up` refuses to run without a `config.toml` (annotated reference:
+`example/config.toml`). Without the CLI, the chaos-ui Service form does the same
+in one step: **+ New → Service**, pick the environment, image `nginx:alpine`,
+leave "deploy now" on, 2 replicas in us-east-1 (§13a).
+
 Agentsim is part of the stack (one sim-agent per host, control API on :7780).
-Chaos goes through the UI (Chaos tab) or straight to the control API; IDs come
+Chaos goes through the UI (⋯ menus on host/replica/volume rows) or straight to the control API; IDs come
 from `curl localhost:7780/agents` (host + replica + phase + chaos mode).
 Action: `curl -XPOST localhost:7780/chaos -d '{"action":"host_kill","host":"<id>"}'`
 (actions: `host_kill|host_recover`, `replica_crash|replica_crashloop|replica_stall_health|replica_heal`,
@@ -163,20 +169,19 @@ Thawing (three ways, all exist):
    `reapFailedOutgoing` deletes it with no drain window while the old live
    replica is still draining
 
-Setup (parallel stack `-p freeze`, apiserver :27080, agentsim :27780):
+Setup (docker stack defaults: apiserver :7080, agentsim :7780):
 
 ```bash
 mkdir demo && cd demo
-export CONDUCTOR_DATABASE_URL=postgres://conductor:conductor@localhost:25432/conductor?sslmode=disable
 conductor init -n freeze-demo
 conductor add --service --name web --image nginx:alpine
 printf '[deploy]\nnum_replicas = 2\nregion = "us-east-1"\nrestart_max_retries = 5\ndrain_seconds = 10\ncpu = "200m"\nmemory = "128Mi"\n' > config.toml
 conductor up -s web
-A=<replica id>   # from GET :27080/v1/topology
-curl -XPOST localhost:27780/chaos -d "{\"action\":\"replica_crashloop\",\"replica\":\"$A\"}"
+A=<replica id>   # from GET :7080/v1/topology
+curl -XPOST localhost:7780/chaos -d "{\"action\":\"replica_crashloop\",\"replica\":\"$A\"}"
 conductor status                                   # active (degraded) 1/2
-curl -XPOST localhost:27080/v1/replicas/$A/restart # 200; 409 if not failed, 404 unknown
-curl -XDELETE localhost:27080/v1/replicas/$A       # manual replacement
+curl -XPOST localhost:7080/v1/replicas/$A/restart # 200; 409 if not failed, 404 unknown
+curl -XDELETE localhost:7080/v1/replicas/$A       # manual replacement
 conductor up -s web                                # v2 picks up frozen as failed outgoing
 ```
 
@@ -252,6 +257,10 @@ host), lease expired ~+90s; recover → the same replica returns to the same hos
 Measured: 2→4 active+healthy in **8s** (spread over 3 hosts); 4→2: draining at
 +9s, reaped at +12s (drain window 10s).
 
+In chaos-ui the service's ⋯ → **Scale** panel carries the counts per region and
+the per-replica cpu/mem limits. Counts alone are this scenario; new limits
+re-commit the current spec as a new version, blue/green as in 8 (§13a).
+
 ### 8. New deploy — blue/green
 
 - change the spec/image, then `conductor up -s web` → v2 replicas come up
@@ -269,7 +278,8 @@ chaos-ui 21-22s (drain 10s).
 - `conductor add --database --engine postgres --name pg` +
   `conductor volume add --mount /var/lib/postgresql/data --size 2 -s pg` +
   `conductor up -s pg -f pg-config.toml` (num_replicas=1 — stateful is single
-  instance)
+  instance), where `pg-config.toml` is
+  `printf '[deploy]\nnum_replicas = 1\nregion = "us-east-1"\ncpu = "500m"\nmemory = "512Mi"\n'`
 - a volume belongs to an environment-service, not a service (migration 00007):
   `volume *` resolves project, environment and service like `up` and `scale` —
   `-e` defaults to the linked environment, and `conductor init` links
@@ -769,29 +779,36 @@ returns `ON_FAILURE`/10 for them — a CLI 5.57.12 read-back diff, not drift.
 
 ## Through chaos-ui (localhost:3000)
 
-The Chaos tab covers every action, by target:
+The Console page (Topology tree, Hosts panel, Activity log) carries every action
+in the ⋯ menu of the row it targets:
 
 - **Replica**: Crash (terminal `failed`), Crash loop (restart_count grows until
-  the budget breaks), Stall health checks (progress-deadline path), Heal (clear
-  chaos), Delete row (orphan simulation — the only direct DB write)
-- **Deployment**: Crash deployment / Stall rollout — fan-out of the same agent
-  action to every live replica of the deployment
-- **Host**: Kill host (agent goes silent → `unhealthy` at ~30s → dead at 2min),
+  the budget breaks), Stall health check (progress-deadline path), Heal (clear
+  chaos), Restart (thaw) — only on a `failed` replica (4b), Orphan (delete row)
+  — synthetic row loss through the control plane (`DELETE /v1/replicas/{id}`)
+- **Service**: Deploy new version, Scale (counts + limits, §7/§13a), and the
+  deployment-wide chaos Crash all replicas / Stall rollout — fan-out of the same
+  agent action to every live replica of the current deployment
+- **Host**: Kill (agent goes silent → `unhealthy` at ~30s → dead at 2min),
   Recover (first heartbeat restores `healthy`), Cordon and Drain (operator
-  desired state through the apiserver). The Hosts panel carries two badges:
-  health (`healthy|unhealthy`) and status (`cordoned|draining`; `open` is not
-  shown), plus replica count and "draining since …" while a drain runs
+  desired state through the apiserver; uncordon is API-only, §10). The Hosts
+  panel carries two badges: health (`healthy|unhealthy`) and status
+  (`cordoned|draining`; `open` is not shown), plus replica count and "draining
+  since …" while a drain runs
 - **Volume** (row below the replicas of a stateful service; MOUNT | HOST | SIZE |
   ON DISK | STATUS): Grow… (inline GiB, control plane; hint "host short N GiB —
   parked as resize_pending" when there is no room), Revert (only
   `resize_pending`, control plane), Stall resize / Heal (agentsim
   `volume_stall_resize` / `volume_heal`). Steps and measurements in §11 "Through
   chaos-ui".
+- **+ New**: Project, Environment, Service (optionally bound and deployed in the
+  same step, §13a), Bind service to environment (for the second and later
+  environments)
 
 Every agent-observable action is forwarded by the UI to the agentsim control API
 (`AGENTSIM_URL`, `http://agentsim:7780` in the stack) — chaos travels over the
 real transport (the agent lies or goes silent over gRPC), so the next report
 cannot overwrite it. curl equivalent: `POST :7780/chaos` with the same `action`
-field. Watch transitions on the Topology tab and in Logs
+field. Watch transitions in the Topology tree and on the Logs page
 (`watchdog -> stale hosts out of scheduling`, `watchdog -> host down`,
 `reconcile -> rule fired`).
