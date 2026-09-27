@@ -120,6 +120,10 @@ func (t *recordingTx) SetServedRevision(_ context.Context, environmentServiceID 
 	return t.record("SetServedRevision %s/%s -> %s", environmentServiceID, region, deploymentID)
 }
 
+func (t *recordingTx) ClearServedRevision(_ context.Context, environmentServiceID uuid.UUID, region string) error {
+	return t.record("ClearServedRevision %s/%s", environmentServiceID, region)
+}
+
 var _ ReconcileTx = (*recordingTx)(nil)
 
 // fixedNow pins the actuator clock so lease-expiry traces are exact.
@@ -291,6 +295,25 @@ func TestApplySwitchBatchIsOneTx(t *testing.T) {
 			fmt.Sprintf("SetServedRevision %s/eu-west-1 -> %s", slot.EnvironmentServiceID, newDep),
 		},
 	})
+}
+
+// An orphan slot's leftover drain has no deployment to switch to: the same
+// batch clears the region's pointer instead of flipping it.
+func TestApplyOrphanSwitchBatchClearsPointer(t *testing.T) {
+	slot := replicaSlot{EnvironmentServiceID: pinnedID(1), Region: "eu-west-1"}
+	out := pinnedID(2)
+
+	store := &recordingStore{}
+	err := newTestActuator(store).Apply(context.Background(), []Intent{
+		{Kind: IntentDrain, Group: slot, ReplicaID: out, Revision: 3, SwitchTraffic: true},
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	assertCommitted(t, store, [][]string{{
+		fmt.Sprintf("SetReplicaPhase %s draining rev=3", out),
+		fmt.Sprintf("ClearServedRevision %s/eu-west-1", slot.EnvironmentServiceID),
+	}})
 }
 
 // A lost CAS inside the switch batch rolls the WHOLE switch back — the pointer

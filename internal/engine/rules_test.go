@@ -545,8 +545,8 @@ func TestDrainOutgoingDrainsAllRetirable(t *testing.T) {
 	})
 
 	want := []Intent{
-		{Kind: IntentDrain, ReplicaID: active.ID},
-		{Kind: IntentDrain, ReplicaID: booting.ID},
+		{Kind: IntentDrain, ReplicaID: active.ID, SwitchTraffic: true},
+		{Kind: IntentDrain, ReplicaID: booting.ID, SwitchTraffic: true},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("drainOutgoing.then() = %v, want %v", got, want)

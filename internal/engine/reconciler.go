@@ -75,8 +75,9 @@ type Intent struct {
 	// SwitchTraffic marks a drain that retires a superseded revision: the
 	// Actuator commits the slot's whole drain batch plus the served-revision
 	// flip to DeploymentID in ONE tx, so traffic leaves the old side atomically
-	// with draining it. Scale-down drains never set it — excess replicas of the
-	// serving revision retire without moving the pointer.
+	// with draining it; a zero DeploymentID (orphan slot) clears the pointer.
+	// Scale-down drains never set it — excess replicas of the serving revision
+	// retire without moving the pointer.
 	SwitchTraffic bool
 }
 
@@ -514,9 +515,8 @@ var drainOutgoing = rule{
 	then: func(rg replicaGroup) []Intent {
 		// Retiring a superseded revision is the blue/green traffic-switch
 		// moment: the batch carries the current deployment so the actuator
-		// flips served_revisions in the same tx. Orphan slots have no current
-		// deployment — nothing to switch to, plain drain.
-		switchTraffic := rg.Desired.DeploymentID != uuid.Nil
+		// flips served_revisions in the same tx. An orphan slot carries no
+		// deployment, so the same switch clears the region's pointer instead.
 		var intents []Intent
 		for _, or := range rg.OutgoingReplicas {
 			if drainable(or) {
@@ -526,7 +526,7 @@ var drainOutgoing = rule{
 					ReplicaID:     or.ID,
 					Revision:      or.Revision,
 					DeploymentID:  rg.Desired.DeploymentID,
-					SwitchTraffic: switchTraffic,
+					SwitchTraffic: true,
 				})
 			}
 		}

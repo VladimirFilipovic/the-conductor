@@ -141,6 +141,12 @@ ON CONFLICT (environment_service_id, region) DO UPDATE
 	SET deployment_id = EXCLUDED.deployment_id,
 	    updated_at    = now();
 
+-- Drop a slot's traffic pointer when the current deployment no longer declares
+-- the region: shares the tx with the leftover drain batch, like the flip.
+-- name: ClearServedRevision :exec
+DELETE FROM served_revisions
+WHERE environment_service_id = $1 AND region = $2;
+
 -- The deployment a slot's traffic currently points at (router / status reads).
 -- name: GetServedRevision :one
 SELECT * FROM served_revisions

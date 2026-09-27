@@ -60,6 +60,7 @@ type ReconcileTx interface {
 	DeleteReplica(ctx context.Context, replicaID uuid.UUID) error
 	SetDeploymentStatus(ctx context.Context, deploymentID uuid.UUID, status domain.DeploymentStatus) error
 	SetServedRevision(ctx context.Context, environmentServiceID uuid.UUID, region string, deploymentID uuid.UUID) error
+	ClearServedRevision(ctx context.Context, environmentServiceID uuid.UUID, region string) error
 }
 
 // The tx-scoped Querier WithTx hands its callback covers this view.
@@ -145,6 +146,11 @@ func commitSwitchBatch(ctx context.Context, tx ReconcileTx, batch []Intent) erro
 		}
 	}
 	lead := batch[0]
+	// An orphan slot has no deployment to switch to: the region is being
+	// retired, and a pointer left behind would report it serving a dead version.
+	if lead.DeploymentID == uuid.Nil {
+		return tx.ClearServedRevision(ctx, lead.Group.EnvironmentServiceID, lead.Group.Region)
+	}
 	return tx.SetServedRevision(ctx, lead.Group.EnvironmentServiceID, lead.Group.Region, lead.DeploymentID)
 }
 

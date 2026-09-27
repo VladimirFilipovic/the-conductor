@@ -455,6 +455,11 @@ func (t *memTx) SetServedRevision(_ context.Context, environmentServiceID uuid.U
 	return nil
 }
 
+func (t *memTx) ClearServedRevision(_ context.Context, environmentServiceID uuid.UUID, region string) error {
+	delete(t.s.served, replicaSlot{environmentServiceID, region})
+	return nil
+}
+
 var _ ReconcileTx = (*memTx)(nil)
 
 // --- WatchdogStore ------------------------------------------------------------
@@ -1137,6 +1142,32 @@ func (l *loop) servingReplicas(dep uuid.UUID) int {
 		}
 	}
 	return n
+}
+
+// A region the current deployment dropped: draining its leftovers clears the
+// traffic pointer, so status never reports it serving a reaped revision.
+func TestE2EOrphanRegionClearsServedRevision(t *testing.T) {
+	l := newLoop(t)
+	slot := replicaSlot{uuid.New(), "eu-west-1"}
+	l.addHost(1 << 30)
+	v1 := l.deploy(slot, uuid.New(), 1, false)
+	l.rollout(v1)
+	if got := l.ms.served[slot]; got != v1 {
+		t.Fatalf("served = %s, want v1 %s", got, v1)
+	}
+
+	// The next version no longer declares this region.
+	l.ms.deployment(v1).isCurrent = false
+	l.ms.deployment(v1).status = string(domain.DeploymentSuperseded)
+	for range 3 {
+		l.tick()
+	}
+	if got, ok := l.ms.served[slot]; ok {
+		t.Fatalf("served = %s, want pointer cleared", got)
+	}
+	if n := len(l.replicasOf(v1)); n != 0 {
+		t.Fatalf("orphan replicas = %d, want reaped", n)
+	}
 }
 
 // Operator drain, end to end: the replica on the drained host gets a

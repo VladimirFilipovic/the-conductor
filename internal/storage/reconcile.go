@@ -87,6 +87,10 @@ type reconcileQuerier interface {
 	// share the tx with the outgoing drain batch so the blue/green shift is
 	// atomic with retiring the old side.
 	SetServedRevision(ctx context.Context, environmentServiceID uuid.UUID, region string, deploymentID uuid.UUID) error
+
+	// ClearServedRevision drops the slot's traffic switch: the region left the
+	// current deployment, so draining its leftovers leaves nothing to serve.
+	ClearServedRevision(ctx context.Context, environmentServiceID uuid.UUID, region string) error
 }
 
 func (q querier) ActiveVolumeLease(ctx context.Context, volumeID uuid.UUID) (db.VolumeLease, error) {
@@ -243,6 +247,13 @@ func (q querier) SetServedRevision(ctx context.Context, environmentServiceID uui
 		EnvironmentServiceID: environmentServiceID,
 		Region:               region,
 		DeploymentID:         deploymentID,
+	})
+}
+
+func (q querier) ClearServedRevision(ctx context.Context, environmentServiceID uuid.UUID, region string) error {
+	return q.queries.ClearServedRevision(ctx, db.ClearServedRevisionParams{
+		EnvironmentServiceID: environmentServiceID,
+		Region:               region,
 	})
 }
 

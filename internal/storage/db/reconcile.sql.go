@@ -81,6 +81,23 @@ func (q *Queries) AssignVolumeHost(ctx context.Context, arg AssignVolumeHostPara
 	return err
 }
 
+const clearServedRevision = `-- name: ClearServedRevision :exec
+DELETE FROM served_revisions
+WHERE environment_service_id = $1 AND region = $2
+`
+
+type ClearServedRevisionParams struct {
+	EnvironmentServiceID uuid.UUID `json:"environment_service_id"`
+	Region               string    `json:"region"`
+}
+
+// Drop a slot's traffic pointer when the current deployment no longer declares
+// the region: shares the tx with the leftover drain batch, like the flip.
+func (q *Queries) ClearServedRevision(ctx context.Context, arg ClearServedRevisionParams) error {
+	_, err := q.db.ExecContext(ctx, clearServedRevision, arg.EnvironmentServiceID, arg.Region)
+	return err
+}
+
 const createReplica = `-- name: CreateReplica :one
 INSERT INTO replicas (deployment_id, region, cpu_millicores, mem_bytes, alloc_reason, volume_id)
 VALUES ($1, $2, $3, $4, $5, $6)

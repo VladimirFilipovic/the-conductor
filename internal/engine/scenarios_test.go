@@ -804,8 +804,9 @@ func TestScenarioMixedSnapshot(t *testing.T) {
 		{Kind: IntentCreate, Group: statelessSlot, DeploymentID: statelessV},
 		// stateful retires its old side — the traffic-switch moment
 		{Kind: IntentDrain, Group: statefulSlot, ReplicaID: outgoing, DeploymentID: statefulV, SwitchTraffic: true},
-		// orphan slot drains its leftovers; no current deployment, no switch
-		{Kind: IntentDrain, Group: orphanSlot, ReplicaID: orphan},
+		// orphan slot drains its leftovers; no current deployment, so the
+		// switch clears the region's pointer instead of flipping it
+		{Kind: IntentDrain, Group: orphanSlot, ReplicaID: orphan, SwitchTraffic: true},
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("tick intents = %v, want %v", got, want)
