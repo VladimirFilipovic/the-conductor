@@ -7,6 +7,7 @@ import {
   deploy,
   scale,
   addVolume,
+  rollback,
   type DeploySpec,
   type ServiceTarget,
 } from "@/lib/api";
@@ -79,6 +80,10 @@ export async function POST(req: NextRequest) {
             : undefined,
         );
         return NextResponse.json({ ok: true, version: res.version });
+      }
+      case "rollback": {
+        const res = await rollback(target(body), num(body.toVersion, 0) || undefined);
+        return NextResponse.json({ ok: true, version: res.to, from: res.from });
       }
       case "add_volume": {
         const v = volume(body);

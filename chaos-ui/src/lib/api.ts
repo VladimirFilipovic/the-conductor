@@ -300,6 +300,15 @@ export function scale(
   });
 }
 
+// Re-points the service at an earlier version's row, verbatim: image, limits
+// and that version's replica counts. toVersion omitted ⇒ the previous one.
+export function rollback(target: ServiceTarget, toVersion?: number) {
+  return post<{ ok: boolean; from: number; to: number }>(
+    "/v1/deployments/rollback",
+    { ...target, ...(toVersion && { to_version: toVersion }) },
+  );
+}
+
 // --- Volumes -----------------------------------------------------------------
 // Grow and its one-shot take-back. Every guard (grow-only, one grow in flight,
 // revert only from resize_pending) is the project layer's; a rejection comes

@@ -421,6 +421,54 @@ function BindForm({ onDone }: { onDone: () => void }) {
 const MB = 1024 * 1024;
 const DEFAULT_MOUNT = "/var/lib/postgresql/data";
 
+// Rollback takes an existing version as it was committed — its limits and its
+// replica counts too — so a resize or a scale that bumped the version is undone
+// by stepping back one.
+export function RollbackForm({
+  target,
+  label,
+  current,
+  onDone,
+}: {
+  target: ServiceTarget;
+  label: string;
+  current: number;
+  onDone: () => void;
+}) {
+  const { submit, busy } = useSubmit();
+  const [to, setTo] = useState(current - 1);
+  const valid = Number.isInteger(to) && to >= 1 && to !== current;
+  return (
+    <div className="panel-soft mt-3 space-y-2 p-3">
+      <div className="flex flex-wrap items-end gap-3">
+        <NumField label="to version" value={to} onChange={setTo} />
+        <button
+          className="btn btn-accent"
+          disabled={busy || !valid}
+          onClick={async () => {
+            if (
+              await submit(
+                { action: "rollback", ...target, toVersion: to },
+                `rollback ${label} from v${current}`,
+              )
+            )
+              onDone();
+          }}
+        >
+          Roll back to v{valid ? to : "?"}
+        </button>
+        <button className="btn" onClick={onDone}>
+          Cancel
+        </button>
+      </div>
+      <p className="text-xs text-[var(--color-muted)]">
+        now v{current} · the chosen version comes back with its own image,
+        limits and replica counts, rolled out like a deploy
+      </p>
+    </div>
+  );
+}
+
 // For a stateful service that is already running: the volume is created now,
 // but the engine binds a replica to its volume only when it creates one, so the
 // running replica moves onto the disk with the next deploy.
