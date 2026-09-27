@@ -159,10 +159,8 @@ body {
     background-color: rgba(133, 59, 206, 0.12);
   }
   .menu {
-    position: absolute;
-    right: 0;
-    top: calc(100% + 4px);
-    z-index: 30;
+    position: fixed;
+    z-index: 50;
     min-width: 15rem;
     padding: 0.25rem;
     border-radius: 10px;
