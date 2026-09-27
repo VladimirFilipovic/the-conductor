@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "@/lib/store";
 import { postJson } from "@/lib/http";
 import type { ServiceTarget } from "@/lib/api";
@@ -10,21 +10,34 @@ import { ActionMenu } from "@/components/ActionMenu";
 // local banner, so chaos and intent changes read as one timeline.
 function useSubmit() {
   const s = useStore();
-  return async (
+  const [busy, setBusy] = useState(false);
+  // The ref closes the gap before the disabled button re-renders: a double
+  // click would otherwise commit two deployment versions.
+  const inFlight = useRef(false);
+  const submit = async (
     body: Record<string, unknown>,
     label: string,
   ): Promise<boolean> => {
-    const { ok, data } = await postJson("/api/desired", body);
-    s.logChaos(
-      label,
-      ok
-        ? `${label} ok${data.version ? ` (v${data.version})` : ""}`
-        : `${label}: ${data.error ?? "failed"}`,
-      ok,
-    );
-    if (ok) s.refreshMeta();
-    return ok;
+    if (inFlight.current) return false;
+    inFlight.current = true;
+    setBusy(true);
+    try {
+      const { ok, data } = await postJson("/api/desired", body);
+      s.logChaos(
+        label,
+        ok
+          ? `${label} ok${data.version ? ` (v${data.version})` : ""}`
+          : `${label}: ${data.error ?? "failed"}`,
+        ok,
+      );
+      if (ok) s.refreshMeta();
+      return ok;
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+    }
   };
+  return { submit, busy };
 }
 
 const KINDS = [
@@ -84,7 +97,7 @@ function F({
 }
 
 function ProjectForm({ onDone }: { onDone: () => void }) {
-  const submit = useSubmit();
+  const { submit, busy } = useSubmit();
   const [name, setName] = useState("");
   const [env, setEnv] = useState("production");
   return (
@@ -106,7 +119,7 @@ function ProjectForm({ onDone }: { onDone: () => void }) {
       </F>
       <button
         className="btn btn-accent"
-        disabled={!name}
+        disabled={busy || !name}
         onClick={async () => {
           if (
             await submit(
@@ -127,7 +140,7 @@ function EnvironmentForm({ onDone }: { onDone: () => void }) {
   const s = useStore();
   const [project, setProject] = useState("");
   const [name, setName] = useState("");
-  const submit = useSubmit();
+  const { submit, busy } = useSubmit();
   useEffect(() => {
     if (s.project !== "all") setProject(s.project);
   }, [s.project]);
@@ -146,7 +159,7 @@ function EnvironmentForm({ onDone }: { onDone: () => void }) {
       </F>
       <button
         className="btn btn-accent"
-        disabled={!project || !name}
+        disabled={busy || !project || !name}
         onClick={async () => {
           if (
             await submit(
@@ -176,7 +189,7 @@ function ServiceForm({ onDone }: { onDone: () => void }) {
   const [imageRef, setImageRef] = useState("nginx:1.27");
   const [counts, setCounts] = useState<Record<string, number>>({});
   const spec = useDeploySpec();
-  const submit = useSubmit();
+  const { submit, busy } = useSubmit();
   useEffect(() => {
     if (s.project !== "all") setProject(s.project);
   }, [s.project]);
@@ -251,7 +264,7 @@ function ServiceForm({ onDone }: { onDone: () => void }) {
       )}
       <button
         className="btn btn-accent"
-        disabled={!ready}
+        disabled={busy || !ready}
         onClick={async () => {
           if (
             await submit(
@@ -280,7 +293,7 @@ function ServiceForm({ onDone }: { onDone: () => void }) {
 
 function BindForm({ onDone }: { onDone: () => void }) {
   const s = useStore();
-  const submit = useSubmit();
+  const { submit, busy } = useSubmit();
   const [project, setProject] = useState("");
   const [environmentId, setEnvironmentId] = useState("");
   const [serviceId, setServiceId] = useState("");
@@ -353,7 +366,7 @@ function BindForm({ onDone }: { onDone: () => void }) {
       </F>
       <button
         className="btn btn-accent"
-        disabled={!environmentId || !serviceId}
+        disabled={busy || !environmentId || !serviceId}
         onClick={async () => {
           if (
             await submit(
@@ -396,7 +409,7 @@ export function DeployForm({
   onDone: () => void;
 }) {
   const s = useStore();
-  const submit = useSubmit();
+  const { submit, busy } = useSubmit();
   const [imageRef, setImageRef] = useState(defaultImage || "nginx:1.27");
   const spec = useDeploySpec(limits);
   const [counts, setCounts] = useState<Record<string, number>>(() =>
@@ -419,7 +432,7 @@ export function DeployForm({
       <div className="flex items-center gap-2">
         <button
           className="btn btn-accent"
-          disabled={!imageRef}
+          disabled={busy || !imageRef}
           onClick={async () => {
             if (
               await submit(
@@ -467,7 +480,7 @@ export function ScaleForm({
   onDone: () => void;
 }) {
   const s = useStore();
-  const submit = useSubmit();
+  const { submit, busy } = useSubmit();
   const [counts, setCounts] = useState<Record<string, number>>(() =>
     Object.fromEntries(current.map((r) => [r.region, r.desired])),
   );
@@ -497,7 +510,7 @@ export function ScaleForm({
       <div className="flex items-center gap-2">
         <button
           className="btn btn-accent"
-          disabled={resizing && (cpu <= 0 || memMb <= 0)}
+          disabled={busy || (resizing && (cpu <= 0 || memMb <= 0))}
           onClick={async () => {
             if (
               await submit(
