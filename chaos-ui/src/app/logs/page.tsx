@@ -120,6 +120,13 @@ export default function LogsPage() {
 
       <div
         ref={scroller}
+        // Scrolling up to read pauses follow; returning to the bottom resumes
+        // it. Our own scroll-to-bottom lands at the bottom, so it never pauses.
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 8;
+          if (atBottom !== follow) setFollow(atBottom);
+        }}
         className="panel h-[calc(100vh-13rem)] overflow-y-auto p-3 font-mono text-xs"
       >
         {visible.length === 0 ? (
