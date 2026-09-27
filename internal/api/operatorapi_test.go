@@ -155,6 +155,7 @@ type fakeDesired struct {
 	volumeMount   string
 	volumeSize    int64
 	volumeAdd     project.AddVolumeInput
+	rollback      project.RollbackInput
 }
 
 func (f *fakeDesired) CreateProject(_ context.Context, name, env string) (db.Project, error) {
@@ -196,6 +197,11 @@ func (f *fakeDesired) Scale(_ context.Context, in project.ScaleInput) (project.S
 func (f *fakeDesired) ResizeVolume(_ context.Context, t target.Target, mount string, size int64) (project.ResizeOutcome, error) {
 	f.volumeTarget, f.volumeMount, f.volumeSize = t, mount, size
 	return f.resizeOutcome, f.err
+}
+
+func (f *fakeDesired) Rollback(_ context.Context, in project.RollbackInput) (project.RollbackResult, error) {
+	f.rollback = in
+	return project.RollbackResult{From: 3, To: 2}, f.err
 }
 
 func (f *fakeDesired) AddVolume(_ context.Context, in project.AddVolumeInput) (db.Volume, error) {

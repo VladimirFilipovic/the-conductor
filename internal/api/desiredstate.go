@@ -37,6 +37,7 @@ type DesiredState interface {
 	ResizeVolume(ctx context.Context, t target.Target, mountPath string, sizeBytes int64) (project.ResizeOutcome, error)
 	RevertVolume(ctx context.Context, t target.Target, mountPath string) (db.Volume, error)
 	AddVolume(ctx context.Context, in project.AddVolumeInput) (db.Volume, error)
+	Rollback(ctx context.Context, in project.RollbackInput) (project.RollbackResult, error)
 }
 
 // --- Requests ---------------------------------------------------------------
@@ -132,6 +133,13 @@ type volumeRevertRequest struct {
 	MountPath string `json:"mount_path"`
 }
 
+// ToVersion 0 rolls back to the version before the current one, as
+// `conductor rollback` without --to does.
+type rollbackRequest struct {
+	serviceTarget
+	ToVersion int32 `json:"to_version"`
+}
+
 type volumeAddRequest struct {
 	serviceTarget
 	volumeSpec
@@ -141,6 +149,12 @@ type volumeAddRequest struct {
 }
 
 // --- Responses --------------------------------------------------------------
+
+type rolledBackJSON struct {
+	OK   bool  `json:"ok"`
+	From int32 `json:"from"`
+	To   int32 `json:"to"`
+}
 
 type volumeAddedJSON struct {
 	ID               uuid.UUID `json:"id"`
@@ -392,7 +406,7 @@ func (o *OperatorAPI) resizeVolume(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := o.desired.ResizeVolume(r.Context(), req.target(), req.MountPath, req.SizeBytes)
 	if err != nil {
-		writeVolumeError(w, r, err)
+		writeStateError(w, r, err)
 		return
 	}
 	slog.Info("operatorapi -> volume resize requested", "target", req.serviceTarget,
@@ -413,12 +427,34 @@ func (o *OperatorAPI) revertVolume(w http.ResponseWriter, r *http.Request) {
 	}
 	vol, err := o.desired.RevertVolume(r.Context(), req.target(), req.MountPath)
 	if err != nil {
-		writeVolumeError(w, r, err)
+		writeStateError(w, r, err)
 		return
 	}
 	slog.Info("operatorapi -> volume grow reverted", "target", req.serviceTarget,
 		"mount", req.MountPath, "size_bytes", vol.DesiredSizeBytes)
 	writeJSON(w, http.StatusOK, volumeRevertedJSON{OK: true, DesiredSizeBytes: vol.DesiredSizeBytes})
+}
+
+func (o *OperatorAPI) rollback(w http.ResponseWriter, r *http.Request) {
+	var req rollbackRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := req.serviceTarget.validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.ToVersion < 0 {
+		writeError(w, http.StatusBadRequest, errors.New("to_version must not be negative"))
+		return
+	}
+	res, err := o.desired.Rollback(r.Context(), project.RollbackInput{Target: req.target(), ToVersion: req.ToVersion})
+	if err != nil {
+		writeStateError(w, r, err)
+		return
+	}
+	slog.Info("operatorapi -> rolled back", "target", req.serviceTarget, "from", res.From, "to", res.To)
+	writeJSON(w, http.StatusOK, rolledBackJSON{OK: true, From: res.From, To: res.To})
 }
 
 func (o *OperatorAPI) addVolume(w http.ResponseWriter, r *http.Request) {
@@ -434,7 +470,7 @@ func (o *OperatorAPI) addVolume(w http.ResponseWriter, r *http.Request) {
 		Target: req.target(), MountPath: req.MountPath, SizeBytes: req.SizeBytes, Region: req.Region,
 	})
 	if err != nil {
-		writeVolumeError(w, r, err)
+		writeStateError(w, r, err)
 		return
 	}
 	slog.Info("operatorapi -> volume added", "target", req.serviceTarget,
@@ -603,12 +639,12 @@ func writeDomainError(w http.ResponseWriter, r *http.Request, err error) {
 	}
 }
 
-// writeVolumeError differs from writeDomainError in one mapping: every
-// project.ErrInvalid a volume guard raises is a state conflict (a grow already
-// in flight, nothing to revert, shrink of a converged disk), not a malformed
-// request, so it is a 409 like restartReplica's — and the message goes through
-// verbatim, since it names the state and the way out ("revert first").
-func writeVolumeError(w http.ResponseWriter, r *http.Request, err error) {
+// writeStateError differs from writeDomainError in one mapping: every
+// project.ErrInvalid a volume guard or a rollback raises is a state conflict (a
+// grow already in flight, nothing to revert, already at that version), not a
+// malformed request, so it is a 409 like restartReplica's — and the message
+// goes through verbatim, since it names the state and the way out.
+func writeStateError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, storage.ErrNotFound):
 		writeError(w, http.StatusNotFound, err)

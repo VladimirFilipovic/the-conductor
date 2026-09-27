@@ -156,7 +156,7 @@ func TestRollback_AlreadyAtTarget(t *testing.T) {
 	f := newFake()
 
 	_, err := project.New(f).Rollback(context.Background(), project.RollbackInput{Target: tgt(), ToVersion: 3})
-	if err == nil || !strings.Contains(err.Error(), "already at v3") {
+	if !errors.Is(err, project.ErrInvalid) || !strings.Contains(err.Error(), "already at v3") {
 		t.Fatalf("want 'already at v3' error, got %v", err)
 	}
 	if f.marked {
@@ -168,7 +168,7 @@ func TestRollback_NoSuchVersion(t *testing.T) {
 	f := newFake()
 
 	_, err := project.New(f).Rollback(context.Background(), project.RollbackInput{Target: tgt(), ToVersion: 9})
-	if err == nil || !strings.Contains(err.Error(), "no such version v9") {
+	if !errors.Is(err, project.ErrInvalid) || !strings.Contains(err.Error(), "no such version v9") {
 		t.Fatalf("want 'no such version v9' error, got %v", err)
 	}
 	if f.marked {

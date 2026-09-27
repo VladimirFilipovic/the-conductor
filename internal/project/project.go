@@ -457,16 +457,16 @@ func rollback(ctx context.Context, st DeploymentStore, in RollbackInput) (Rollba
 	if target == 0 {
 		prev, err := st.PreviousDeploymentVersion(ctx, es.ID, current.Version)
 		if err != nil {
-			return RollbackResult{}, fmt.Errorf("no earlier version to roll back to (current is v%d)", current.Version)
+			return RollbackResult{}, fmt.Errorf("%w: no earlier version to roll back to (current is v%d)", ErrInvalid, current.Version)
 		}
 		target = prev
 	}
 	if target == current.Version {
-		return RollbackResult{}, fmt.Errorf("already at v%d", target)
+		return RollbackResult{}, fmt.Errorf("%w: already at v%d", ErrInvalid, target)
 	}
 	dep, err := st.GetDeploymentByVersion(ctx, es.ID, target)
 	if err != nil {
-		return RollbackResult{}, fmt.Errorf("no such version v%d", target)
+		return RollbackResult{}, fmt.Errorf("%w: no such version v%d", ErrInvalid, target)
 	}
 
 	if err := st.MarkCurrentRolledBack(ctx, es.ID); err != nil {

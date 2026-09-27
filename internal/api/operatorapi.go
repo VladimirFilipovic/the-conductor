@@ -99,6 +99,7 @@ func (o *OperatorAPI) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/environment-services", o.bindService)
 	mux.HandleFunc("POST /v1/deployments", o.deploy)
 	mux.HandleFunc("POST /v1/deployments/scale", o.scale)
+	mux.HandleFunc("POST /v1/deployments/rollback", o.rollback)
 	mux.HandleFunc("POST /v1/volumes/resize", o.resizeVolume)
 	mux.HandleFunc("POST /v1/volumes/revert", o.revertVolume)
 	mux.HandleFunc("POST /v1/volumes", o.addVolume)

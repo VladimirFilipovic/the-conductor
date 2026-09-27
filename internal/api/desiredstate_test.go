@@ -351,6 +351,48 @@ func TestCreateServiceCarriesVolume(t *testing.T) {
 	}
 }
 
+// Rollback re-points is_current; "already there" and "no such version" are the
+// project layer's state conflicts and reach the UI verbatim as 409.
+func TestRollbackStatusMapping(t *testing.T) {
+	body := `{"project":"acme","environment":"production","service":"web","to_version":2}`
+	already := fmt.Errorf("%w: already at v2", project.ErrInvalid)
+	tests := []struct {
+		name    string
+		body    string
+		err     error
+		want    int
+		wantErr string
+	}{
+		{"rolled back", body, nil, http.StatusOK, ""},
+		{"previous by default", `{"project":"acme","environment":"production","service":"web"}`, nil, http.StatusOK, ""},
+		{"already there", body, already, http.StatusConflict, already.Error()},
+		{"no deployment", body, storage.ErrNotFound, http.StatusNotFound, ""},
+		{"partial target", `{"project":"acme","to_version":1}`, nil, http.StatusBadRequest, ""},
+		{"negative version", `{"project":"acme","environment":"production","service":"web","to_version":-1}`, nil, http.StatusBadRequest, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			desired := &fakeDesired{err: tc.err}
+			rec := do(t, NewOperatorAPI(&fakeOperatorStore{}, desired), http.MethodPost, "/v1/deployments/rollback", tc.body)
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d (body %s)", rec.Code, tc.want, rec.Body)
+			}
+			if tc.wantErr != "" && decodeBody[errorJSON](t, rec).Error != tc.wantErr {
+				t.Errorf("error = %s, want %q verbatim", rec.Body, tc.wantErr)
+			}
+			if tc.want == http.StatusOK {
+				res := decodeBody[rolledBackJSON](t, rec)
+				if !res.OK || res.From != 3 || res.To != 2 {
+					t.Errorf("response = %+v", res)
+				}
+			}
+			if tc.want == http.StatusBadRequest && desired.rollback.Service != "" {
+				t.Error("a rejected request still reached the project layer")
+			}
+		})
+	}
+}
+
 func TestAddVolumeStatusMapping(t *testing.T) {
 	body := `{"project":"acme","environment":"production","service":"pg","mount_path":"/data","size_bytes":2147483648,"region":"us-west-2"}`
 	tests := []struct {
