@@ -76,6 +76,7 @@ export default function LogsPage() {
     if (!q) return true;
     return l.raw.toLowerCase().includes(q);
   });
+  const rows = fold(visible);
 
   return (
     <div className="space-y-4">
@@ -134,14 +135,50 @@ export default function LogsPage() {
             {lines.length === 0 ? "waiting for log lines…" : "no lines match the current filter"}
           </div>
         ) : (
-          visible.map((l) => <LogRow key={l.id} line={l} />)
+          rows.map((r) => (
+            <LogRow key={r.first.id} line={r.last} count={r.count} since={r.first.time} />
+          ))
         )}
       </div>
     </div>
   );
 }
 
-function LogRow({ line }: { line: LogLine }) {
+interface Folded {
+  first: LogLine;
+  last: LogLine;
+  count: number;
+}
+
+// The engine logs an identical snapshot line every tick; folding consecutive
+// repeats keeps the "still alive" signal without burying everything else.
+// Folding runs after filtering, so a hidden level never splits a run.
+function fold(lines: LogLine[]): Folded[] {
+  const out: Folded[] = [];
+  let prevSig = "";
+  for (const l of lines) {
+    const sig = `${l.level}|${l.msg}|${l.attrs.map((a) => `${a.key}=${a.value}`).join(" ")}`;
+    const top = out[out.length - 1];
+    if (top && sig === prevSig) {
+      top.last = l;
+      top.count++;
+    } else {
+      out.push({ first: l, last: l, count: 1 });
+    }
+    prevSig = sig;
+  }
+  return out;
+}
+
+function LogRow({
+  line,
+  count,
+  since,
+}: {
+  line: LogLine;
+  count: number;
+  since: string | null;
+}) {
   const level = (line.level ?? "INFO").toUpperCase();
   return (
     <div className="flex items-start gap-2.5 border-b border-[var(--color-border-soft)]/60 px-2 py-1 hover:bg-black/[0.03]">
@@ -154,6 +191,14 @@ function LogRow({ line }: { line: LogLine }) {
       <Badge className={`${levelClass(level)} w-14 shrink-0 justify-center`}>{level}</Badge>
       <div className="min-w-0 flex-1">
         <span className="text-[var(--color-fg)]">{line.msg ?? line.raw}</span>
+        {count > 1 && (
+          <span
+            className="ml-2 rounded bg-[rgba(133,59,206,0.1)] px-1.5 py-0.5 text-[0.68rem] text-[var(--color-accent-fg)]"
+            title={since ? `first at ${since}` : undefined}
+          >
+            ×{count}
+          </span>
+        )}
         {line.attrs.length > 0 && (
           <span className="ml-2 inline-flex flex-wrap gap-1.5 align-middle">
             {line.attrs.map((a, i) => (
