@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"conductor/internal/deployspec"
 	"conductor/internal/link"
@@ -35,6 +36,7 @@ type DesiredState interface {
 	// handlers translate JSON and map the sentinels.
 	ResizeVolume(ctx context.Context, t target.Target, mountPath string, sizeBytes int64) (project.ResizeOutcome, error)
 	RevertVolume(ctx context.Context, t target.Target, mountPath string) (db.Volume, error)
+	AddVolume(ctx context.Context, in project.AddVolumeInput) (db.Volume, error)
 }
 
 // --- Requests ---------------------------------------------------------------
@@ -63,6 +65,14 @@ type createServiceRequest struct {
 	Environment string         `json:"environment"`
 	Source      project.Source `json:"source"`
 	Deploy      *deploySpec    `json:"deploy"`
+	// Volume is created in the launch tx, before the first deploy, so the
+	// first replica is pinned to it.
+	Volume *volumeSpec `json:"volume"`
+}
+
+type volumeSpec struct {
+	MountPath string `json:"mount_path"`
+	SizeBytes int64  `json:"size_bytes"`
 }
 
 type bindServiceRequest struct {
@@ -122,7 +132,21 @@ type volumeRevertRequest struct {
 	MountPath string `json:"mount_path"`
 }
 
+type volumeAddRequest struct {
+	serviceTarget
+	volumeSpec
+	// Region should be where the service's replica runs: a volume elsewhere
+	// pins nothing. Empty takes the project default, as the CLI does.
+	Region string `json:"region"`
+}
+
 // --- Responses --------------------------------------------------------------
+
+type volumeAddedJSON struct {
+	ID               uuid.UUID `json:"id"`
+	Region           string    `json:"region"`
+	DesiredSizeBytes int64     `json:"desired_size_bytes"`
+}
 
 type projectCreatedJSON struct {
 	Name        string `json:"name"`
@@ -275,8 +299,11 @@ func (o *OperatorAPI) createService(w http.ResponseWriter, r *http.Request) {
 		in := req.Deploy.input(t, req.Source.Image)
 		dep = &in
 	}
-	svc, res, err := o.desired.LaunchService(r.Context(),
-		project.AddServiceInput{Target: t, Stateful: req.Stateful, Source: req.Source}, dep)
+	in := project.AddServiceInput{Target: t, Stateful: req.Stateful, Source: req.Source}
+	if req.Volume != nil {
+		in.Volume = &project.VolumeSpec{MountPath: req.Volume.MountPath, SizeBytes: req.Volume.SizeBytes}
+	}
+	svc, res, err := o.desired.LaunchService(r.Context(), in, dep)
 	if err != nil {
 		writeDomainError(w, r, err)
 		return
@@ -394,6 +421,27 @@ func (o *OperatorAPI) revertVolume(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, volumeRevertedJSON{OK: true, DesiredSizeBytes: vol.DesiredSizeBytes})
 }
 
+func (o *OperatorAPI) addVolume(w http.ResponseWriter, r *http.Request) {
+	var req volumeAddRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := req.validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	vol, err := o.desired.AddVolume(r.Context(), project.AddVolumeInput{
+		Target: req.target(), MountPath: req.MountPath, SizeBytes: req.SizeBytes, Region: req.Region,
+	})
+	if err != nil {
+		writeVolumeError(w, r, err)
+		return
+	}
+	slog.Info("operatorapi -> volume added", "target", req.serviceTarget,
+		"mount", req.MountPath, "region", vol.Region, "size_bytes", vol.DesiredSizeBytes)
+	writeJSON(w, http.StatusCreated, volumeAddedJSON{ID: vol.ID, Region: vol.Region, DesiredSizeBytes: vol.DesiredSizeBytes})
+}
+
 // --- Validation -------------------------------------------------------------
 
 func (t serviceTarget) target() target.Target {
@@ -450,6 +498,17 @@ func (r createServiceRequest) validate() error {
 	if r.Project == "" || r.Name == "" {
 		return errors.New("project and name are required")
 	}
+	if r.Volume != nil {
+		if r.Environment == "" {
+			return errors.New("volume needs an environment to bind the service into")
+		}
+		if !r.Stateful {
+			return errors.New("volume needs a stateful service")
+		}
+		if err := r.Volume.validate(); err != nil {
+			return err
+		}
+	}
 	if r.Deploy == nil {
 		return nil
 	}
@@ -483,6 +542,25 @@ func (r volumeResizeRequest) validate() error {
 		return errors.New("size_bytes must be positive")
 	}
 	return nil
+}
+
+// A volume's mount path is its identity inside the container, so it must be
+// absolute; size 0 takes the project default (1 GiB).
+func (v volumeSpec) validate() error {
+	if !strings.HasPrefix(v.MountPath, "/") {
+		return errors.New("mount_path must be an absolute path")
+	}
+	if v.SizeBytes < 0 {
+		return errors.New("size_bytes must not be negative")
+	}
+	return nil
+}
+
+func (r volumeAddRequest) validate() error {
+	if err := r.serviceTarget.validate(); err != nil {
+		return err
+	}
+	return r.volumeSpec.validate()
 }
 
 func (r volumeRevertRequest) validate() error {
@@ -534,7 +612,7 @@ func writeVolumeError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, storage.ErrNotFound):
 		writeError(w, http.StatusNotFound, err)
-	case errors.Is(err, project.ErrInvalid):
+	case errors.Is(err, project.ErrInvalid), errors.Is(err, storage.ErrExists):
 		writeError(w, http.StatusConflict, err)
 	default:
 		writeInternalError(w, r, err)

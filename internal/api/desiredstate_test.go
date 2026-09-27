@@ -311,3 +311,73 @@ func TestCreateServiceRejectsIncompleteLaunch(t *testing.T) {
 		})
 	}
 }
+
+// A stateful launch carries its volume into the same project call as the
+// first deploy; a volume the launch can't pin (no environment, stateless, a
+// relative mount) is refused before the project layer sees it.
+func TestCreateServiceCarriesVolume(t *testing.T) {
+	desired := &fakeDesired{}
+	body := `{"project":"acme","name":"pg","stateful":true,"environment":"production",
+	          "source":{"image":"postgres:16"},"volume":{"mount_path":"/var/lib/postgresql/data","size_bytes":2147483648},
+	          "deploy":{"cpu_millicores":500,"mem_bytes":536870912,"replicas":{"us-west-2":1}}}`
+	rec := do(t, NewOperatorAPI(&fakeOperatorStore{}, desired), http.MethodPost, "/v1/services", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body)
+	}
+	v := desired.launch.Volume
+	if v == nil || v.MountPath != "/var/lib/postgresql/data" || v.SizeBytes != 2<<30 {
+		t.Fatalf("launch volume = %+v", v)
+	}
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"no environment", `{"project":"a","name":"s","stateful":true,"volume":{"mount_path":"/d"}}`},
+		{"stateless", `{"project":"a","name":"s","environment":"e","volume":{"mount_path":"/d"}}`},
+		{"relative mount", `{"project":"a","name":"s","stateful":true,"environment":"e","volume":{"mount_path":"data"}}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			desired := &fakeDesired{}
+			rec := do(t, NewOperatorAPI(&fakeOperatorStore{}, desired), http.MethodPost, "/v1/services", tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body)
+			}
+			if desired.launch.Service != "" {
+				t.Error("a rejected launch still reached the project layer")
+			}
+		})
+	}
+}
+
+func TestAddVolumeStatusMapping(t *testing.T) {
+	body := `{"project":"acme","environment":"production","service":"pg","mount_path":"/data","size_bytes":2147483648,"region":"us-west-2"}`
+	tests := []struct {
+		name string
+		body string
+		err  error
+		want int
+	}{
+		{"added", body, nil, http.StatusCreated},
+		{"mount taken", body, storage.ErrExists, http.StatusConflict},
+		{"unbound service", body, storage.ErrNotFound, http.StatusNotFound},
+		{"relative mount", `{"project":"acme","environment":"production","service":"pg","mount_path":"data"}`, nil, http.StatusBadRequest},
+		{"partial target", `{"project":"acme","mount_path":"/data"}`, nil, http.StatusBadRequest},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			desired := &fakeDesired{err: tc.err}
+			rec := do(t, NewOperatorAPI(&fakeOperatorStore{}, desired), http.MethodPost, "/v1/volumes", tc.body)
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d (body %s)", rec.Code, tc.want, rec.Body)
+			}
+			if tc.want == http.StatusBadRequest && desired.volumeAdd.MountPath != "" {
+				t.Error("a rejected request still reached the project layer")
+			}
+			if tc.want == http.StatusCreated && desired.volumeAdd.Region != "us-west-2" {
+				t.Errorf("project layer got %+v, want the region passed through", desired.volumeAdd)
+			}
+		})
+	}
+}

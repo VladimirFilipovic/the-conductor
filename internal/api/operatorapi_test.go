@@ -154,6 +154,7 @@ type fakeDesired struct {
 	volumeTarget  target.Target
 	volumeMount   string
 	volumeSize    int64
+	volumeAdd     project.AddVolumeInput
 }
 
 func (f *fakeDesired) CreateProject(_ context.Context, name, env string) (db.Project, error) {
@@ -195,6 +196,11 @@ func (f *fakeDesired) Scale(_ context.Context, in project.ScaleInput) (project.S
 func (f *fakeDesired) ResizeVolume(_ context.Context, t target.Target, mount string, size int64) (project.ResizeOutcome, error) {
 	f.volumeTarget, f.volumeMount, f.volumeSize = t, mount, size
 	return f.resizeOutcome, f.err
+}
+
+func (f *fakeDesired) AddVolume(_ context.Context, in project.AddVolumeInput) (db.Volume, error) {
+	f.volumeAdd = in
+	return db.Volume{ID: uuid.New(), Region: in.Region, DesiredSizeBytes: in.SizeBytes}, f.err
 }
 
 func (f *fakeDesired) RevertVolume(_ context.Context, t target.Target, mount string) (db.Volume, error) {
