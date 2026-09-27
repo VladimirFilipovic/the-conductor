@@ -677,6 +677,43 @@ Measured (2026-09-19):
   "streaming from the engine" at +9.5s with a fresh tail from the new process
   (14 → 19 rows), no page reload
 
+### 13a. Launch in one step, resize from the Scale panel
+
+Requirement: a new service reaches a running first version from one form, and
+the Scale panel changes per-replica limits the way Railway's does — counts
+apply in place, a limit change is a new version of the same spec.
+
+```bash
+# Service form with environment + "deploy now" (what the UI posts)
+curl -XPOST localhost:3000/api/desired -d '{"action":"create_service","project":"env-demo","name":"api",
+  "environment":"production","imageRef":"nginx:1.27",
+  "deploy":{"cpuMillicores":250,"memBytes":268435456,"drainSeconds":20,"replicas":{"us-west-2":1}}}'
+# Scale panel: counts only → in place; new cpu/mem → v+1
+curl -XPOST localhost:3000/api/desired -d '{"action":"scale","project":"env-demo","environment":"production","service":"api","replicas":{"us-west-2":2}}'
+curl -XPOST localhost:3000/api/desired -d '{"action":"scale","project":"env-demo","environment":"production","service":"api","replicas":{"us-east-1":1},"cpuMillicores":1000,"memBytes":268435456}'
+```
+
+- create + bind + first deploy run in one apiserver tx (`LaunchService`); a
+  deploy the rules reject leaves no service behind
+- a resize re-commits the current row verbatim — image, env, healthcheck,
+  drain, restart budget, deadline — with the new limits, and the current region
+  counts patched by the request; limits equal to the current ones stay an
+  in-place scale (the form always sends the prefilled values)
+
+Measured (2026-09-27, docker stack):
+
+- stateful launch with 2 replicas → `400 … total replicas must be <= 1`, and
+  `pgx` absent from the service list afterwards (tx rolled back)
+- launch `api` → `{"version":1}`, v1 `active` 250m/256 MiB on `uw2-medium-1`
+  within 8s
+- counts-only scale and a scale repeating 250m/256 MiB → still only v1
+- resize to 1000m at 00:09:56 → `{"version":2}`; v2 row: same image,
+  `env {"FOO":"bar"}`, `healthcheck {"path":"/","timeout_s":5}`, drain 20,
+  restart 4, deadline 300, commit `resize v1: cpu 250m→1000m, mem 256→256 MiB`;
+  regions us-west-2=2 (kept) + us-east-1=1 (patched)
+- rollout: v2 replicas `active` 00:10:05 beside v1, v1 `draining` 00:10:07,
+  gone 00:10:26 (its 20s drain) → 3× v2 active
+
 ### 14. On Railway — same scenarios, real private network
 
 The stack from `.railway/railway.ts` (`railway config apply`): Postgres, engine,
