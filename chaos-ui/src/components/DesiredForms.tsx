@@ -163,9 +163,10 @@ function EnvironmentForm({ onDone }: { onDone: () => void }) {
   );
 }
 
-// Railway-style: one form from nothing to a running service. Environment and
-// image are optional — left empty, the service is only registered in the
-// project and bound per environment later ("Bind service to environment").
+// Railway-style: one form from nothing to a running service. Picking an
+// environment always deploys — a bound service with no deployment is just a
+// row to come back to. Left empty, the service is only registered in the
+// project and bound later ("Bind service to environment").
 function ServiceForm({ onDone }: { onDone: () => void }) {
   const s = useStore();
   const [project, setProject] = useState("");
@@ -173,7 +174,6 @@ function ServiceForm({ onDone }: { onDone: () => void }) {
   const [stateful, setStateful] = useState(false);
   const [environment, setEnvironment] = useState("");
   const [imageRef, setImageRef] = useState("nginx:1.27");
-  const [deployNow, setDeployNow] = useState(true);
   const [counts, setCounts] = useState<Record<string, number>>({});
   const spec = useDeploySpec();
   const submit = useSubmit();
@@ -182,16 +182,14 @@ function ServiceForm({ onDone }: { onDone: () => void }) {
   }, [s.project]);
 
   const envs = s.meta.environments.filter((e) => e.project_name === project);
-  const launching = environment !== "";
-  const deploying = launching && deployNow;
+  const deploying = environment !== "";
   const replicas = Object.fromEntries(
     Object.entries(counts).filter(([, v]) => v > 0),
   );
   const ready =
     project !== "" &&
     name !== "" &&
-    (!launching || imageRef !== "") &&
-    (!deploying || Object.keys(replicas).length > 0);
+    (!deploying || (imageRef !== "" && Object.keys(replicas).length > 0));
 
   return (
     <div className="space-y-3">
@@ -227,7 +225,7 @@ function ServiceForm({ onDone }: { onDone: () => void }) {
             ))}
           </select>
         </F>
-        {launching && (
+        {deploying && (
           <F label="image">
             <input
               className="input mono"
@@ -244,16 +242,6 @@ function ServiceForm({ onDone }: { onDone: () => void }) {
           />
           stateful
         </label>
-        {launching && (
-          <label className="flex items-center gap-2 pb-2 text-sm text-[var(--color-muted)]">
-            <input
-              type="checkbox"
-              checked={deployNow}
-              onChange={(e) => setDeployNow(e.target.checked)}
-            />
-            deploy now
-          </label>
-        )}
       </div>
       {deploying && (
         <>
@@ -278,17 +266,13 @@ function ServiceForm({ onDone }: { onDone: () => void }) {
                   ? spec.body(replicas, `chaos-ui:${s.session}`)
                   : undefined,
               },
-              deploying
-                ? "create + deploy service"
-                : launching
-                  ? "create + bind service"
-                  : "create service",
+              deploying ? "create + deploy service" : "create service",
             )
           )
             onDone();
         }}
       >
-        {deploying ? "Create & deploy" : launching ? "Create & bind" : "Create service"}
+        {deploying ? "Create & deploy" : "Create service"}
       </button>
     </div>
   );
