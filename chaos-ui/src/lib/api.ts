@@ -84,6 +84,10 @@ export interface HostRow {
   cpu_millicores: number;
   mem_bytes: number;
   disk_bytes: number;
+  // Volumes pack against this share of disk_bytes; the rest is ephemeral.
+  disk_budget_bytes: number;
+  // Allocated as the placer's ledger charges it (failed replicas included).
+  used: { cpu_millicores: number; mem_bytes: number; disk_bytes: number };
 }
 
 export interface ServedRow {

@@ -22,6 +22,7 @@ import {
   hostStatusClass,
   shortId,
   relativeTime,
+  formatGiB,
 } from "@/lib/ui";
 import type {
   Topology,
@@ -427,29 +428,109 @@ function HostsPanel({ hosts, chaos }: { hosts: HostRow[]; chaos: ChaosFn }) {
           </div>
         )}
         {hosts.map((h) => (
-          <div key={h.id} className="flex items-center gap-2 px-4 py-2.5">
-            <div className="min-w-0 flex-1">
-              <div className="mono truncate text-sm">{h.hostname}</div>
-              <div className="mono text-[0.68rem] text-[var(--color-faint)]">
-                {h.region} · hb {relativeTime(h.last_heartbeat)} ·{" "}
-                {h.replicas_on_host} repl
-                {h.status === "draining" && h.drain_started_at
-                  ? ` · draining since ${relativeTime(h.drain_started_at)}`
-                  : ""}
+          <div key={h.id} className="px-4 py-2.5">
+            <div className="flex items-center gap-2">
+              <div className="min-w-0 flex-1">
+                <div className="mono truncate text-sm">{h.hostname}</div>
+                <div className="mono text-[0.68rem] text-[var(--color-faint)]">
+                  {h.region} · hb {relativeTime(h.last_heartbeat)} ·{" "}
+                  {h.replicas_on_host} repl
+                  {h.status === "draining" && h.drain_started_at
+                    ? ` · draining since ${relativeTime(h.drain_started_at)}`
+                    : ""}
+                </div>
               </div>
+              <Badge className={hostHealthClass(h.host_healthy)}>
+                {h.host_healthy ? "healthy" : "unhealthy"}
+              </Badge>
+              {h.status !== "open" && (
+                <Badge className={hostStatusClass(h.status)}>{h.status}</Badge>
+              )}
+              <ActionMenu
+                items={toItems(HOST_ACTS, (a) => chaos(a, h.id, h.hostname))}
+              />
             </div>
-            <Badge className={hostHealthClass(h.host_healthy)}>
-              {h.host_healthy ? "healthy" : "unhealthy"}
-            </Badge>
-            {h.status !== "open" && (
-              <Badge className={hostStatusClass(h.status)}>{h.status}</Badge>
-            )}
-            <ActionMenu
-              items={toItems(HOST_ACTS, (a) => chaos(a, h.id, h.hostname))}
-            />
+            <HostUsage h={h} />
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+// Where the placer stops handing out room to *new* work (config.DefaultPlacement):
+// cpu/mem keep a 10% headroom that only replacements may use, and the last 20%
+// of the volume budget is held for grows. Past the tick, a fresh replica or
+// volume won't land here even though the bar isn't full.
+const CPU_MEM_HEADROOM = 0.1;
+const DISK_RESERVE = 0.2;
+
+function HostUsage({ h }: { h: HostRow }) {
+  const cores = (m: number) => `${Number((m / 1000).toFixed(2))}`;
+  return (
+    <div className="mt-1.5 space-y-1">
+      <UsageBar
+        label="cpu"
+        used={h.used.cpu_millicores}
+        cap={h.cpu_millicores}
+        reserve={CPU_MEM_HEADROOM}
+        text={`${cores(h.used.cpu_millicores)}/${cores(h.cpu_millicores)} cores`}
+      />
+      <UsageBar
+        label="mem"
+        used={h.used.mem_bytes}
+        cap={h.mem_bytes}
+        reserve={CPU_MEM_HEADROOM}
+        text={`${formatGiB(h.used.mem_bytes)}/${formatGiB(h.mem_bytes)}`}
+      />
+      <UsageBar
+        label="disk"
+        used={h.used.disk_bytes}
+        cap={h.disk_budget_bytes}
+        reserve={DISK_RESERVE}
+        text={`${formatGiB(h.used.disk_bytes)}/${formatGiB(h.disk_budget_bytes)}`}
+        title={`volume budget: ${formatGiB(h.disk_budget_bytes)} of ${formatGiB(h.disk_bytes)} disk`}
+      />
+    </div>
+  );
+}
+
+function UsageBar({
+  label,
+  used,
+  cap,
+  reserve,
+  text,
+  title,
+}: {
+  label: string;
+  used: number;
+  cap: number;
+  reserve: number;
+  text: string;
+  title?: string;
+}) {
+  const frac = cap > 0 ? used / cap : 0;
+  const tick = 1 - reserve;
+  const fill =
+    frac >= 1 ? "bg-red-500" : frac >= tick ? "bg-amber-500" : "bg-emerald-500";
+  return (
+    <div
+      className="grid grid-cols-[2.2rem_1fr_auto] items-center gap-2 text-[0.65rem]"
+      title={title ?? `${Math.round(frac * 100)}% allocated`}
+    >
+      <span className="mono text-[var(--color-faint)]">{label}</span>
+      <span className="relative h-1.5 overflow-hidden rounded-full bg-[var(--color-panel-2)] ring-1 ring-inset ring-[var(--color-border-soft)]">
+        <span
+          className={`absolute inset-y-0 left-0 ${fill}`}
+          style={{ width: `${Math.min(frac, 1) * 100}%` }}
+        />
+        <span
+          className="absolute inset-y-0 w-px bg-[var(--color-muted)] opacity-60"
+          style={{ left: `${tick * 100}%` }}
+        />
+      </span>
+      <span className="mono tabular-nums text-[var(--color-muted)]">{text}</span>
     </div>
   );
 }
