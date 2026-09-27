@@ -3,6 +3,7 @@ package project_test
 import (
 	"context"
 	"errors"
+	"maps"
 	"strings"
 	"testing"
 
@@ -61,8 +62,26 @@ type fakeStore struct {
 	prevErr   error
 	byVersion map[int32]db.GetDeploymentByVersionRow
 
+	regions map[uuid.UUID]map[string]int32 // deployment → region → replicas
+
 	marked       bool
 	setCurrentID uuid.UUID
+}
+
+func (f *fakeStore) ListDeploymentRegions(_ context.Context, id uuid.UUID) ([]db.ListDeploymentRegionsRow, error) {
+	var rows []db.ListDeploymentRegionsRow
+	for region, n := range f.regions[id] {
+		rows = append(rows, db.ListDeploymentRegionsRow{Region: region, Replicas: n})
+	}
+	return rows, nil
+}
+
+func (f *fakeStore) SetDeploymentRegion(_ context.Context, id uuid.UUID, region string, replicas int32) error {
+	if f.regions[id] == nil {
+		f.regions[id] = map[string]int32{}
+	}
+	f.regions[id][region] = replicas
+	return nil
 }
 
 func (f *fakeStore) WithTx(_ context.Context, fn func(storage.Querier) error) error {
@@ -111,6 +130,25 @@ func newFake() *fakeStore {
 			2: {ID: v2, Version: 2},
 			3: {ID: v3, Version: 3},
 		},
+		regions: map[uuid.UUID]map[string]int32{},
+	}
+}
+
+// Rollback reverts code, not scale: the promoted version takes today's counts,
+// and a region only it declared is zeroed so its leftovers drain.
+func TestRollback_KeepsCurrentReplicaCounts(t *testing.T) {
+	f := newFake()
+	v1, v3 := f.byVersion[1].ID, f.byVersion[3].ID
+	f.regions[v3] = map[string]int32{"eu-west-1": 2, "us-east-1": 3}
+	f.regions[v1] = map[string]int32{"eu-west-1": 4, "ap-south-1": 2}
+
+	if _, err := project.New(f).Rollback(context.Background(), project.RollbackInput{Target: tgt(), ToVersion: 1}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := map[string]int32{"eu-west-1": 2, "us-east-1": 3, "ap-south-1": 0}
+	if !maps.Equal(f.regions[v1], want) {
+		t.Errorf("v1 regions = %v, want %v", f.regions[v1], want)
 	}
 }
 

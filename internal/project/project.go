@@ -431,7 +431,8 @@ type RollbackResult struct {
 
 // Rollback re-points is_current to an EXISTING earlier deployment in one tx —
 // no rebuild, no new row; image_ref/env/sizing are reused verbatim (config.toml
-// is never consulted). Unknown target or no current deployment ⇒
+// is never consulted), while the current replica counts carry over onto it.
+// Unknown target or no current deployment ⇒
 // storage.ErrNotFound; rolling back to the current version is rejected.
 func (s *Service) Rollback(ctx context.Context, in RollbackInput) (RollbackResult, error) {
 	var res RollbackResult
@@ -469,6 +470,9 @@ func rollback(ctx context.Context, st DeploymentStore, in RollbackInput) (Rollba
 		return RollbackResult{}, fmt.Errorf("%w: no such version v%d", ErrInvalid, target)
 	}
 
+	if err := carryRegionCounts(ctx, st, current.ID, dep.ID); err != nil {
+		return RollbackResult{}, err
+	}
 	if err := st.MarkCurrentRolledBack(ctx, es.ID); err != nil {
 		return RollbackResult{}, err
 	}
@@ -476,6 +480,37 @@ func rollback(ctx context.Context, st DeploymentStore, in RollbackInput) (Rollba
 		return RollbackResult{}, err
 	}
 	return RollbackResult{From: current.Version, To: dep.Version}, nil
+}
+
+// carryRegionCounts makes replica counts survive a rollback: scale patches the
+// current version's counts in place, so the older row holds whatever it was
+// last scaled to — not an operator choice anyone remembers. Rollback reverts
+// the code (image, env, limits), never the scale. A region only the older
+// version declares is zeroed rather than deleted: its replicas' FK still
+// points at the row, and 0 lets the reconciler drain them.
+func carryRegionCounts(ctx context.Context, st DeploymentStore, fromID, toID uuid.UUID) error {
+	from, err := st.ListDeploymentRegions(ctx, fromID)
+	if err != nil {
+		return err
+	}
+	to, err := st.ListDeploymentRegions(ctx, toID)
+	if err != nil {
+		return err
+	}
+	counts := make(map[string]int32, len(from)+len(to))
+	for _, r := range to {
+		counts[r.Region] = 0
+	}
+	for _, r := range from {
+		counts[r.Region] = r.Replicas
+	}
+	// Sorted so concurrent writers take row locks in one order.
+	for _, region := range sortedRegions(counts) {
+		if err := st.SetDeploymentRegion(ctx, toID, region, counts[region]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func orEmptyJSON(raw json.RawMessage) json.RawMessage {

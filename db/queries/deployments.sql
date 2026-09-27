@@ -43,8 +43,9 @@ ON CONFLICT (deployment_id, region) DO UPDATE SET replicas = EXCLUDED.replicas;
 
 -- Rollback (`conductor rollback`): re-point is_current to an EXISTING older
 -- deployment, no rebuild. The target row's image_ref/env/sizing are reused
--- verbatim — rollback never re-reads config.toml. The engine then converges to
--- it like any other current deployment.
+-- verbatim — rollback never re-reads config.toml — while the current region
+-- counts are copied onto it. The engine then converges to it like any other
+-- current deployment.
 
 -- name: GetCurrentDeployment :one
 SELECT id, version FROM deployments

@@ -12,7 +12,8 @@ const rollbackUsage = `conductor rollback [--to vN] [-p P -e E -s S]
 
 Re-point the service at an EARLIER deployment version — no rebuild. The target
 version's image and settings are reused verbatim (rollback never reads
-config.toml), and the reconcile loop converges to it. Defaults to the version
+config.toml), except replica counts: the current ones carry over, since
+rollback reverts code, not scale. The reconcile loop converges to it. Defaults to the version
 just before the current one; --to picks a specific past version.
 
 This is the analog of a fresh 'conductor up' in reverse: up appends a new
