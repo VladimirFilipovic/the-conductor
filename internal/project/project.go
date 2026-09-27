@@ -173,6 +173,9 @@ type AddServiceInput struct {
 	target.Target
 	Stateful bool
 	Source   Source
+	// Volume is honoured by LaunchService only; stateful services alone may
+	// carry one.
+	Volume *VolumeSpec
 }
 
 // AddService creates the service and binds it to the environment in one tx;
@@ -220,9 +223,24 @@ func (s *Service) LaunchService(ctx context.Context, in AddServiceInput, dep *De
 		svc db.Service
 		res *DeployResult
 	)
+	if in.Volume != nil && !in.Stateful {
+		return db.Service{}, nil, fmt.Errorf("%w: a volume needs a stateful service", ErrInvalid)
+	}
 	err = s.store.WithTx(ctx, func(st storage.Querier) error {
-		if svc, err = addService(ctx, st, in, source); err != nil || dep == nil {
+		if svc, err = addService(ctx, st, in, source); err != nil {
 			return err
+		}
+		if in.Volume != nil {
+			_, err := addVolume(ctx, st, AddVolumeInput{
+				Target: in.Target, MountPath: in.Volume.MountPath,
+				SizeBytes: in.Volume.SizeBytes, Region: launchVolumeRegion(dep),
+			})
+			if err != nil {
+				return err
+			}
+		}
+		if dep == nil {
+			return nil
 		}
 		spec := *dep
 		spec.Target = in.Target

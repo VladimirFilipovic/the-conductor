@@ -26,8 +26,20 @@ const (
 
 // AddVolumeInput: the mount path is the volume's user-facing identity;
 // SizeBytes 0 ⇒ defaultVolumeSizeBytes, mutable afterward via ResizeVolume.
+// Region empty ⇒ defaultVolumeRegion; a replica is pinned only to a volume in
+// its own region, so a caller that knows where the service runs passes it.
 type AddVolumeInput struct {
 	target.Target
+	MountPath string
+	SizeBytes int64
+	Region    string
+}
+
+// VolumeSpec is a volume created with a service launch, before its first
+// deploy: the engine binds a replica to its slot's volume only at create time,
+// so a volume added after the first replica exists pins nothing until the
+// next deploy.
+type VolumeSpec struct {
 	MountPath string
 	SizeBytes int64
 }
@@ -38,7 +50,14 @@ type AddVolumeInput struct {
 // same environment ⇒ storage.ErrExists (the same mount in another environment
 // is a different disk).
 func (s *Service) AddVolume(ctx context.Context, in AddVolumeInput) (db.Volume, error) {
-	id, err := environmentServiceID(ctx, s.store, in.Target)
+	return addVolume(ctx, s.store, in)
+}
+
+func addVolume(ctx context.Context, st interface {
+	DeploymentStore
+	VolumeStore
+}, in AddVolumeInput) (db.Volume, error) {
+	id, err := environmentServiceID(ctx, st, in.Target)
 	if err != nil {
 		return db.Volume{}, err
 	}
@@ -46,7 +65,25 @@ func (s *Service) AddVolume(ctx context.Context, in AddVolumeInput) (db.Volume, 
 	if size <= 0 {
 		size = defaultVolumeSizeBytes
 	}
-	return s.store.CreateVolume(ctx, id, volumeName(in.MountPath), defaultVolumeRegion, in.MountPath, size)
+	region := in.Region
+	if region == "" {
+		region = defaultVolumeRegion
+	}
+	return st.CreateVolume(ctx, id, volumeName(in.MountPath), region, in.MountPath, size)
+}
+
+// launchVolumeRegion puts a launch's volume where its one replica will run: a
+// stateful deploy is single-instance, so at most one region has a count.
+func launchVolumeRegion(dep *DeployInput) string {
+	if dep == nil {
+		return ""
+	}
+	for region, n := range dep.Replicas {
+		if n > 0 {
+			return region
+		}
+	}
+	return ""
 }
 
 // ListVolumes returns the environment service's volumes, ordered by mount
