@@ -222,13 +222,25 @@ export function createEnvironment(project: string, name: string) {
 // (the service being created) and the image (the binding's source.image).
 export type DeploySpec = Omit<DeployInput, keyof ServiceTarget | "image_ref">;
 
+export interface VolumeSpec {
+  mount_path: string;
+  size_bytes: number;
+}
+
 // launch, when given, binds the new service into that environment and — with
 // a deploy spec — commits its first version, all in one apiserver transaction.
+// A stateful launch's volume is created in that same tx, before the first
+// replica, so the replica is pinned to it.
 export function createService(
   project: string,
   name: string,
   stateful: boolean,
-  launch?: { environment: string; image: string; deploy?: DeploySpec },
+  launch?: {
+    environment: string;
+    image: string;
+    deploy?: DeploySpec;
+    volume?: VolumeSpec;
+  },
 ) {
   return post<ServiceRef & { version?: number }>("/v1/services", {
     project,
@@ -238,6 +250,7 @@ export function createService(
       environment: launch.environment,
       source: { image: launch.image },
       deploy: launch.deploy,
+      volume: launch.volume,
     }),
   });
 }
@@ -310,6 +323,20 @@ export function resizeVolume(
     mount_path: mountPath,
     size_bytes: sizeBytes,
   });
+}
+
+// region should be where the service's replica runs; empty takes the project
+// default (us-east-1), as `conductor volume add` does.
+export function addVolume(
+  target: ServiceTarget,
+  mountPath: string,
+  sizeBytes: number,
+  region?: string,
+) {
+  return post<{ id: string; region: string; desired_size_bytes: number }>(
+    "/v1/volumes",
+    { ...target, mount_path: mountPath, size_bytes: sizeBytes, ...(region && { region }) },
+  );
 }
 
 export function revertVolume(target: ServiceTarget, mountPath: string) {

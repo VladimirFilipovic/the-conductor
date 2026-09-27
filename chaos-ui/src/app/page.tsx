@@ -13,6 +13,7 @@ import {
   CreateForm,
   DeployForm,
   ScaleForm,
+  AddVolumeForm,
   type CreateKind,
 } from "@/components/DesiredForms";
 import {
@@ -236,8 +237,12 @@ function ServiceRow({
   const path = `${target.project}/${target.environment}/${target.service}`;
   const d = svc.deployment;
   const limits = d ? { cpu: d.cpu_millicores, memBytes: d.mem_bytes } : undefined;
-  const [form, setForm] = useState<"deploy" | "scale" | null>(null);
-  const toggle = (f: "deploy" | "scale") => setForm(form === f ? null : f);
+  const [form, setForm] = useState<"deploy" | "scale" | "volume" | null>(null);
+  const toggle = (f: "deploy" | "scale" | "volume") => setForm(form === f ? null : f);
+  // A volume pins only replicas in its own region; a stateful service runs one
+  // instance, so its region is the one with a desired count.
+  const volumeRegion =
+    svc.regions.find((r) => r.desired > 0)?.region ?? svc.regions[0]?.region;
 
   const desired = svc.regions.reduce((n, r) => n + r.desired, 0);
   const healthy = svc.regions.reduce((n, r) => n + r.healthy, 0);
@@ -266,6 +271,16 @@ function ServiceRow({
             label: "Scale",
             hint: "Patch per-region replica counts.",
             onSelect: () => toggle("scale"),
+          },
+        ]
+      : []),
+    ...(svc.stateful
+      ? [
+          {
+            key: "volume",
+            label: "Add volume…",
+            hint: "New disk for this environment; the next deploy pins the replica to it.",
+            onSelect: () => toggle("volume"),
           },
         ]
       : []),
@@ -341,6 +356,15 @@ function ServiceRow({
           defaultImage={d?.image_ref}
           limits={limits}
           current={svc.regions}
+          onDone={() => setForm(null)}
+        />
+      )}
+      {form === "volume" && (
+        <AddVolumeForm
+          target={target}
+          label={path}
+          region={volumeRegion}
+          running={svc.replicas.length > 0}
           onDone={() => setForm(null)}
         />
       )}

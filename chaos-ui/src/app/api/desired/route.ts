@@ -6,6 +6,7 @@ import {
   bindService,
   deploy,
   scale,
+  addVolume,
   type DeploySpec,
   type ServiceTarget,
 } from "@/lib/api";
@@ -45,6 +46,7 @@ export async function POST(req: NextRequest) {
                 environment,
                 image: str(body.imageRef),
                 deploy: body.deploy ? spec(body.deploy as Record<string, unknown>) : undefined,
+                volume: body.volume ? volume(body.volume as Record<string, unknown>) : undefined,
               }
             : undefined,
         );
@@ -78,6 +80,11 @@ export async function POST(req: NextRequest) {
         );
         return NextResponse.json({ ok: true, version: res.version });
       }
+      case "add_volume": {
+        const v = volume(body);
+        await addVolume(target(body), v.mount_path, v.size_bytes, str(body.region) || undefined);
+        break;
+      }
       default:
         return NextResponse.json({ error: `unknown action ${action}` }, { status: 400 });
     }
@@ -85,6 +92,10 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     return failed(err);
   }
+}
+
+function volume(body: Record<string, unknown>) {
+  return { mount_path: str(body.mount_path), size_bytes: num(body.size_bytes, 0) };
 }
 
 function spec(body: Record<string, unknown>): DeploySpec {

@@ -5,6 +5,7 @@ import { useStore } from "@/lib/store";
 import { postJson } from "@/lib/http";
 import type { ServiceTarget } from "@/lib/api";
 import { ActionMenu } from "@/components/ActionMenu";
+import { GiB } from "@/lib/ui";
 
 // All desired-state mutations report into the shared activity log instead of a
 // local banner, so chaos and intent changes read as one timeline.
@@ -187,6 +188,8 @@ function ServiceForm({ onDone }: { onDone: () => void }) {
   const [stateful, setStateful] = useState(false);
   const [environment, setEnvironment] = useState("");
   const [imageRef, setImageRef] = useState("nginx:1.27");
+  const [mountPath, setMountPath] = useState(DEFAULT_MOUNT);
+  const [volGiB, setVolGiB] = useState(2);
   const [counts, setCounts] = useState<Record<string, number>>({});
   const spec = useDeploySpec();
   const { submit, busy } = useSubmit();
@@ -202,13 +205,18 @@ function ServiceForm({ onDone }: { onDone: () => void }) {
 
   const envs = s.meta.environments.filter((e) => e.project_name === project);
   const deploying = environment !== "";
+  // A stateful service's disk has to exist before its first replica, so the
+  // volume rides the launch; without an environment there's nothing to bind
+  // it to yet.
+  const withVolume = stateful && deploying;
   const replicas = Object.fromEntries(
     Object.entries(counts).filter(([, v]) => v > 0),
   );
   const ready =
     project !== "" &&
     name !== "" &&
-    (!deploying || (imageRef !== "" && Object.keys(replicas).length > 0));
+    (!deploying || (imageRef !== "" && Object.keys(replicas).length > 0)) &&
+    (!withVolume || (mountPath.startsWith("/") && volGiB > 0));
 
   return (
     <div className="space-y-3">
@@ -262,6 +270,18 @@ function ServiceForm({ onDone }: { onDone: () => void }) {
           stateful
         </label>
       </div>
+      {withVolume && (
+        <div className="flex flex-wrap items-end gap-3">
+          <F label="volume mount" wide>
+            <input
+              className="input mono"
+              value={mountPath}
+              onChange={(e) => setMountPath(e.target.value)}
+            />
+          </F>
+          <NumField label="size (GiB)" value={volGiB} onChange={setVolGiB} />
+        </div>
+      )}
       {deploying && (
         <>
           {spec.fields}
@@ -283,6 +303,9 @@ function ServiceForm({ onDone }: { onDone: () => void }) {
                 imageRef,
                 deploy: deploying
                   ? spec.body(replicas, `chaos-ui:${s.session}`)
+                  : undefined,
+                volume: withVolume
+                  ? { mount_path: mountPath, size_bytes: volGiB * GiB }
                   : undefined,
               },
               deploying ? "create + deploy service" : "create service",
@@ -396,6 +419,71 @@ function BindForm({ onDone }: { onDone: () => void }) {
 }
 
 const MB = 1024 * 1024;
+const DEFAULT_MOUNT = "/var/lib/postgresql/data";
+
+// For a stateful service that is already running: the volume is created now,
+// but the engine binds a replica to its volume only when it creates one, so the
+// running replica moves onto the disk with the next deploy.
+export function AddVolumeForm({
+  target,
+  label,
+  region,
+  running,
+  onDone,
+}: {
+  target: ServiceTarget;
+  label: string;
+  region?: string;
+  running: boolean;
+  onDone: () => void;
+}) {
+  const { submit, busy } = useSubmit();
+  const [mountPath, setMountPath] = useState(DEFAULT_MOUNT);
+  const [gib, setGib] = useState(2);
+  return (
+    <div className="panel-soft mt-3 space-y-2 p-3">
+      <div className="flex flex-wrap items-end gap-3">
+        <F label="mount path" wide>
+          <input
+            className="input mono"
+            value={mountPath}
+            onChange={(e) => setMountPath(e.target.value)}
+          />
+        </F>
+        <NumField label="size (GiB)" value={gib} onChange={setGib} />
+        <button
+          className="btn btn-accent"
+          disabled={busy || !mountPath.startsWith("/") || gib <= 0}
+          onClick={async () => {
+            if (
+              await submit(
+                {
+                  action: "add_volume",
+                  ...target,
+                  mount_path: mountPath,
+                  size_bytes: gib * GiB,
+                  region,
+                },
+                `add volume ${label}:${mountPath}`,
+              )
+            )
+              onDone();
+          }}
+        >
+          Add volume
+        </button>
+        <button className="btn" onClick={onDone}>
+          Cancel
+        </button>
+      </div>
+      <p className="text-xs text-[var(--color-muted)]">
+        {region ? `lands in ${region}` : "lands in us-east-1"}
+        {running &&
+          " · the running replica isn't on it yet; Deploy new version moves it onto the disk"}
+      </p>
+    </div>
+  );
+}
 
 // Inline per-service deploy — the service row already pins esId, so the form
 // only asks for the deployment spec itself.
