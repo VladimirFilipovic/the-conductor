@@ -95,6 +95,13 @@ func TestBuildReplicaGroupsBucketsDrainedTargetAsOutgoing(t *testing.T) {
 }
 
 // --- planIntents dispatch mechanics ---
+
+// planIntents flattens fireRules for tests that only care which intents a
+// cascade emits, not how they are logged.
+func (r *Reconciler) planIntents(groups []replicaGroup) []Intent {
+	return intentsOf(r.fireRules(groups))
+}
+
 //
 // Stub rules mint sentinel IntentKinds, isolating dispatch from domain logic:
 // a failure here can only mean the loop or the cascade switch — never a rule.

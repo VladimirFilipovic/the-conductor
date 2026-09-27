@@ -139,8 +139,9 @@ func NewReconciler(placement config.Placement) *Reconciler {
 }
 
 func (r *Reconciler) Reconcile(snap stateSnapshot) []Intent {
-	intents := r.planIntents(buildReplicaGroups(snap))
-	intents = r.placer.placeHostless(snap, intents)
+	firings := r.fireRules(buildReplicaGroups(snap))
+	intents := r.placer.placeHostless(snap, intentsOf(firings))
+	logFirings(firings, intents)
 	intents = append(intents, r.placer.planVolumes(snap)...)
 	return intents
 }
@@ -202,8 +203,16 @@ func buildReplicaGroups(snap stateSnapshot) []replicaGroup {
 	return groups
 }
 
-func (r *Reconciler) planIntents(groups []replicaGroup) []Intent {
-	var intents []Intent
+// ruleFiring is one group's verdict for the tick, kept past planning so the
+// log can report what survived placement rather than what the rule asked for.
+type ruleFiring struct {
+	group   replicaGroup
+	rule    string
+	intents []Intent
+}
+
+func (r *Reconciler) fireRules(groups []replicaGroup) []ruleFiring {
+	var firings []ruleFiring
 	for _, rg := range groups {
 		var rules []rule
 		switch {
@@ -216,38 +225,64 @@ func (r *Reconciler) planIntents(groups []replicaGroup) []Intent {
 		}
 		for _, rl := range rules {
 			if rl.when(rg) {
-				out := rl.then(rg)
-				intents = append(intents, out...)
-				logRuleFired(rg, rl.name, out)
+				firings = append(firings, ruleFiring{group: rg, rule: rl.name, intents: rl.then(rg)})
 				break // one active rule per group per tick
 			}
 		}
 	}
+	return firings
+}
+
+func intentsOf(firings []ruleFiring) []Intent {
+	var intents []Intent
+	for _, f := range firings {
+		intents = append(intents, f.intents...)
+	}
 	return intents
 }
 
-// logRuleFired keeps the tick log usable: holds (skip) recur every tick while a
+// logFirings keeps the tick log usable: holds (skip) recur every tick while a
 // group waits, so they go to Debug; anything that changes state is rare and
-// goes to Info. No rule matching at all is steady state and logs nothing.
-func logRuleFired(rg replicaGroup, ruleName string, out []Intent) {
-	kinds := make([]string, len(out))
-	hold := true
-	for i, it := range out {
-		kinds[i] = string(it.Kind)
-		hold = hold && it.Kind == IntentSkip
+// goes to Info. An assign_host the placer dropped (nothing fits) is a hold
+// too — it retries every tick until capacity appears. No rule matching at all
+// is steady state and logs nothing.
+func logFirings(firings []ruleFiring, placed []Intent) {
+	assigned := make(map[uuid.UUID]bool)
+	for _, it := range placed {
+		if it.Kind == IntentAssignHost {
+			assigned[it.ReplicaID] = true
+		}
 	}
-	logFn := slog.Info
-	if hold {
-		logFn = slog.Debug
+	for _, f := range firings {
+		var kinds []string
+		unplaced := 0
+		hold := true
+		for _, it := range f.intents {
+			if it.Kind == IntentAssignHost && !assigned[it.ReplicaID] {
+				unplaced++
+				continue
+			}
+			kinds = append(kinds, string(it.Kind))
+			hold = hold && it.Kind == IntentSkip
+		}
+		logFn := slog.Info
+		if hold {
+			logFn = slog.Debug
+		}
+		args := []any{
+			"rule", f.rule,
+			"service", f.group.Desired.Slot.EnvironmentServiceID,
+			"region", f.group.Desired.Slot.Region,
+			"intents", kinds,
+		}
+		if unplaced > 0 {
+			args = append(args, "unplaced", unplaced)
+		}
+		logFn("reconcile -> rule fired", args...)
 	}
-	logFn("reconcile -> rule fired",
-		"rule", ruleName,
-		"service", rg.Desired.Slot.EnvironmentServiceID,
-		"region", rg.Desired.Slot.Region,
-		"intents", kinds)
 }
 
-// Cascades list rules in tick-priority order; planIntents runs the first whose
+// Cascades list rules in tick-priority order; fireRules runs the first whose
 // `when` matches and stops (one active rule per group per tick).
 
 var rollingCascade = []rule{
